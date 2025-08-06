@@ -56,7 +56,6 @@ def create_real_dataset():
 
             # Rasterize
             raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
-            raster = np.expand_dims(raster, axis=-1)  # Add channel dimension
 
             # Vectorize
             unrelaxed_svg = glyph.vectorize()
@@ -150,7 +149,7 @@ def create_real_dataset():
 
 
 class ImageGenerationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, log_dir, test_dataset, num_images=1):
+    def __init__(self, log_dir, test_dataset, num_images=3):
         super().__init__()
         self.file_writer = tf.summary.create_file_writer(log_dir + "/images")
         self.test_dataset = test_dataset.unbatch().take(num_images)
@@ -168,6 +167,12 @@ class ImageGenerationCallback(tf.keras.callbacks.Callback):
             # Predict generated raster
             generated_raster, _, _ = self.model(
                 (style_image, glyph_id, target_sequence)
+            )
+            true_raster = tf.expand_dims(true_raster, axis=0)
+
+            assert true_raster.shape == generated_raster.shape, (
+                f"Shape mismatch: true_raster {true_raster.shape}, "
+                f"generated_raster {generated_raster.shape}"
             )
 
             with self.file_writer.as_default():

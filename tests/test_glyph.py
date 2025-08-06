@@ -16,6 +16,12 @@ def test_glyph_extraction():
     # Check the size of the rasterized numpy array
     assert rasterized_glyph.shape == (*GEN_IMAGE_SIZE, 1)
 
+    # import matplotlib.pyplot as plt
+
+    # plt.imshow(rasterized_glyph.squeeze(), cmap="gray")
+    # plt.axis("off")
+    # plt.show()
+
     # Vectorize the glyph
     vectorized_glyph = glyph.vectorize()
 
