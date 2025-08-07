@@ -93,6 +93,7 @@ def create_look_ahead_mask(size):
 
 
 # This model is used for pre-training the vectorizer independently.
+@keras.saving.register_keras_serializable()
 class VectorizationGenerator(keras.Model):
     def __init__(
         self,
@@ -165,6 +166,30 @@ class VectorizationGenerator(keras.Model):
         z = self.output_dense(x)
         return z
 
+    def compile(
+        self,
+        optimizer,
+        vector_command_loss_fn,
+        vector_coord_loss_fn,
+        **kwargs,
+    ):
+        super().compile(optimizer=optimizer, **kwargs)
+        self.vector_command_loss_fn = vector_command_loss_fn
+        self.vector_coord_loss_fn = vector_coord_loss_fn
+        self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
+        self.vector_command_loss_tracker = keras.metrics.Mean(
+            name="vector_command_loss"
+        )
+        self.vector_coord_loss_tracker = keras.metrics.Mean(name="vector_coord_loss")
+
+    @property
+    def metrics(self):
+        return [
+            self.total_loss_tracker,
+            self.vector_command_loss_tracker,
+            self.vector_coord_loss_tracker,
+        ]
+
     def call(self, inputs, training=False):
         raster_image_input, target_sequence_input = inputs
         z = self.encode(raster_image_input)
@@ -178,6 +203,64 @@ class VectorizationGenerator(keras.Model):
             training=training,
         )
         return command_output, coord_output
+
+    def train_step(self, data):
+        (
+            raster_image_input,
+            target_sequence_input,
+        ), (
+            true_command,
+            true_coord,
+        ) = data
+
+        with tf.GradientTape() as tape:
+            command_output, coord_output = self(
+                (raster_image_input, target_sequence_input),
+                training=True,
+            )
+
+            vector_command_loss = self.vector_command_loss_fn(
+                true_command, command_output
+            )
+            vector_coord_loss = self.vector_coord_loss_fn(true_coord, coord_output)
+
+            total_loss = vector_command_loss + vector_coord_loss
+
+        grads = tape.gradient(total_loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+
+        self.total_loss_tracker.update_state(total_loss)
+        self.vector_command_loss_tracker.update_state(vector_command_loss)
+        self.vector_coord_loss_tracker.update_state(vector_coord_loss)
+
+        return {m.name: m.result() for m in self.metrics}
+
+    def test_step(self, data):
+        (
+            raster_image_input,
+            target_sequence_input,
+        ), (
+            true_command,
+            true_coord,
+        ) = data
+
+        command_output, coord_output = self(
+            (raster_image_input, target_sequence_input),
+            training=False,
+        )
+
+        vector_command_loss = self.vector_command_loss_fn(
+            true_command, command_output
+        )
+        vector_coord_loss = self.vector_coord_loss_fn(true_coord, coord_output)
+
+        total_loss = vector_command_loss + vector_coord_loss
+
+        self.total_loss_tracker.update_state(total_loss)
+        self.vector_command_loss_tracker.update_state(vector_command_loss)
+        self.vector_coord_loss_tracker.update_state(vector_coord_loss)
+
+        return {m.name: m.result() for m in self.metrics}
 
     def get_config(self):
         config = super().get_config()
@@ -278,6 +361,21 @@ class GlyphGenerator(keras.Model):
         self.vector_coord_loss_fn = vector_coord_loss_fn
         self.raster_loss_weight = raster_loss_weight
         self.vector_loss_weight = vector_loss_weight
+        self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
+        self.raster_loss_tracker = keras.metrics.Mean(name="raster_loss")
+        self.vector_command_loss_tracker = keras.metrics.Mean(
+            name="vector_command_loss"
+        )
+        self.vector_coord_loss_tracker = keras.metrics.Mean(name="vector_coord_loss")
+
+    @property
+    def metrics(self):
+        return [
+            self.total_loss_tracker,
+            self.raster_loss_tracker,
+            self.vector_command_loss_tracker,
+            self.vector_coord_loss_tracker,
+        ]
 
     def train_step(self, data):
         (
@@ -311,9 +409,44 @@ class GlyphGenerator(keras.Model):
         grads = tape.gradient(total_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
-        return {
-            "total_loss": total_loss,
-            "raster_loss": raster_loss,
-            "vector_command_loss": vector_command_loss,
-            "vector_coord_loss": vector_coord_loss,
-        }
+        self.total_loss_tracker.update_state(total_loss)
+        self.raster_loss_tracker.update_state(raster_loss)
+        self.vector_command_loss_tracker.update_state(vector_command_loss)
+        self.vector_coord_loss_tracker.update_state(vector_coord_loss)
+
+        return {m.name: m.result() for m in self.metrics}
+
+    def test_step(self, data):
+        (
+            style_image_input,
+            glyph_id_input,
+            target_sequence_input,
+        ), (
+            true_glyph_raster,
+            true_command,
+            true_coord,
+        ) = data
+
+        generated_glyph_raster, command_output, coord_output = self(
+            (style_image_input, glyph_id_input, target_sequence_input),
+            training=False,
+        )
+
+        raster_loss = self.raster_loss_fn(true_glyph_raster, generated_glyph_raster)
+        vector_command_loss = self.vector_command_loss_fn(
+            true_command, command_output
+        )
+        vector_coord_loss = self.vector_coord_loss_fn(true_coord, coord_output)
+
+        total_loss = (
+            self.raster_loss_weight * raster_loss
+            + self.vector_loss_weight * vector_command_loss
+            + self.vector_loss_weight * vector_coord_loss
+        )
+
+        self.total_loss_tracker.update_state(total_loss)
+        self.raster_loss_tracker.update_state(raster_loss)
+        self.vector_command_loss_tracker.update_state(vector_command_loss)
+        self.vector_coord_loss_tracker.update_state(vector_coord_loss)
+
+        return {m.name: m.result() for m in self.metrics}

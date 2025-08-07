@@ -4,9 +4,10 @@ from deepvecfont3.hyperparameters import GEN_IMAGE_SIZE
 
 
 def test_glyph_extraction():
-    font_path = Path("tests/data/NotoSans[wdth,wght].ttf")
+    font_path = Path("tests/data/Molle-Regular.ttf")
+    # font_path = Path("tests/data/NotoSans[wdth,wght].ttf")
     location = {"wght": 400.0}
-    codepoint = 97  # 'a'
+    codepoint = ord("g")
 
     glyph = Glyph(font_path, codepoint, location)
 
@@ -16,11 +17,10 @@ def test_glyph_extraction():
     # Check the size of the rasterized numpy array
     assert rasterized_glyph.shape == (*GEN_IMAGE_SIZE, 1)
 
-    # import matplotlib.pyplot as plt
+    import matplotlib.pyplot as plt
 
-    # plt.imshow(rasterized_glyph.squeeze(), cmap="gray")
-    # plt.axis("off")
-    # plt.show()
+    plt.imshow(rasterized_glyph.squeeze(), cmap="gray")
+    plt.show()
 
     # Vectorize the glyph
     vectorized_glyph = glyph.vectorize()
