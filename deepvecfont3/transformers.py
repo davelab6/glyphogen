@@ -113,7 +113,7 @@ class TransformerEncoder(layers.Layer):
 
     def call(self, x, training):
         command_input = x[:, :, :EXTENDED_COMMAND_WIDTH]
-        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:]
+        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:] / 1000.0
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb
@@ -206,11 +206,11 @@ class TransformerDecoder(layers.Layer):
         ]
         self.dropout = layers.Dropout(rate)
         self.output_command = layers.Dense(EXTENDED_COMMAND_WIDTH, activation="softmax")
-        self.output_coords = layers.Dense(COORDINATE_WIDTH)
+        self.output_coords = layers.Dense(COORDINATE_WIDTH, activation="tanh")
 
     def call(self, x, context=None, look_ahead_mask=None, training=False):
         command_input = x[:, :, :EXTENDED_COMMAND_WIDTH]
-        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:]
+        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:] / 1000.0
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb
@@ -224,6 +224,7 @@ class TransformerDecoder(layers.Layer):
 
         command_output = self.output_command(x)
         coord_output = self.output_coords(x)
+        coord_output = coord_output * 1000.0
         return command_output, coord_output
 
     def get_config(self):
