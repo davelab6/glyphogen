@@ -222,7 +222,7 @@ def get_data():
 
 
 def main(
-    model_name="deepvecfont3.model",
+    model_name="deepvecfont3.keras",
     pre_train=False,
     epochs=EPOCHS,
     vectorizer_model_name=None,
@@ -268,7 +268,7 @@ def main(
 
     if pre_train:
         model_to_train = model.vectorizer
-        model_save_name = model_name.replace(".model", ".vectorizer.model")
+        model_save_name = model_name.replace(".keras", ".vectorizer.keras")
 
         # we need to modify the dataset to only feed the vectorizer
         train_dataset = train_dataset.map(lambda x, y: ((y[0], x[2]), (y[1], y[2])))
@@ -324,7 +324,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        default="deepvecfont3.model",
+        default="deepvecfont3.keras",
         help="Name of the model to save.",
     )
     parser.add_argument(
