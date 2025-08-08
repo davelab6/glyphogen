@@ -280,13 +280,13 @@ def main(
     # Compile the model
     if pre_train:
         model_to_train.compile(
-            optimizer=keras.optimizers.Adam(),
+            optimizer=keras.optimizers.Adam(1e-4),
             vector_command_loss_fn=keras.losses.CategoricalCrossentropy(),
             vector_coord_loss_fn=keras.losses.MeanSquaredError(),
         )
     else:
         model_to_train.compile(
-            optimizer=keras.optimizers.Adam(),
+            optimizer=keras.optimizers.Adam(1e-4),
             raster_loss_fn=keras.losses.MeanSquaredError(),
             vector_command_loss_fn=keras.losses.CategoricalCrossentropy(),
             vector_coord_loss_fn=keras.losses.MeanSquaredError(),
