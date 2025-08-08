@@ -5,6 +5,7 @@ import keras
 import tqdm
 import datetime
 
+
 from fontTools.ttLib import TTFont
 from deepvecfont3.model import GlyphGenerator, VectorizationGenerator
 from deepvecfont3.glyph import EXTENDED_COMMAND_WIDTH, Glyph
@@ -42,7 +43,7 @@ def create_real_dataset():
     true_commands = []
     true_coords = []
 
-    font_files = list(glob.glob(BASE_DIR + "/*/*.ttf"))[0:500]
+    font_files = list(glob.glob(BASE_DIR + "/*/*.ttf"))
     if not font_files:
         raise ValueError(f"No font files found in {BASE_DIR}")
 
@@ -50,19 +51,28 @@ def create_real_dataset():
         font_file = Path(font_file_path)
         if "noto" in font_file.name.lower():
             continue
-        style_image = get_style_image(
-            font_file, variation={}
-        )  # Assuming no variation for now
 
         # Ensure all have same upem
         if TTFont(font_file)["head"].unitsPerEm != 1000:
+            continue
+
+        try:
+            style_image = get_style_image(
+                font_file, variation={}
+            )  # Assuming no variation for now
+        except Exception as e:
+            print(f"Error getting style image for {font_file}: {e}")
             continue
 
         for i, char in enumerate(ALPHABET):
             glyph = Glyph(font_file, ord(char), location={})
 
             # Rasterize
-            raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
+            try:
+                raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
+            except Exception as e:
+                print(f"Error rasterizing glyph {char} from {font_file}: {e}")
+                continue
 
             # Vectorize
             unrelaxed_svg = glyph.vectorize()
