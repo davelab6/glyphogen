@@ -20,14 +20,16 @@ BASIC_SVG_COMMANDS = {
 }
 
 EXTENDED_SVG_COMMANDS = {
+    "SOS": 0, # Start of sequence
     **BASIC_SVG_COMMANDS,
     "HS": 4,  # Horizontal smooth node (2 coordinates plus handle lengths)
     "VS": 4,  # Vertical smooth node (2 coordinates plus handle lengths)
     "G2": 2,  # G2 continuous node (2 coordinates)
+    "EOS": 0, # End of sequence
 }
 
-EXTENDED_COMMAND_WIDTH = len(EXTENDED_SVG_COMMANDS.keys())  # 7
-COORDINATE_WIDTH = max(EXTENDED_SVG_COMMANDS.values())  # 6
+EXTENDED_COMMAND_WIDTH = len(EXTENDED_SVG_COMMANDS.keys())
+COORDINATE_WIDTH = max(EXTENDED_SVG_COMMANDS.values())
 
 
 class SVGCommand:
@@ -62,6 +64,13 @@ class RelaxedSVG:
         # And we pad the coordinates to a fixed length
         max_coordinates = max(ExtendedCommand.grammar.values())
         output: List[List[int]] = []
+
+        # Add SOS token
+        sos_command_vector = [0] * command_width
+        sos_command_vector[list(ExtendedCommand.grammar.keys()).index("SOS")] = 1
+        sos_coordinates = [0] * max_coordinates
+        output.append(sos_command_vector + sos_coordinates)
+
         for command in self.commands:
             # One-hot encode the command
             command_vector = [0] * command_width
@@ -73,13 +82,56 @@ class RelaxedSVG:
                 max_coordinates - len(command.coordinates)
             )
             output.append(command_vector + coordinates)
+
+        # Add EOS token
+        eos_command_vector = [0] * command_width
+        eos_command_vector[list(ExtendedCommand.grammar.keys()).index("EOS")] = 1
+        eos_coordinates = [0] * max_coordinates
+        output.append(eos_command_vector + eos_coordinates)
+
         return np.array(output, dtype=np.int_)
+
+    @classmethod
+    def from_numpy(cls, command_tensor, coord_tensor):
+        commands = []
+        command_keys = list(ExtendedCommand.grammar.keys())
+        sos_index = command_keys.index("SOS")
+        eos_index = command_keys.index("EOS")
+
+        for i in range(command_tensor.shape[0]):
+            command_index = np.argmax(command_tensor[i])
+
+            if command_index == sos_index:
+                continue
+
+            if command_index == eos_index:
+                break
+
+            command_str = command_keys[command_index]
+            # A zero vector may be fed to the model, which will be interpreted as 'M'
+            # This is padding, so we should stop
+            if command_str == 'M' and not np.any(coord_tensor[i]):
+                break
+
+            num_coords = ExtendedCommand.grammar[command_str]
+            coords = coord_tensor[i, :num_coords].tolist()
+            commands.append(ExtendedCommand(command_str, coords))
+        return cls(commands)
+
+    def to_svg_string(self):
+        path_data = []
+        for cmd in self.commands:
+            path_data.append(cmd.command)
+            path_data.extend(map(lambda x: str(int(x)), cmd.coordinates))
+        return " ".join(path_data)
 
 
 class UnrelaxedSVG:
     commands: List[SVGCommand]
 
     def __init__(self, commands):
+        if commands and commands[0].command != "M":
+            raise ValueError("SVG path must start with a 'M' command")
         self.commands = commands
 
     def relax(self) -> RelaxedSVG:

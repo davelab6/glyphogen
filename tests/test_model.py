@@ -40,9 +40,12 @@ def test_output_shapes():
     )
 
     # Get model output
-    generated_glyph_raster, command_output, coord_output = model(
+    outputs = model(
         (style_image_input, glyph_id_input, target_sequence_input)
     )
+    generated_glyph_raster = outputs["raster"]
+    command_output = outputs["command"]
+    coord_output = outputs["coord"]
 
     # Check output shapes
     assert generated_glyph_raster.shape == (BATCH_SIZE, *GEN_IMAGE_SIZE, 1)

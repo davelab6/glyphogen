@@ -5,10 +5,15 @@ import keras
 import tqdm
 import datetime
 
+# If the dataset doesn't exist, we turn off the GPU because it's too big
+# to generate and move about on the GPU.
+if not os.path.exists("train.tfds"):
+    tf.config.set_visible_devices([], "GPU")
+
 
 from fontTools.ttLib import TTFont
 from deepvecfont3.model import GlyphGenerator, VectorizationGenerator
-from deepvecfont3.glyph import EXTENDED_COMMAND_WIDTH, Glyph
+from deepvecfont3.glyph import EXTENDED_COMMAND_WIDTH, Glyph, RelaxedSVG
 from deepvecfont3.hyperparameters import (
     BATCH_SIZE,
     NUM_GLYPHS,
@@ -25,6 +30,7 @@ from deepvecfont3.hyperparameters import (
     EPOCHS,
     BASE_DIR,
     ALPHABET,
+    LIMIT,
 )
 from deepvecfont3.rendering import get_style_image
 
@@ -44,8 +50,12 @@ def create_real_dataset():
     true_coords = []
 
     font_files = list(glob.glob(BASE_DIR + "/*/*.ttf"))
+    if LIMIT > 0:
+        font_files = font_files[:LIMIT]
     if not font_files:
         raise ValueError(f"No font files found in {BASE_DIR}")
+
+    MAX_SEQUENCE_LENGTH = MAX_COMMANDS + 1  # for EOS token
 
     for font_file_path in tqdm.tqdm(font_files):
         font_file = Path(font_file_path)
@@ -82,24 +92,27 @@ def create_real_dataset():
             encoded_svg = relaxed_svg.encode()
 
             # Pad or truncate vector representation
-            if encoded_svg.shape[0] > MAX_COMMANDS:
-                encoded_svg = encoded_svg[:MAX_COMMANDS, :]
-            elif encoded_svg.shape[0] < MAX_COMMANDS:
+            if encoded_svg.shape[0] > MAX_SEQUENCE_LENGTH:
+                encoded_svg = encoded_svg[:MAX_SEQUENCE_LENGTH, :]
+            elif encoded_svg.shape[0] < MAX_SEQUENCE_LENGTH:
                 padding = np.zeros(
-                    (MAX_COMMANDS - encoded_svg.shape[0], encoded_svg.shape[1])
+                    (MAX_SEQUENCE_LENGTH - encoded_svg.shape[0], encoded_svg.shape[1])
                 )
                 encoded_svg = np.vstack((encoded_svg, padding))
 
+            decoder_input = encoded_svg[:-1]
+            ground_truth = encoded_svg[1:]
+
             # Split into command and coordinate parts
-            command_part = encoded_svg[:, :EXTENDED_COMMAND_WIDTH]
-            coord_part = encoded_svg[:, EXTENDED_COMMAND_WIDTH:]
+            command_part = ground_truth[:, :EXTENDED_COMMAND_WIDTH]
+            coord_part = ground_truth[:, EXTENDED_COMMAND_WIDTH:]
 
             # One-hot encode glyph ID
             glyph_id_one_hot = tf.one_hot(i, NUM_GLYPHS).numpy()
 
             style_images.append(style_image)
             glyph_ids.append(glyph_id_one_hot)
-            target_sequences.append(encoded_svg)
+            target_sequences.append(decoder_input)
             true_rasters.append(raster)
             true_commands.append(command_part)
             true_coords.append(coord_part)
@@ -141,7 +154,11 @@ def create_real_dataset():
     train_dataset = tf.data.Dataset.from_tensor_slices(
         (
             (style_images_train, glyph_ids_train, target_sequences_train),
-            (true_rasters_train, true_commands_train, true_coords_train),
+            {
+                "raster": true_rasters_train,
+                "command": true_commands_train,
+                "coord": true_coords_train,
+            },
         )
     )
     train_dataset = (
@@ -153,7 +170,11 @@ def create_real_dataset():
     test_dataset = tf.data.Dataset.from_tensor_slices(
         (
             (style_images_test, glyph_ids_test, target_sequences_test),
-            (true_rasters_test, true_commands_test, true_coords_test),
+            {
+                "raster": true_rasters_test,
+                "command": true_commands_test,
+                "coord": true_coords_test,
+            },
         )
     )
     test_dataset = (
@@ -187,9 +208,9 @@ class ImageGenerationCallback(tf.keras.callbacks.Callback):
             target_sequence = tf.expand_dims(target_sequence, axis=0)
 
             # Predict generated raster
-            generated_raster, _, _ = self.model(
-                (style_image, glyph_id, target_sequence)
-            )
+            generated_raster = self.model((style_image, glyph_id, target_sequence))[
+                "raster"
+            ]
             true_raster = tf.expand_dims(true_raster, axis=0)
 
             assert true_raster.shape == generated_raster.shape, (
@@ -208,6 +229,165 @@ class ImageGenerationCallback(tf.keras.callbacks.Callback):
                 )
 
 
+class SVGGenerationCallback(tf.keras.callbacks.Callback):
+    def __init__(self, log_dir, test_dataset, num_samples=3, pre_train=False):
+        super().__init__()
+        self.file_writer = tf.summary.create_file_writer(log_dir + "/svgs")
+        self.test_dataset = test_dataset.unbatch().take(num_samples)
+        self.pre_train = pre_train
+
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch % 5:
+            return
+        model = self.model.vectorizer if self.pre_train else self.model
+
+        for i, (inputs, outputs) in enumerate(self.test_dataset):
+            if self.pre_train:
+                raster_image_input, target_sequence_input = inputs
+                model_inputs = (tf.expand_dims(raster_image_input, axis=0),)
+            else:
+                (style_image, glyph_id, target_sequence_input) = inputs
+                model_inputs = (
+                    tf.expand_dims(style_image, axis=0),
+                    tf.expand_dims(glyph_id, axis=0),
+                )
+
+            sos_token_command = tf.one_hot(0, EXTENDED_COMMAND_WIDTH)
+            sos_token_coords = tf.zeros((6))
+            start_token = tf.concat([sos_token_command, sos_token_coords], axis=-1)
+            start_token = tf.cast(start_token, dtype=target_sequence_input.dtype)
+            generated_sequence = tf.expand_dims(start_token, axis=0)
+
+            for _ in range(MAX_COMMANDS):
+                if self.pre_train:
+                    prediction_inputs = model_inputs + (generated_sequence,)
+                else:
+                    prediction_inputs = model_inputs + (generated_sequence,)
+
+                output = model(prediction_inputs, training=False)
+                command_output = output["command"]
+                coord_output = output["coord"]
+
+                last_command_pred = command_output[:, -1, :]
+                last_coord_pred = coord_output[:, -1, :]
+
+                last_command_id = tf.argmax(last_command_pred, axis=-1)
+                last_command_one_hot = tf.one_hot(
+                    last_command_id, EXTENDED_COMMAND_WIDTH
+                )
+
+                next_input_token = tf.concat(
+                    [last_command_one_hot, tf.expand_dims(last_coord_pred, axis=0)],
+                    axis=-1,
+                )
+                generated_sequence = tf.concat(
+                    [generated_sequence, next_input_token], axis=1
+                )
+
+            command_tensor = generated_sequence[0, :, :EXTENDED_COMMAND_WIDTH]
+            coord_tensor = generated_sequence[0, :, EXTENDED_COMMAND_WIDTH:]
+
+            decoded_svg = RelaxedSVG.from_numpy(
+                command_tensor.numpy(), coord_tensor.numpy()
+            )
+            svg_string = decoded_svg.to_svg_string()
+
+            with self.file_writer.as_default():
+                tf.summary.text(f"Generated SVG - Sample {i}", svg_string, step=epoch)
+
+
+class ImageGenerationCallback(tf.keras.callbacks.Callback):
+    def __init__(self, log_dir, test_dataset, num_images=3, pre_train=False):
+        super().__init__()
+        self.file_writer = tf.summary.create_file_writer(log_dir + "/images")
+        self.test_dataset = test_dataset.unbatch().take(num_images)
+        self.pre_train = pre_train
+
+    def on_epoch_end(self, epoch, logs=None):
+        if self.pre_train:
+            # Don't generate images during pre-training
+            return
+
+        for i, (
+            (style_image, glyph_id, target_sequence),
+            (true_raster, true_command, true_coord),
+        ) in enumerate(self.test_dataset):
+            # Add batch dimension
+            style_image = tf.expand_dims(style_image, axis=0)
+            glyph_id = tf.expand_dims(glyph_id, axis=0)
+            target_sequence = tf.expand_dims(target_sequence, axis=0)
+
+            # Predict generated raster
+            generated_raster = self.model((style_image, glyph_id, target_sequence))[
+                "raster"
+            ]
+            true_raster = tf.expand_dims(true_raster, axis=0)
+
+            assert true_raster.shape == generated_raster.shape, (
+                f"Shape mismatch: true_raster {true_raster.shape}, "
+                f"generated_raster {generated_raster.shape}"
+            )
+
+            with self.file_writer.as_default():
+                tf.summary.image(
+                    f"True Glyph Raster - Sample {i}",
+                    true_raster,
+                    step=epoch,
+                )
+                tf.summary.image(
+                    f"Generated Glyph Raster - Sample {i}", generated_raster, step=epoch
+                )
+
+
+class SVGGenerationCallback(tf.keras.callbacks.Callback):
+    def __init__(self, log_dir, test_dataset, num_samples=3, pre_train=False):
+        super().__init__()
+        self.file_writer = tf.summary.create_file_writer(log_dir + "/svgs")
+        self.test_dataset = test_dataset.unbatch().take(num_samples)
+        self.pre_train = pre_train
+
+    def on_epoch_end(self, epoch, logs=None):
+        model = self.model
+
+        for i, (inputs, outputs) in enumerate(self.test_dataset):
+            if self.pre_train:
+                raster_image_input, target_sequence_input = inputs
+
+                # Add batch dimension
+                raster_image_input = tf.expand_dims(raster_image_input, axis=0)
+                target_sequence_input = tf.expand_dims(target_sequence_input, axis=0)
+
+                output = model(
+                    (raster_image_input, target_sequence_input), training=False
+                )
+            else:
+                (style_image, glyph_id, target_sequence_input) = inputs
+
+                # Add batch dimension
+                style_image = tf.expand_dims(style_image, axis=0)
+                glyph_id = tf.expand_dims(glyph_id, axis=0)
+                target_sequence_input = tf.expand_dims(target_sequence_input, axis=0)
+
+                output = model(
+                    (style_image, glyph_id, target_sequence_input), training=False
+                )
+
+            command_output = output["command"]
+            coord_output = output["coord"]
+
+            # a single batch
+            command_tensor = command_output[0]
+            coord_tensor = coord_output[0]
+
+            decoded_svg = RelaxedSVG.from_numpy(
+                command_tensor.numpy(), coord_tensor.numpy()
+            )
+            svg_string = decoded_svg.to_svg_string()
+
+            with self.file_writer.as_default():
+                tf.summary.text(f"Generated SVG - Sample {i}", svg_string, step=epoch)
+
+
 def get_data():
     # Create real dataset
     if not os.path.exists("train.tfds"):
@@ -219,6 +399,10 @@ def get_data():
     train_dataset = tf.data.Dataset.load("train.tfds")
     test_dataset = tf.data.Dataset.load("test.tfds")
     return train_dataset, test_dataset
+
+
+def _preprocess_for_vectorizer_dataset(x, y):
+    return ((y["raster"], x[2]), (y["command"], y["coord"]))
 
 
 def main(
@@ -234,9 +418,6 @@ def main(
             custom_objects={
                 "GlyphGenerator": GlyphGenerator,
                 "VectorizationGenerator": VectorizationGenerator,
-                "raster_loss_fn": keras.losses.MeanSquaredError(),
-                "vector_command_loss_fn": keras.losses.CategoricalCrossentropy(),
-                "vector_coord_loss_fn": keras.losses.MeanSquaredError(),
             },
         )
         print(f"Loaded model from {model_name}")
@@ -257,22 +438,23 @@ def main(
             vectorizer_model_name,
             custom_objects={
                 "VectorizationGenerator": VectorizationGenerator,
-                "vector_command_loss_fn": keras.losses.CategoricalCrossentropy(),
-                "vector_coord_loss_fn": keras.losses.MeanSquaredError(),
             },
         )
         model.vectorizer = vectorizer
         print(f"Loaded vectorizer from {vectorizer_model_name}")
 
     train_dataset, test_dataset = get_data()
+    print("Reducing dataset to a single batch for overfitting test")
+    train_dataset = train_dataset.take(1)
+    test_dataset = train_dataset
 
     if pre_train:
         model_to_train = model.vectorizer
         model_save_name = model_name.replace(".keras", ".vectorizer.keras")
 
         # we need to modify the dataset to only feed the vectorizer
-        train_dataset = train_dataset.map(lambda x, y: ((y[0], x[2]), (y[1], y[2])))
-        test_dataset = test_dataset.map(lambda x, y: ((y[0], x[2]), (y[1], y[2])))
+        train_dataset = train_dataset.map(_preprocess_for_vectorizer_dataset)
+        test_dataset = test_dataset.map(_preprocess_for_vectorizer_dataset)
     else:
         model_to_train = model
         model_save_name = model_name
@@ -281,17 +463,24 @@ def main(
     if pre_train:
         model_to_train.compile(
             optimizer=keras.optimizers.Adam(1e-4),
-            vector_command_loss_fn=keras.losses.CategoricalCrossentropy(),
-            vector_coord_loss_fn=keras.losses.MeanSquaredError(),
+            loss={
+                "command": keras.losses.CategoricalCrossentropy(),
+                "coord": keras.losses.MeanSquaredError(),
+            },
         )
     else:
         model_to_train.compile(
             optimizer=keras.optimizers.Adam(1e-4),
-            raster_loss_fn=keras.losses.MeanSquaredError(),
-            vector_command_loss_fn=keras.losses.CategoricalCrossentropy(),
-            vector_coord_loss_fn=keras.losses.MeanSquaredError(),
-            raster_loss_weight=RASTER_LOSS_WEIGHT,
-            vector_loss_weight=VECTOR_LOSS_WEIGHT,
+            loss={
+                "raster": keras.losses.MeanSquaredError(),
+                "command": keras.losses.CategoricalCrossentropy(),
+                "coord": keras.losses.MeanSquaredError(),
+            },
+            loss_weights={
+                "raster": RASTER_LOSS_WEIGHT,
+                "command": VECTOR_LOSS_WEIGHT,
+                "coord": VECTOR_LOSS_WEIGHT,
+            },
         )
 
     # Setup TensorBoard callback
@@ -302,6 +491,16 @@ def main(
     image_generation_callback = ImageGenerationCallback(
         log_dir, test_dataset, pre_train=pre_train
     )
+    svg_generation_callback = SVGGenerationCallback(
+        log_dir, test_dataset, pre_train=pre_train
+    )
+    checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+        filepath=model_save_name,
+        save_weights_only=False,
+        monitor="val_loss",
+        mode="min",
+        save_best_only=True,
+    )
 
     # Train the model
     model_to_train.fit(
@@ -310,11 +509,14 @@ def main(
         # steps_per_epoch=train_steps_per_epoch,
         validation_data=test_dataset,
         # validation_steps=validation_steps,
-        callbacks=[tensorboard_callback, image_generation_callback],
+        callbacks=[
+            tensorboard_callback,
+            image_generation_callback,
+            svg_generation_callback,
+            checkpoint_callback,
+        ],
     )
     # Save the model
-    model_to_train.save(model_save_name)
-    print(f"Model saved to {model_save_name}")
 
 
 if __name__ == "__main__":

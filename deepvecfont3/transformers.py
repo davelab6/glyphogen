@@ -8,6 +8,8 @@ from deepvecfont3.glyph import (
 )
 from deepvecfont3.hyperparameters import MAX_COMMANDS
 
+MAX_COORDINATE = 1500.0  # We scale the coordinates to be in the range [-1, 1]
+
 
 @keras.saving.register_keras_serializable()
 class PositionalEncoding(layers.Layer):
@@ -113,7 +115,7 @@ class TransformerEncoder(layers.Layer):
 
     def call(self, x, training):
         command_input = x[:, :, :EXTENDED_COMMAND_WIDTH]
-        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:] / 1000.0
+        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:]  # / MAX_COORDINATE
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb
@@ -210,7 +212,7 @@ class TransformerDecoder(layers.Layer):
 
     def call(self, x, context=None, look_ahead_mask=None, training=False):
         command_input = x[:, :, :EXTENDED_COMMAND_WIDTH]
-        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:] / 1000.0
+        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:] / MAX_COORDINATE
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb
@@ -224,7 +226,7 @@ class TransformerDecoder(layers.Layer):
 
         command_output = self.output_command(x)
         coord_output = self.output_coords(x)
-        coord_output = coord_output * 1000.0
+        coord_output = coord_output * MAX_COORDINATE
         return command_output, coord_output
 
     def get_config(self):
