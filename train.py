@@ -24,7 +24,8 @@ from deepvecfont3.hyperparameters import (
     D_MODEL,
     NUM_HEADS,
     RASTER_LOSS_WEIGHT,
-    VECTOR_LOSS_WEIGHT,
+    VECTOR_LOSS_WEIGHT_COMMAND,
+    VECTOR_LOSS_WEIGHT_COORD,
     DFF,
     RATE,
     EPOCHS,
@@ -39,6 +40,24 @@ import glob
 import numpy as np
 from pathlib import Path
 from sklearn.model_selection import train_test_split
+
+
+class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, d_model, warmup_steps=4000):
+        super(CustomSchedule, self).__init__()
+        self.d_model = d_model
+        self.d_model = tf.cast(self.d_model, tf.float32)
+        self.warmup_steps = warmup_steps
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        arg1 = tf.math.rsqrt(step)
+        arg2 = step * (self.warmup_steps**-1.5)
+        return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
+
+    def get_config(self):
+        return {"d_model": self.d_model, "warmup_steps": self.warmup_steps}
+
 
 
 def create_real_dataset():
@@ -444,9 +463,9 @@ def main(
         print(f"Loaded vectorizer from {vectorizer_model_name}")
 
     train_dataset, test_dataset = get_data()
-    print("Reducing dataset to a single batch for overfitting test")
-    train_dataset = train_dataset.take(1)
-    test_dataset = train_dataset
+    #print("Reducing dataset to a single batch for overfitting test")
+    #train_dataset = train_dataset.take(1)
+    #test_dataset = train_dataset
 
     if pre_train:
         model_to_train = model.vectorizer
@@ -459,18 +478,25 @@ def main(
         model_to_train = model
         model_save_name = model_name
 
+    learning_rate = CustomSchedule(D_MODEL)
+    optimizer = keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9, clipnorm=1.0)
+
     # Compile the model
     if pre_train:
         model_to_train.compile(
-            optimizer=keras.optimizers.Adam(1e-4),
+            optimizer=optimizer,
             loss={
                 "command": keras.losses.CategoricalCrossentropy(),
                 "coord": keras.losses.MeanSquaredError(),
             },
+            loss_weights={
+                "command": VECTOR_LOSS_WEIGHT_COMMAND,
+                "coord": VECTOR_LOSS_WEIGHT_COORD,
+            },
         )
     else:
         model_to_train.compile(
-            optimizer=keras.optimizers.Adam(1e-4),
+            optimizer=optimizer,
             loss={
                 "raster": keras.losses.MeanSquaredError(),
                 "command": keras.losses.CategoricalCrossentropy(),
@@ -478,8 +504,8 @@ def main(
             },
             loss_weights={
                 "raster": RASTER_LOSS_WEIGHT,
-                "command": VECTOR_LOSS_WEIGHT,
-                "coord": VECTOR_LOSS_WEIGHT,
+                "command": VECTOR_LOSS_WEIGHT_COMMAND,
+                "coord": VECTOR_LOSS_WEIGHT_COORD,
             },
         )
 

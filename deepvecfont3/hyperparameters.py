@@ -9,11 +9,12 @@ RATE = 0.1
 EPOCHS = 500
 BATCH_SIZE = 16
 RASTER_LOSS_WEIGHT = 100.0
-VECTOR_LOSS_WEIGHT = 1.0
+VECTOR_LOSS_WEIGHT_COMMAND = 100.0
+VECTOR_LOSS_WEIGHT_COORD = 1.0
 GEN_IMAGE_SIZE = (512, 512)
 STYLE_IMAGE_SIZE = (168, 40)
 MAX_COMMANDS = 150
-LIMIT = 50  # Limit the number of fonts to process for testing
+LIMIT = 0  # Limit the number of fonts to process for testing
 
 ALPHABET = ["a", "d", "h", "e", "s", "i", "o", "n", "t"]
 BASE_DIR = "/Users/simon/others-repos/fonts/ofl/"

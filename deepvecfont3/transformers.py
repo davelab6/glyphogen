@@ -115,7 +115,7 @@ class TransformerEncoder(layers.Layer):
 
     def call(self, x, training):
         command_input = x[:, :, :EXTENDED_COMMAND_WIDTH]
-        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:]  # / MAX_COORDINATE
+        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:] / MAX_COORDINATE
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb

@@ -220,8 +220,7 @@ class VectorizationGenerator(keras.Model):
             vector_command_loss = self.loss["command"](
                 true_command, outputs["command"]
             )
-            #vector_coord_loss = self.loss["coord"](true_coord, outputs["coord"])
-            vector_coord_loss = self.loss["coord"](true_coord, true_coord)  # XXX dummy
+            vector_coord_loss = self.loss["coord"](true_coord, outputs["coord"])
 
             total_loss = vector_command_loss + vector_coord_loss
 
