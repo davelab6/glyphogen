@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from deepvecfont3.glyph import COORDINATE_WIDTH, EXTENDED_COMMAND_WIDTH
+from deepvecfont3.glyph import COORDINATE_WIDTH, NODE_COMMAND_WIDTH
 from deepvecfont3.hyperparameters import (
     BATCH_SIZE,
     D_MODEL,
@@ -36,7 +36,7 @@ def test_output_shapes():
         NUM_GLYPHS,
     )
     target_sequence_input = tf.random.uniform(
-        shape=(BATCH_SIZE, MAX_COMMANDS, EXTENDED_COMMAND_WIDTH + COORDINATE_WIDTH)
+        shape=(BATCH_SIZE, MAX_COMMANDS, NODE_COMMAND_WIDTH + COORDINATE_WIDTH)
     )
 
     # Get model output
@@ -49,5 +49,5 @@ def test_output_shapes():
 
     # Check output shapes
     assert generated_glyph_raster.shape == (BATCH_SIZE, *GEN_IMAGE_SIZE, 1)
-    assert command_output.shape == (BATCH_SIZE, MAX_COMMANDS, EXTENDED_COMMAND_WIDTH)
+    assert command_output.shape == (BATCH_SIZE, MAX_COMMANDS, NODE_COMMAND_WIDTH)
     assert coord_output.shape == (BATCH_SIZE, MAX_COMMANDS, COORDINATE_WIDTH)

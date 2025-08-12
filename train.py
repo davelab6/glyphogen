@@ -13,7 +13,7 @@ if not os.path.exists("train.tfds"):
 
 from fontTools.ttLib import TTFont
 from deepvecfont3.model import GlyphGenerator, VectorizationGenerator
-from deepvecfont3.glyph import EXTENDED_COMMAND_WIDTH, Glyph, RelaxedSVG
+from deepvecfont3.glyph import NODE_COMMAND_WIDTH, Glyph, NodeGlyph, SVGGlyph
 from deepvecfont3.hyperparameters import (
     BATCH_SIZE,
     NUM_GLYPHS,
@@ -104,11 +104,11 @@ def create_real_dataset():
                 continue
 
             # Vectorize
-            unrelaxed_svg = glyph.vectorize()
-            relaxed_svg = unrelaxed_svg.relax()
-            if not relaxed_svg.commands:
+            svg_glyph = glyph.vectorize()
+            node_glyph = svg_glyph.to_node_glyph()
+            if not node_glyph.commands:
                 continue
-            encoded_svg = relaxed_svg.encode()
+            encoded_svg = node_glyph.encode()
 
             # Pad or truncate vector representation
             if encoded_svg.shape[0] > MAX_SEQUENCE_LENGTH:
@@ -123,8 +123,8 @@ def create_real_dataset():
             ground_truth = encoded_svg[1:]
 
             # Split into command and coordinate parts
-            command_part = ground_truth[:, :EXTENDED_COMMAND_WIDTH]
-            coord_part = ground_truth[:, EXTENDED_COMMAND_WIDTH:]
+            command_part = ground_truth[:, :NODE_COMMAND_WIDTH]
+            coord_part = ground_truth[:, NODE_COMMAND_WIDTH:]
 
             # One-hot encode glyph ID
             glyph_id_one_hot = tf.one_hot(i, NUM_GLYPHS).numpy()
@@ -205,114 +205,7 @@ def create_real_dataset():
     return train_dataset, test_dataset
 
 
-class ImageGenerationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, log_dir, test_dataset, num_images=3, pre_train=False):
-        super().__init__()
-        self.file_writer = tf.summary.create_file_writer(log_dir + "/images")
-        self.test_dataset = test_dataset.unbatch().take(num_images)
-        self.pre_train = pre_train
 
-    def on_epoch_end(self, epoch, logs=None):
-        if self.pre_train:
-            # Don't generate images during pre-training
-            return
-
-        for i, (
-            (style_image, glyph_id, target_sequence),
-            (true_raster, true_command, true_coord),
-        ) in enumerate(self.test_dataset):
-            # Add batch dimension
-            style_image = tf.expand_dims(style_image, axis=0)
-            glyph_id = tf.expand_dims(glyph_id, axis=0)
-            target_sequence = tf.expand_dims(target_sequence, axis=0)
-
-            # Predict generated raster
-            generated_raster = self.model((style_image, glyph_id, target_sequence))[
-                "raster"
-            ]
-            true_raster = tf.expand_dims(true_raster, axis=0)
-
-            assert true_raster.shape == generated_raster.shape, (
-                f"Shape mismatch: true_raster {true_raster.shape}, "
-                f"generated_raster {generated_raster.shape}"
-            )
-
-            with self.file_writer.as_default():
-                tf.summary.image(
-                    f"True Glyph Raster - Sample {i}",
-                    true_raster,
-                    step=epoch,
-                )
-                tf.summary.image(
-                    f"Generated Glyph Raster - Sample {i}", generated_raster, step=epoch
-                )
-
-
-class SVGGenerationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, log_dir, test_dataset, num_samples=3, pre_train=False):
-        super().__init__()
-        self.file_writer = tf.summary.create_file_writer(log_dir + "/svgs")
-        self.test_dataset = test_dataset.unbatch().take(num_samples)
-        self.pre_train = pre_train
-
-    def on_epoch_end(self, epoch, logs=None):
-        if epoch % 5:
-            return
-        model = self.model.vectorizer if self.pre_train else self.model
-
-        for i, (inputs, outputs) in enumerate(self.test_dataset):
-            if self.pre_train:
-                raster_image_input, target_sequence_input = inputs
-                model_inputs = (tf.expand_dims(raster_image_input, axis=0),)
-            else:
-                (style_image, glyph_id, target_sequence_input) = inputs
-                model_inputs = (
-                    tf.expand_dims(style_image, axis=0),
-                    tf.expand_dims(glyph_id, axis=0),
-                )
-
-            sos_token_command = tf.one_hot(0, EXTENDED_COMMAND_WIDTH)
-            sos_token_coords = tf.zeros((6))
-            start_token = tf.concat([sos_token_command, sos_token_coords], axis=-1)
-            start_token = tf.cast(start_token, dtype=target_sequence_input.dtype)
-            generated_sequence = tf.expand_dims(start_token, axis=0)
-
-            for _ in range(MAX_COMMANDS):
-                if self.pre_train:
-                    prediction_inputs = model_inputs + (generated_sequence,)
-                else:
-                    prediction_inputs = model_inputs + (generated_sequence,)
-
-                output = model(prediction_inputs, training=False)
-                command_output = output["command"]
-                coord_output = output["coord"]
-
-                last_command_pred = command_output[:, -1, :]
-                last_coord_pred = coord_output[:, -1, :]
-
-                last_command_id = tf.argmax(last_command_pred, axis=-1)
-                last_command_one_hot = tf.one_hot(
-                    last_command_id, EXTENDED_COMMAND_WIDTH
-                )
-
-                next_input_token = tf.concat(
-                    [last_command_one_hot, tf.expand_dims(last_coord_pred, axis=0)],
-                    axis=-1,
-                )
-                generated_sequence = tf.concat(
-                    [generated_sequence, next_input_token], axis=1
-                )
-
-            command_tensor = generated_sequence[0, :, :EXTENDED_COMMAND_WIDTH]
-            coord_tensor = generated_sequence[0, :, EXTENDED_COMMAND_WIDTH:]
-
-            decoded_svg = RelaxedSVG.from_numpy(
-                command_tensor.numpy(), coord_tensor.numpy()
-            )
-            svg_string = decoded_svg.to_svg_string()
-
-            with self.file_writer.as_default():
-                tf.summary.text(f"Generated SVG - Sample {i}", svg_string, step=epoch)
 
 
 class ImageGenerationCallback(tf.keras.callbacks.Callback):
@@ -398,10 +291,13 @@ class SVGGenerationCallback(tf.keras.callbacks.Callback):
             command_tensor = command_output[0]
             coord_tensor = coord_output[0]
 
-            decoded_svg = RelaxedSVG.from_numpy(
+            decoded_glyph = NodeGlyph.from_numpy(
                 command_tensor.numpy(), coord_tensor.numpy()
             )
-            svg_string = decoded_svg.to_svg_string()
+            try:
+                svg_string = decoded_glyph.to_svg_glyph().to_svg_string()
+            except Exception:
+                svg_string = "DEBUG " + decoded_glyph.to_debug_string()
 
             with self.file_writer.as_default():
                 tf.summary.text(f"Generated SVG - Sample {i}", svg_string, step=epoch)

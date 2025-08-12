@@ -3,7 +3,7 @@ import keras
 from keras import layers, ops
 
 from deepvecfont3.glyph import (
-    EXTENDED_COMMAND_WIDTH,
+    NODE_COMMAND_WIDTH,
     COORDINATE_WIDTH,
 )
 from deepvecfont3.hyperparameters import MAX_COMMANDS
@@ -114,8 +114,8 @@ class TransformerEncoder(layers.Layer):
         self.dropout = layers.Dropout(rate)
 
     def call(self, x, training):
-        command_input = x[:, :, :EXTENDED_COMMAND_WIDTH]
-        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:] / MAX_COORDINATE
+        command_input = x[:, :, :NODE_COMMAND_WIDTH]
+        coord_input = x[:, :, NODE_COMMAND_WIDTH:] / MAX_COORDINATE
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb
@@ -207,12 +207,12 @@ class TransformerDecoder(layers.Layer):
             for _ in range(num_layers)
         ]
         self.dropout = layers.Dropout(rate)
-        self.output_command = layers.Dense(EXTENDED_COMMAND_WIDTH, activation="softmax")
+        self.output_command = layers.Dense(NODE_COMMAND_WIDTH, activation="softmax")
         self.output_coords = layers.Dense(COORDINATE_WIDTH, activation="tanh")
 
     def call(self, x, context=None, look_ahead_mask=None, training=False):
-        command_input = x[:, :, :EXTENDED_COMMAND_WIDTH]
-        coord_input = x[:, :, EXTENDED_COMMAND_WIDTH:] / MAX_COORDINATE
+        command_input = x[:, :, :NODE_COMMAND_WIDTH]
+        coord_input = x[:, :, NODE_COMMAND_WIDTH:] / MAX_COORDINATE
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb
