@@ -190,6 +190,7 @@ class NodeGlyph:
         for cmd in self.commands:
             path_data.append(cmd.command)
             path_data.extend(map(lambda x: str(int(x)), cmd.coordinates))
+        return " ".join(path_data)
 
 class SVGGlyph:
     commands: List[SVGCommand]

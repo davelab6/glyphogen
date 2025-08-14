@@ -110,9 +110,9 @@ def create_real_dataset():
                 continue
             encoded_svg = node_glyph.encode()
 
-            # Pad or truncate vector representation
+            # Pad vector representation or skip
             if encoded_svg.shape[0] > MAX_SEQUENCE_LENGTH:
-                encoded_svg = encoded_svg[:MAX_SEQUENCE_LENGTH, :]
+                continue
             elif encoded_svg.shape[0] < MAX_SEQUENCE_LENGTH:
                 padding = np.zeros(
                     (MAX_SEQUENCE_LENGTH - encoded_svg.shape[0], encoded_svg.shape[1])
@@ -259,6 +259,8 @@ class SVGGenerationCallback(tf.keras.callbacks.Callback):
         self.pre_train = pre_train
 
     def on_epoch_end(self, epoch, logs=None):
+        if epoch % 5:
+            return
         model = self.model
 
         for i, (inputs, outputs) in enumerate(self.test_dataset):
@@ -359,9 +361,9 @@ def main(
         print(f"Loaded vectorizer from {vectorizer_model_name}")
 
     train_dataset, test_dataset = get_data()
-    #print("Reducing dataset to a single batch for overfitting test")
-    #train_dataset = train_dataset.take(1)
-    #test_dataset = train_dataset
+    print("Reducing dataset to a single batch for overfitting test")
+    test_dataset = train_dataset.take(1)
+    train_dataset = train_dataset.take(1).repeat(32)  # Amortize end-of-epoch overhead
 
     if pre_train:
         model_to_train = model.vectorizer
@@ -374,8 +376,10 @@ def main(
         model_to_train = model
         model_save_name = model_name
 
-    learning_rate = CustomSchedule(D_MODEL)
-    optimizer = keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9, clipnorm=1.0)
+    #learning_rate = CustomSchedule(D_MODEL)
+    #learning_rate = 1e-4
+    #optimizer = keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9, clipvalue=1.0)
+    optimizer = keras.optimizers.Adam(1e-5) # Back to basics
 
     # Compile the model
     if pre_train:
@@ -428,9 +432,8 @@ def main(
     model_to_train.fit(
         train_dataset,
         epochs=epochs,
-        # steps_per_epoch=train_steps_per_epoch,
-        validation_data=test_dataset,
-        # validation_steps=validation_steps,
+        # XXX while checking we can overfit, don't bother with val step
+        # validation_data=test_dataset,
         callbacks=[
             tensorboard_callback,
             image_generation_callback,

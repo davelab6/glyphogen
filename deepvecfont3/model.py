@@ -4,6 +4,25 @@ from keras import layers, ops
 import tensorflow as tf
 
 from deepvecfont3.embedding import StyleEmbedding
+from deepvecfont3.hyperparameters import VECTOR_LOSS_WEIGHT_COORD, VECTOR_LOSS_WEIGHT_COMMAND
+from deepvecfont3.glyph import NODE_GLYPH_COMMANDS, COORDINATE_WIDTH
+
+
+def _calculate_masked_coordinate_loss(y_true_command, y_true_coord, y_pred_coord, arg_counts):
+    """Calculates the masked coordinate loss."""
+    true_command_indices = tf.argmax(y_true_command, axis=-1)
+    args_needed = tf.gather(arg_counts, true_command_indices)
+    # Create a mask for the coordinates
+    # For each item in the batch, for each command in the sequence, this is
+    # a vector of COORDINATE_WIDTH length, with 1s for the arguments
+    # that are used and 0s for those that are not.
+    coord_mask = tf.sequence_mask(args_needed, COORDINATE_WIDTH, dtype=tf.float32)
+
+    # Now compute the loss
+    y_true_coord = tf.cast(y_true_coord, tf.float32)
+    squared_error = tf.square(y_true_coord - y_pred_coord)
+    masked_squared_error = squared_error * coord_mask
+    return tf.reduce_sum(masked_squared_error) / tf.reduce_sum(coord_mask)
 
 
 @keras.saving.register_keras_serializable()
@@ -142,6 +161,7 @@ class VectorizationGenerator(keras.Model):
             dff=dff,
             rate=rate,
         )
+        self.arg_counts = tf.constant(list(NODE_GLYPH_COMMANDS.values()), dtype=tf.int32)
 
     def encode(self, inputs):
         x = self.conv1(inputs)
@@ -220,9 +240,11 @@ class VectorizationGenerator(keras.Model):
             vector_command_loss = self.loss["command"](
                 true_command, outputs["command"]
             )
-            vector_coord_loss = self.loss["coord"](true_coord, outputs["coord"])
+            vector_coord_loss = _calculate_masked_coordinate_loss(
+                true_command, true_coord, outputs["coord"], self.arg_counts
+            )
 
-            total_loss = vector_command_loss + vector_coord_loss
+            total_loss = vector_command_loss * VECTOR_LOSS_WEIGHT_COMMAND + vector_coord_loss * VECTOR_LOSS_WEIGHT_COORD
 
         grads = tape.gradient(total_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
@@ -250,9 +272,11 @@ class VectorizationGenerator(keras.Model):
         vector_command_loss = self.loss["command"](
             true_command, outputs["command"]
         )
-        vector_coord_loss = self.loss["coord"](true_coord, outputs["coord"])
+        vector_coord_loss = _calculate_masked_coordinate_loss(
+            true_command, true_coord, outputs["coord"], self.arg_counts
+        )
 
-        total_loss = vector_command_loss + vector_coord_loss
+        total_loss = vector_command_loss * VECTOR_LOSS_WEIGHT_COMMAND + vector_coord_loss * VECTOR_LOSS_WEIGHT_COORD
 
         self.total_loss_tracker.update_state(total_loss)
         self.vector_command_loss_tracker.update_state(vector_command_loss)
@@ -309,6 +333,7 @@ class GlyphGenerator(keras.Model):
             latent_dim=latent_dim,
             rate=rate,
         )
+        self.arg_counts = tf.constant(list(NODE_GLYPH_COMMANDS.values()), dtype=tf.int32)
 
     def call(self, inputs, training=False):
         style_image_input, glyph_id_input, target_sequence_input = inputs
@@ -393,7 +418,10 @@ class GlyphGenerator(keras.Model):
 
             raster_loss = self.loss["raster"](y["raster"], generated_glyph_raster)
             vector_command_loss = self.loss["command"](y["command"], command_output)
-            vector_coord_loss = self.loss["coord"](y["coord"], coord_output)
+
+            vector_coord_loss = _calculate_masked_coordinate_loss(
+                y["command"], y["coord"], coord_output, self.arg_counts
+            )
 
             total_loss = (
                 self.loss_weights["raster"] * raster_loss
@@ -428,7 +456,11 @@ class GlyphGenerator(keras.Model):
 
         raster_loss = self.loss["raster"](y["raster"], generated_glyph_raster)
         vector_command_loss = self.loss["command"](y["command"], command_output)
-        vector_coord_loss = self.loss["coord"](y["coord"], coord_output)
+
+        vector_coord_loss = _calculate_masked_coordinate_loss(
+            y["command"], y["coord"], coord_output, self.arg_counts
+        )
+
 
         total_loss = (
             self.loss_weights["raster"] * raster_loss
@@ -442,3 +474,23 @@ class GlyphGenerator(keras.Model):
         self.vector_coord_loss_tracker.update_state(vector_coord_loss)
 
         return {m.name: m.result() for m in self.metrics}
+
+
+def build_model(
+    num_glyphs,
+    num_transformer_layers,
+    d_model,
+    num_heads,
+    dff,
+    latent_dim=32,
+    rate=0.1,
+):
+    return GlyphGenerator(
+        num_glyphs=num_glyphs,
+        num_transformer_layers=num_transformer_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        dff=dff,
+        latent_dim=latent_dim,
+        rate=rate,
+    )
