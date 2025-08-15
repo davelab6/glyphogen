@@ -56,6 +56,7 @@ class NodeCommand(SVGCommand):
     grammar = NODE_GLYPH_COMMANDS
 
 
+
 class NodeGlyph:
     commands: List[NodeCommand]
 
