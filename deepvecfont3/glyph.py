@@ -8,6 +8,7 @@ from fontTools.pens.qu2cuPen import Qu2CuPen
 from fontTools.pens.svgPathPen import SVGPathPen
 
 from .rendering import render
+from .hyperparameters import QUANTIZATION_BIN_SIZE, COORD_RANGE
 
 BASIC_SVG_COMMANDS = {
     "M": 2,  # Move to (2 coordinates)
@@ -28,13 +29,17 @@ NODE_GLYPH_COMMANDS = {
     "EOS": 0,
 }
 
+# Vocabulary definition
+COMMAND_VOCAB = list(NODE_GLYPH_COMMANDS.keys())
+NUM_COMMAND_TOKENS = len(COMMAND_VOCAB)
+NUM_COORD_BINS = (COORD_RANGE[1] - COORD_RANGE[0]) // QUANTIZATION_BIN_SIZE
+TOKEN_VOCAB_SIZE = NUM_COMMAND_TOKENS + NUM_COORD_BINS
 
-NODE_COMMAND_WIDTH = len(NODE_GLYPH_COMMANDS.keys())
-COORDINATE_WIDTH = max(NODE_GLYPH_COMMANDS.values())
+def quantize_coord(c):
+    return int((c - COORD_RANGE[0]) / QUANTIZATION_BIN_SIZE)
 
-
-
-
+def dequantize_coord(q):
+    return q * QUANTIZATION_BIN_SIZE + COORD_RANGE[0] + QUANTIZATION_BIN_SIZE / 2
 
 class SVGCommand:
     grammar = BASIC_SVG_COMMANDS
@@ -56,7 +61,6 @@ class NodeCommand(SVGCommand):
     grammar = NODE_GLYPH_COMMANDS
 
 
-
 class NodeGlyph:
     commands: List[NodeCommand]
 
@@ -64,63 +68,56 @@ class NodeGlyph:
         self.commands = commands
 
     def encode(self) -> npt.NDArray[np.int_]:
-        # We one-hot encode the commands
-        command_width = len(NodeCommand.grammar.keys())
-        # And we pad the coordinates to a fixed length
-        max_coordinates = max(NodeCommand.grammar.values())
-        output: List[List[int]] = []
-
+        output = []
         # Add SOS token
-        sos_command_vector = [0] * command_width
-        sos_command_vector[list(NodeCommand.grammar.keys()).index("SOS")] = 1
-        sos_coordinates = [0] * max_coordinates
-        output.append(sos_command_vector + sos_coordinates)
+        output.append(COMMAND_VOCAB.index("SOS"))
 
         for command in self.commands:
-            # One-hot encode the command
-            command_vector = [0] * command_width
-            command_vector[
-                list(NodeCommand.grammar.keys()).index(command.command)
-            ] = 1
-            # Pad the coordinates
-            coordinates = command.coordinates + [0] * (
-                max_coordinates - len(command.coordinates)
-            )
-            output.append(command_vector + coordinates)
+            output.append(COMMAND_VOCAB.index(command.command))
+            for coord in command.coordinates:
+                quantized = quantize_coord(coord)
+                if not (0 <= quantized < NUM_COORD_BINS):
+                    raise ValueError(f"Coordinate {coord} out of range")
+                output.append(NUM_COMMAND_TOKENS + quantized)
 
         # Add EOS token
-        eos_command_vector = [0] * command_width
-        eos_command_vector[list(NodeCommand.grammar.keys()).index("EOS")] = 1
-        eos_coordinates = [0] * max_coordinates
-        output.append(eos_command_vector + eos_coordinates)
+        output.append(COMMAND_VOCAB.index("EOS"))
 
-        return np.array(output, dtype=np.int_)
+        return np.array(output, dtype=np.int32)
 
     @classmethod
-    def from_numpy(cls, command_tensor, coord_tensor):
+    def from_numpy(cls, token_sequence):
         commands = []
-        command_keys = list(NodeCommand.grammar.keys())
-        sos_index = command_keys.index("SOS")
-        eos_index = command_keys.index("EOS")
+        i = 0
+        while i < len(token_sequence):
+            token = token_sequence[i]
+            if token < NUM_COMMAND_TOKENS:
+                command_str = COMMAND_VOCAB[token]
+                if command_str == "SOS":
+                    i += 1
+                    continue
+                if command_str == "EOS":
+                    break
+                
+                num_coords = NODE_GLYPH_COMMANDS[command_str]
+                coords = []
+                for j in range(num_coords):
+                    coord_token = token_sequence[i + 1 + j]
+                    if coord_token < NUM_COMMAND_TOKENS:
+                        # This is an error, but we'll be lenient
+                        break 
+                    quantized_coord = coord_token - NUM_COMMAND_TOKENS
+                    coords.append(dequantize_coord(quantized_coord))
+                if len(coords) < num_coords:
+                    coords += [0] * (num_coords - len(coords))
 
-        for i in range(command_tensor.shape[0]):
-            command_index = np.argmax(command_tensor[i])
+                commands.append(NodeCommand(command_str, coords))
+                i += 1 + num_coords
+            else:
+                # This shouldn't happen (a coordinate token where a command is expected)
+                # but we'll just skip it
+                i += 1
 
-            if command_index == sos_index:
-                continue
-
-            if command_index == eos_index:
-                break
-
-            command_str = command_keys[command_index]
-            # A zero vector may be fed to the model, which will be interpreted as 'SOS'
-            # This is padding, so we should stop
-            if command_str == 'SOS' and not np.any(coord_tensor[i]):
-                break
-
-            num_coords = NodeCommand.grammar[command_str]
-            coords = coord_tensor[i, :num_coords].tolist()
-            commands.append(NodeCommand(command_str, coords))
         return cls(commands)
 
     def to_svg_glyph(self) -> "SVGGlyph":
@@ -192,6 +189,7 @@ class NodeGlyph:
             path_data.append(cmd.command)
             path_data.extend(map(lambda x: str(int(x)), cmd.coordinates))
         return " ".join(path_data)
+
 
 class SVGGlyph:
     commands: List[SVGCommand]
