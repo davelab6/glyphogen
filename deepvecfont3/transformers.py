@@ -3,9 +3,12 @@ import keras
 from keras import layers, ops
 
 from deepvecfont3.glyph import (
-    TOKEN_VOCAB_SIZE,
+    NODE_COMMAND_WIDTH,
+    COORDINATE_WIDTH,
 )
-from deepvecfont3.hyperparameters import MAX_SEQUENCE_LENGTH
+from deepvecfont3.hyperparameters import MAX_COMMANDS
+
+MAX_COORDINATE = 1500.0  # We scale the coordinates to be in the range [-1, 1]
 
 
 @keras.saving.register_keras_serializable()
@@ -101,8 +104,9 @@ class TransformerEncoder(layers.Layer):
         self.dff = dff
         self.rate = rate
 
-        self.embedding = layers.Embedding(TOKEN_VOCAB_SIZE, d_model)
-        self.pos_encoding = PositionalEncoding(MAX_SEQUENCE_LENGTH, d_model)
+        self.command_embedding = layers.Dense(d_model)
+        self.coord_embedding = layers.Dense(d_model)
+        self.pos_encoding = PositionalEncoding(MAX_COMMANDS, d_model)
         self.enc_layers = [
             TransformerEncoderLayer(d_model, num_heads, dff, rate)
             for _ in range(num_layers)
@@ -110,7 +114,11 @@ class TransformerEncoder(layers.Layer):
         self.dropout = layers.Dropout(rate)
 
     def call(self, x, training):
-        x = self.embedding(x)
+        command_input = x[:, :, :NODE_COMMAND_WIDTH]
+        coord_input = x[:, :, NODE_COMMAND_WIDTH:] / MAX_COORDINATE
+        command_emb = self.command_embedding(command_input)
+        coord_emb = self.coord_embedding(coord_input)
+        x = command_emb + coord_emb
         x *= ops.sqrt(ops.cast(self.d_model, "float32"))
         x = self.pos_encoding(x)
         x = self.dropout(x, training=training)
@@ -183,26 +191,31 @@ class TransformerDecoderLayer(layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class TransformerDecoder(layers.Layer):
-    def __init__(self, num_layers, d_model, num_heads, dff, target_vocab_size, rate=0.1, **kwargs):
+    def __init__(self, num_layers, d_model, num_heads, dff, rate=0.1, **kwargs):
         super().__init__(**kwargs)
         self.num_layers = num_layers
         self.d_model = d_model
         self.num_heads = num_heads
         self.dff = dff
-        self.target_vocab_size = target_vocab_size
         self.rate = rate
 
-        self.embedding = layers.Embedding(target_vocab_size, d_model)
-        self.pos_encoding = PositionalEncoding(MAX_SEQUENCE_LENGTH, d_model)
+        self.command_embedding = layers.Dense(d_model)
+        self.coord_embedding = layers.Dense(d_model)
+        self.pos_encoding = PositionalEncoding(MAX_COMMANDS, d_model)
         self.dec_layers = [
             TransformerDecoderLayer(d_model, num_heads, dff, rate)
             for _ in range(num_layers)
         ]
         self.dropout = layers.Dropout(rate)
-        self.final_layer = layers.Dense(target_vocab_size)
+        self.output_command = layers.Dense(NODE_COMMAND_WIDTH, activation="softmax")
+        self.output_coords = layers.Dense(COORDINATE_WIDTH, activation="tanh")
 
     def call(self, x, context=None, look_ahead_mask=None, training=False):
-        x = self.embedding(x)
+        command_input = x[:, :, :NODE_COMMAND_WIDTH]
+        coord_input = x[:, :, NODE_COMMAND_WIDTH:] / MAX_COORDINATE
+        command_emb = self.command_embedding(command_input)
+        coord_emb = self.coord_embedding(coord_input)
+        x = command_emb + coord_emb
         x *= ops.sqrt(ops.cast(self.d_model, "float32"))
         x = self.pos_encoding(x)
         x = self.dropout(x, training=training)
@@ -211,7 +224,10 @@ class TransformerDecoder(layers.Layer):
                 x, context=context, look_ahead_mask=look_ahead_mask, training=training
             )
 
-        return self.final_layer(x)
+        command_output = self.output_command(x)
+        coord_output = self.output_coords(x)
+        coord_output = coord_output * MAX_COORDINATE
+        return command_output, coord_output
 
     def get_config(self):
         config = super().get_config()
@@ -221,7 +237,48 @@ class TransformerDecoder(layers.Layer):
                 "d_model": self.d_model,
                 "num_heads": self.num_heads,
                 "dff": self.dff,
-                "target_vocab_size": self.target_vocab_size,
+                "rate": self.rate,
+            }
+        )
+        return config
+
+@keras.saving.register_keras_serializable()
+class LSTMDecoder(layers.Layer):
+    def __init__(self, d_model, rate=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.rate = rate
+
+        self.command_embedding = layers.Dense(d_model)
+        self.coord_embedding = layers.Dense(d_model)
+        self.lstm = layers.LSTM(d_model, return_sequences=True)
+        self.dropout = layers.Dropout(rate)
+        self.output_command = layers.Dense(NODE_COMMAND_WIDTH, activation="softmax")
+        self.output_coords = layers.Dense(COORDINATE_WIDTH, activation="tanh")
+
+    def call(self, x, context=None, look_ahead_mask=None, training=False):
+        command_input = x[:, :, :NODE_COMMAND_WIDTH]
+        coord_input = x[:, :, NODE_COMMAND_WIDTH:] / MAX_COORDINATE
+        command_emb = self.command_embedding(command_input)
+        coord_emb = self.coord_embedding(coord_input)
+        x = command_emb + coord_emb
+        x = self.dropout(x, training=training)
+
+        # The context is a single vector, we use it as the initial state of the LSTM
+        initial_state = [context[:,0,:], context[:,0,:]] if context is not None else None
+        
+        x = self.lstm(x, initial_state=initial_state)
+
+        command_output = self.output_command(x)
+        coord_output = self.output_coords(x)
+        coord_output = coord_output * MAX_COORDINATE
+        return command_output, coord_output
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "d_model": self.d_model,
                 "rate": self.rate,
             }
         )

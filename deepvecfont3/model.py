@@ -4,9 +4,33 @@ from keras import layers, ops
 import tensorflow as tf
 
 from deepvecfont3.embedding import StyleEmbedding
-from deepvecfont3.hyperparameters import VECTOR_LOSS_WEIGHT, RASTER_LOSS_WEIGHT
-from deepvecfont3.glyph import TOKEN_VOCAB_SIZE
-from deepvecfont3.transformers import TransformerDecoder
+from deepvecfont3.hyperparameters import VECTOR_LOSS_WEIGHT_COORD, VECTOR_LOSS_WEIGHT_COMMAND
+from deepvecfont3.glyph import NODE_GLYPH_COMMANDS, COORDINATE_WIDTH
+from deepvecfont3.transformers import LSTMDecoder
+
+
+def _calculate_masked_coordinate_loss(y_true_command, y_true_coord, y_pred_coord, arg_counts, delta=10.0):
+    """Calculates the masked coordinate loss."""
+    true_command_indices = tf.argmax(y_true_command, axis=-1)
+    args_needed = tf.gather(arg_counts, true_command_indices)
+    # Create a mask for the coordinates
+    # For each item in the batch, for each command in the sequence, this is
+    # a vector of COORDINATE_WIDTH length, with 1s for the arguments
+    # that are used and 0s for those that are not.
+    coord_mask = tf.sequence_mask(args_needed, COORDINATE_WIDTH, dtype=tf.float32)
+
+    # Now compute the Huber loss
+    y_true_coord = tf.cast(y_true_coord, tf.float32)
+    residuals = y_true_coord - y_pred_coord
+    abs_error = ops.abs(residuals)
+    half = ops.convert_to_tensor(0.5, dtype=abs_error.dtype)
+    huber_error = ops.where(
+            abs_error <= delta,
+            half * ops.square(residuals),
+            delta * abs_error - half * ops.square(delta),
+        )
+    masked_error = huber_error * coord_mask
+    return tf.reduce_sum(masked_error) / tf.reduce_sum(coord_mask)
 
 
 @keras.saving.register_keras_serializable()
@@ -87,29 +111,18 @@ class Decoder(layers.Layer):
         return config
 
 
-def create_look_ahead_mask(size):
-    mask = 1 - ops.triu(ops.ones((size, size)))
-    return mask
-
-
 # This model is used for pre-training the vectorizer independently.
 @keras.saving.register_keras_serializable()
 class VectorizationGenerator(keras.Model):
     def __init__(
         self,
-        num_transformer_layers,
         d_model,
-        num_heads,
-        dff,
         latent_dim=32,
         rate=0.1,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.d_model = d_model
-        self.num_transformer_layers = num_transformer_layers
-        self.num_heads = num_heads
-        self.dff = dff
         self.latent_dim = latent_dim
         self.rate = rate
 
@@ -135,14 +148,11 @@ class VectorizationGenerator(keras.Model):
         self.sigmoid = layers.Activation("sigmoid")
         self.output_dense = layers.Dense(latent_dim)
 
-        self.transformer_decoder = TransformerDecoder(
-            num_layers=num_transformer_layers,
+        self.decoder = LSTMDecoder(
             d_model=d_model,
-            num_heads=num_heads,
-            dff=dff,
-            target_vocab_size=TOKEN_VOCAB_SIZE,
             rate=rate,
         )
+        self.arg_counts = tf.constant(list(NODE_GLYPH_COMMANDS.values()), dtype=tf.int32)
 
     def encode(self, inputs):
         x = self.conv1(inputs)
@@ -176,13 +186,17 @@ class VectorizationGenerator(keras.Model):
         super().compile(optimizer=optimizer, **kwargs)
         self.loss = loss
         self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
-        self.vector_loss_tracker = keras.metrics.Mean(name="vector_loss")
+        self.vector_command_loss_tracker = keras.metrics.Mean(
+            name="vector_command_loss"
+        )
+        self.vector_coord_loss_tracker = keras.metrics.Mean(name="vector_coord_loss")
 
     @property
     def metrics(self):
         return [
             self.total_loss_tracker,
-            self.vector_loss_tracker,
+            self.vector_command_loss_tracker,
+            self.vector_coord_loss_tracker,
         ]
 
     def call(self, inputs, training=False):
@@ -190,46 +204,72 @@ class VectorizationGenerator(keras.Model):
         z = self.encode(raster_image_input)
         z = ops.expand_dims(z, 1)
 
-        look_ahead_mask = create_look_ahead_mask(ops.shape(target_sequence_input)[1])
-        predictions = self.transformer_decoder(
+        command_output, coord_output = self.decoder(
             target_sequence_input,
             context=z,
-            look_ahead_mask=look_ahead_mask,
             training=training,
         )
-        return predictions
+        return {"command": command_output, "coord": coord_output}
 
     def train_step(self, data):
-        (raster_image_input, target_sequence_input), true_tokens = data
+        (
+            raster_image_input,
+            target_sequence_input,
+        ), (
+            true_command,
+            true_coord,
+        ) = data
 
         with tf.GradientTape() as tape:
-            predictions = self(
+            outputs = self(
                 (raster_image_input, target_sequence_input),
                 training=True,
             )
 
-            vector_loss = self.loss(true_tokens, predictions)
+            vector_command_loss = self.loss["command"](
+                true_command, outputs["command"]
+            )
+            vector_coord_loss = _calculate_masked_coordinate_loss(
+                true_command, true_coord, outputs["coord"], self.arg_counts
+            )
 
-        grads = tape.gradient(vector_loss, self.trainable_variables)
+            total_loss = vector_command_loss * VECTOR_LOSS_WEIGHT_COMMAND + vector_coord_loss * VECTOR_LOSS_WEIGHT_COORD
+
+        grads = tape.gradient(total_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
-        self.total_loss_tracker.update_state(vector_loss)
-        self.vector_loss_tracker.update_state(vector_loss)
+        self.total_loss_tracker.update_state(total_loss)
+        self.vector_command_loss_tracker.update_state(vector_command_loss)
+        self.vector_coord_loss_tracker.update_state(vector_coord_loss)
 
         return {m.name: m.result() for m in self.metrics}
 
     def test_step(self, data):
-        (raster_image_input, target_sequence_input), true_tokens = data
+        (
+            raster_image_input,
+            target_sequence_input,
+        ), (
+            true_command,
+            true_coord,
+        ) = data
 
-        predictions = self(
+        outputs = self(
             (raster_image_input, target_sequence_input),
             training=False,
         )
 
-        vector_loss = self.loss(true_tokens, predictions)
+        vector_command_loss = self.loss["command"](
+            true_command, outputs["command"]
+        )
+        vector_coord_loss = _calculate_masked_coordinate_loss(
+            true_command, true_coord, outputs["coord"], self.arg_counts
+        )
 
-        self.total_loss_tracker.update_state(vector_loss)
-        self.vector_loss_tracker.update_state(vector_loss)
+        total_loss = vector_command_loss * VECTOR_LOSS_WEIGHT_COMMAND + vector_coord_loss * VECTOR_LOSS_WEIGHT_COORD
+
+        self.total_loss_tracker.update_state(total_loss)
+        self.vector_command_loss_tracker.update_state(vector_command_loss)
+        self.vector_coord_loss_tracker.update_state(vector_coord_loss)
 
         return {m.name: m.result() for m in self.metrics}
 
@@ -238,9 +278,6 @@ class VectorizationGenerator(keras.Model):
         config.update(
             {
                 "d_model": self.d_model,
-                "num_transformer_layers": self.num_transformer_layers,
-                "num_heads": self.num_heads,
-                "dff": self.dff,
                 "latent_dim": self.latent_dim,
                 "rate": self.rate,
             }
@@ -254,10 +291,7 @@ class GlyphGenerator(keras.Model):
     def __init__(
         self,
         num_glyphs,
-        num_transformer_layers,
         d_model,
-        num_heads,
-        dff,
         latent_dim=32,
         rate=0.1,
         **kwargs,
@@ -266,22 +300,17 @@ class GlyphGenerator(keras.Model):
         self.num_glyphs = num_glyphs
         self.latent_dim = latent_dim
         self.d_model = d_model
-        self.num_transformer_layers = num_transformer_layers
-        self.num_heads = num_heads
-        self.dff = dff
         self.rate = rate
 
         self.style_embedding = StyleEmbedding(latent_dim)
         self.glyph_id_embedding = layers.Dense(latent_dim, activation="relu")
         self.raster_decoder = Decoder(latent_dim * 2)
         self.vectorizer = VectorizationGenerator(
-            num_transformer_layers=num_transformer_layers,
             d_model=d_model,
-            num_heads=num_heads,
-            dff=dff,
             latent_dim=latent_dim,
             rate=rate,
         )
+        self.arg_counts = tf.constant(list(NODE_GLYPH_COMMANDS.values()), dtype=tf.int32)
 
     def call(self, inputs, training=False):
         style_image_input, glyph_id_input, target_sequence_input = inputs
@@ -298,10 +327,13 @@ class GlyphGenerator(keras.Model):
         vectorizer_output = self.vectorizer(
             (generated_glyph_raster, target_sequence_input), training=training
         )
+        command_output = vectorizer_output["command"]
+        coord_output = vectorizer_output["coord"]
 
         return {
             "raster": generated_glyph_raster,
-            "vector": vectorizer_output,
+            "command": command_output,
+            "coord": coord_output,
         }
 
     def get_config(self):
@@ -311,9 +343,6 @@ class GlyphGenerator(keras.Model):
                 "num_glyphs": self.num_glyphs,
                 "latent_dim": self.latent_dim,
                 "d_model": self.d_model,
-                "num_transformer_layers": self.num_transformer_layers,
-                "num_heads": self.num_heads,
-                "dff": self.dff,
                 "rate": self.rate,
             }
         )
@@ -331,18 +360,26 @@ class GlyphGenerator(keras.Model):
         self.loss_weights = loss_weights
         self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
         self.raster_loss_tracker = keras.metrics.Mean(name="raster_loss")
-        self.vector_loss_tracker = keras.metrics.Mean(name="vector_loss")
+        self.vector_command_loss_tracker = keras.metrics.Mean(
+            name="vector_command_loss"
+        )
+        self.vector_coord_loss_tracker = keras.metrics.Mean(name="vector_coord_loss")
 
     @property
     def metrics(self):
         return [
             self.total_loss_tracker,
             self.raster_loss_tracker,
-            self.vector_loss_tracker,
+            self.vector_command_loss_tracker,
+            self.vector_coord_loss_tracker,
         ]
 
     def train_step(self, data):
-        (style_image_input, glyph_id_input, target_sequence_input), y = data
+        (
+            style_image_input,
+            glyph_id_input,
+            target_sequence_input,
+        ), y = data
 
         with tf.GradientTape() as tape:
             outputs = self(
@@ -350,14 +387,20 @@ class GlyphGenerator(keras.Model):
                 training=True,
             )
             generated_glyph_raster = outputs["raster"]
-            vector_output = outputs["vector"]
+            command_output = outputs["command"]
+            coord_output = outputs["coord"]
 
             raster_loss = self.loss["raster"](y["raster"], generated_glyph_raster)
-            vector_loss = self.loss["vector"](y["vector"], vector_output)
+            vector_command_loss = self.loss["command"](y["command"], command_output)
+
+            vector_coord_loss = _calculate_masked_coordinate_loss(
+                y["command"], y["coord"], coord_output, self.arg_counts
+            )
 
             total_loss = (
                 self.loss_weights["raster"] * raster_loss
-                + self.loss_weights["vector"] * vector_loss
+                + self.loss_weights["command"] * vector_command_loss
+                + self.loss_weights["coord"] * vector_coord_loss
             )
 
         grads = tape.gradient(total_loss, self.trainable_variables)
@@ -365,50 +408,57 @@ class GlyphGenerator(keras.Model):
 
         self.total_loss_tracker.update_state(total_loss)
         self.raster_loss_tracker.update_state(raster_loss)
-        self.vector_loss_tracker.update_state(vector_loss)
+        self.vector_command_loss_tracker.update_state(vector_command_loss)
+        self.vector_coord_loss_tracker.update_state(vector_coord_loss)
 
         return {m.name: m.result() for m in self.metrics}
 
     def test_step(self, data):
-        (style_image_input, glyph_id_input, target_sequence_input), y = data
+        (
+            style_image_input,
+            glyph_id_input,
+            target_sequence_input,
+        ), y = data
 
         outputs = self(
             (style_image_input, glyph_id_input, target_sequence_input),
             training=False,
         )
         generated_glyph_raster = outputs["raster"]
-        vector_output = outputs["vector"]
+        command_output = outputs["command"]
+        coord_output = outputs["coord"]
 
         raster_loss = self.loss["raster"](y["raster"], generated_glyph_raster)
-        vector_loss = self.loss["vector"](y["vector"], vector_output)
+        vector_command_loss = self.loss["command"](y["command"], command_output)
+
+        vector_coord_loss = _calculate_masked_coordinate_loss(
+            y["command"], y["coord"], coord_output, self.arg_counts
+        )
+
 
         total_loss = (
             self.loss_weights["raster"] * raster_loss
-            + self.loss_weights["vector"] * vector_loss
+            + self.loss_weights["command"] * vector_command_loss
+            + self.loss_weights["coord"] * vector_coord_loss
         )
 
         self.total_loss_tracker.update_state(total_loss)
         self.raster_loss_tracker.update_state(raster_loss)
-        self.vector_loss_tracker.update_state(vector_loss)
+        self.vector_command_loss_tracker.update_state(vector_command_loss)
+        self.vector_coord_loss_tracker.update_state(vector_coord_loss)
 
         return {m.name: m.result() for m in self.metrics}
 
 
 def build_model(
     num_glyphs,
-    num_transformer_layers,
     d_model,
-    num_heads,
-    dff,
     latent_dim=32,
     rate=0.1,
 ):
     return GlyphGenerator(
         num_glyphs=num_glyphs,
-        num_transformer_layers=num_transformer_layers,
         d_model=d_model,
-        num_heads=num_heads,
-        dff=dff,
         latent_dim=latent_dim,
         rate=rate,
     )
