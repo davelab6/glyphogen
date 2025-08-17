@@ -15,7 +15,7 @@ LEARNING_RATE = 1.2e-4
 GEN_IMAGE_SIZE = (512, 512)
 STYLE_IMAGE_SIZE = (168, 40)
 MAX_COMMANDS = 150
-LIMIT = 0  # Limit the number of fonts to process for testing
+LIMIT = 10  # Limit the number of fonts to process for testing
 
 # New tokenization hyperparameters
 QUANTIZATION_BIN_SIZE = 10

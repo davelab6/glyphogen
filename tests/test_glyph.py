@@ -95,7 +95,10 @@ def test_roundtrip_conversion():
 
     # Should be 4 L nodes and a Z
     assert len(node_glyph.commands) == 5
-    assert all(cmd.command == "L" for cmd in node_glyph.commands[:4])
+    assert node_glyph.commands[0].command == "L"
+    assert node_glyph.commands[1].command == "LH"
+    assert node_glyph.commands[2].command == "LV"
+    assert node_glyph.commands[3].command == "LH"
     assert node_glyph.commands[4].command == "Z"
 
     reconverted_svg_glyph = node_glyph.to_svg_glyph()
@@ -111,6 +114,8 @@ def test_roundtrip_conversion():
     assert reconverted_svg_glyph.commands[1].coordinates == [100, 0]
     assert reconverted_svg_glyph.commands[2].coordinates == [100, 100]
     assert reconverted_svg_glyph.commands[3].coordinates == [0, 100]
+
+    assert reconverted_svg_glyph.to_svg_string() == "M 0 0 L 100 0 L 100 100 L 0 100 Z"
 
 def test_complex_svg_to_node_glyph_conversion():
     # M 247 493 C 383 493 493 383 493 246 C 493 169 458 101 403 56 L 247 0 L 0 246 C 0 383 110 493 247 493 Z
@@ -131,10 +136,10 @@ def test_complex_svg_to_node_glyph_conversion():
     # The nodes are at: 247,493; 493,246; 403,56; 247,0; 0,246
     # Let's check them in order.
 
-    # Node 1: 247, 493. In: C, Out: C. Should be N.
-    assert node_glyph.commands[0].command == "N"
-    # Node 2: 493, 246. In: C, Out: C. Should be N.
-    assert node_glyph.commands[1].command == "N"
+    # Node 1: 247, 493. In: C, Out: C. All handles are aligned at y=493. Should be NH.
+    assert node_glyph.commands[0].command == "NH"
+    # Node 2: 493, 246. In: C, Out: C. Handle aligned vertically at x=493. Should be NV.
+    assert node_glyph.commands[1].command == "NV"
     # Node 3: 403, 56. In: C, Out: L. Should be NCI.
     assert node_glyph.commands[2].command == "NCI"
     # Node 4: 247, 0. In: L, Out: L. Should be L.
@@ -143,3 +148,8 @@ def test_complex_svg_to_node_glyph_conversion():
     assert node_glyph.commands[4].command == "NCO"
     # Z command
     assert node_glyph.commands[5].command == "Z"
+
+    # Test round-trip
+    reconverted_svg_glyph = node_glyph.to_svg_glyph()
+    # assert len(reconverted_svg_glyph.commands) == len(svg_commands)
+    assert reconverted_svg_glyph.to_svg_string() == "M 247 493 C 383 493 493 383 493 246 C 493 169 458 101 403 56 L 247 0 L 0 246 C 0 383 110 493 247 493 Z"
