@@ -325,6 +325,7 @@ def main(
     pre_train=False,
     epochs=EPOCHS,
     vectorizer_model_name=None,
+    single_batch=False,
 ):
     # Load the model if it exists
     if os.path.exists(f"{model_name}") and not vectorizer_model_name:
@@ -356,9 +357,10 @@ def main(
         print(f"Loaded vectorizer from {vectorizer_model_name}")
 
     train_dataset, test_dataset = get_data()
-    print("Reducing dataset to a single batch for overfitting test")
-    test_dataset = train_dataset.take(1)
-    train_dataset = train_dataset.take(1).repeat(32)  # Amortize end-of-epoch overhead
+    if single_batch:
+        print("Reducing dataset to a single batch for overfitting test")
+        test_dataset = train_dataset.take(1)
+        train_dataset = train_dataset.take(1).repeat(32)  # Amortize end-of-epoch overhead
 
     if pre_train:
         model_to_train = model.vectorizer
@@ -371,8 +373,8 @@ def main(
         model_to_train = model
         model_save_name = model_name
 
-    learning_rate = CustomSchedule(D_MODEL, 1.0)
-    # learning_rate = LEARNING_RATE
+    # learning_rate = CustomSchedule(D_MODEL, 1.0)
+    learning_rate = LEARNING_RATE
     # optimizer = keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9, clipvalue=1.0)
     optimizer = keras.optimizers.Adam(learning_rate)
 
@@ -466,10 +468,16 @@ if __name__ == "__main__":
         default=EPOCHS,
         help="Number of epochs to train the model.",
     )
+    parser.add_argument(
+        "--single-batch",
+        action="store_true",
+        help="Whether to use a single batch for training.",
+    )
     args = parser.parse_args()
     main(
         model_name=args.model_name,
         pre_train=args.pre_train,
         epochs=args.epochs,
+        single_batch=args.single_batch,
         vectorizer_model_name=args.vectorizer_model_name,
     )

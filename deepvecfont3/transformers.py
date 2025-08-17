@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import keras
 from keras import layers, ops
+import tensorflow as tf
 
 from deepvecfont3.glyph import (
     NODE_COMMAND_WIDTH,
@@ -256,7 +257,7 @@ class LSTMDecoder(layers.Layer):
         self.output_command = layers.Dense(NODE_COMMAND_WIDTH, activation="softmax")
         self.output_coords = layers.Dense(COORDINATE_WIDTH, activation="tanh")
 
-    def call(self, x, context=None, look_ahead_mask=None, training=False):
+    def call(self, x, context=None, training=False):
         command_input = x[:, :, :NODE_COMMAND_WIDTH]
         coord_input = x[:, :, NODE_COMMAND_WIDTH:] / MAX_COORDINATE
         command_emb = self.command_embedding(command_input)
@@ -264,10 +265,11 @@ class LSTMDecoder(layers.Layer):
         x = command_emb + coord_emb
         x = self.dropout(x, training=training)
 
-        # The context is a single vector, we use it as the initial state of the LSTM
-        initial_state = [context[:,0,:], context[:,0,:]] if context is not None else None
-        
-        x = self.lstm(x, initial_state=initial_state)
+        if context is not None:
+            context_tiled = tf.tile(context, [1, tf.shape(x)[1], 1])
+            x = layers.concatenate([x, context_tiled])
+
+        x = self.lstm(x)
 
         command_output = self.output_command(x)
         coord_output = self.output_coords(x)
