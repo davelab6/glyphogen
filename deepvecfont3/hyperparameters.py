@@ -15,7 +15,7 @@ LEARNING_RATE = 1.2e-4
 GEN_IMAGE_SIZE = (512, 512)
 STYLE_IMAGE_SIZE = (168, 40)
 MAX_COMMANDS = 150
-LIMIT = 10  # Limit the number of fonts to process for testing
+LIMIT = 0  # Limit the number of fonts to process for testing
 
 # New tokenization hyperparameters
 QUANTIZATION_BIN_SIZE = 10
@@ -23,4 +23,8 @@ COORD_RANGE = (-1000, 1000)
 MAX_SEQUENCE_LENGTH = (MAX_COMMANDS * 7) + 1
 
 ALPHABET = ["a", "d", "h", "e", "s", "i", "o", "n", "t"]
+# # While pre-training the vectorizer, shove as many glyphs in as we can
+# import string
+
+# ALPHABET = list(string.ascii_lowercase + string.ascii_uppercase + string.digits)
 BASE_DIR = "/Users/simon/others-repos/fonts/ofl/"

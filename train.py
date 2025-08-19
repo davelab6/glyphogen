@@ -13,7 +13,14 @@ if not os.path.exists("train.tfds"):
 
 from fontTools.ttLib import TTFont
 from deepvecfont3.model import GlyphGenerator, VectorizationGenerator
-from deepvecfont3.glyph import NODE_COMMAND_WIDTH, Glyph, NodeGlyph, SVGGlyph
+from deepvecfont3.glyph import (
+    NODE_COMMAND_WIDTH,
+    COORDINATE_WIDTH,
+    Glyph,
+    NodeGlyph,
+    SVGGlyph,
+    NodeCommand,
+)
 from deepvecfont3.hyperparameters import (
     BATCH_SIZE,
     NUM_GLYPHS,
@@ -40,31 +47,11 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split
 
 
-class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, d_model, alpha, warmup_steps=4000):
-        super(CustomSchedule, self).__init__()
-        self.d_model = d_model
-        self.alpha = alpha
-        self.d_model = tf.cast(self.d_model, tf.float32)
-        self.warmup_steps = warmup_steps
-
-    def __call__(self, step):
-        step = tf.cast(step, tf.float32)
-        arg1 = tf.math.rsqrt(step)
-        arg2 = step * (self.warmup_steps**-1.5)
-        return self.alpha * tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
-
-    def get_config(self):
-        return {"d_model": self.d_model, "warmup_steps": self.warmup_steps, "alpha": self.alpha}
-
-
 def create_real_dataset():
     style_images = []
     glyph_ids = []
-    target_sequences = []
+    encoded_svgs = []
     true_rasters = []
-    true_commands = []
-    true_coords = []
 
     font_files = list(glob.glob(BASE_DIR + "/*/*.ttf"))
     if LIMIT > 0:
@@ -117,30 +104,19 @@ def create_real_dataset():
                 )
                 encoded_svg = np.vstack((encoded_svg, padding))
 
-            decoder_input = encoded_svg[:-1]
-            ground_truth = encoded_svg[1:]
-
-            # Split into command and coordinate parts
-            command_part = ground_truth[:, :NODE_COMMAND_WIDTH]
-            coord_part = ground_truth[:, NODE_COMMAND_WIDTH:]
-
             # One-hot encode glyph ID
             glyph_id_one_hot = tf.one_hot(i, NUM_GLYPHS).numpy()
 
             style_images.append(style_image)
             glyph_ids.append(glyph_id_one_hot)
-            target_sequences.append(decoder_input)
+            encoded_svgs.append(encoded_svg)
             true_rasters.append(raster)
-            true_commands.append(command_part)
-            true_coords.append(coord_part)
 
     # Convert lists to numpy arrays
     style_images = np.array(style_images)
     glyph_ids = np.array(glyph_ids)
-    target_sequences = np.array(target_sequences)
+    encoded_svgs = np.array(encoded_svgs)
     true_rasters = np.array(true_rasters)
-    true_commands = np.array(true_commands)
-    true_coords = np.array(true_coords)
 
     # Split data into training and testing sets
     (
@@ -148,62 +124,41 @@ def create_real_dataset():
         style_images_test,
         glyph_ids_train,
         glyph_ids_test,
-        target_sequences_train,
-        target_sequences_test,
+        encoded_svgs_train,
+        encoded_svgs_test,
         true_rasters_train,
         true_rasters_test,
-        true_commands_train,
-        true_commands_test,
-        true_coords_train,
-        true_coords_test,
     ) = train_test_split(
         style_images,
         glyph_ids,
-        target_sequences,
+        encoded_svgs,
         true_rasters,
-        true_commands,
-        true_coords,
         test_size=0.2,  # 20% for testing
         random_state=42,
     )
 
     # Create TensorFlow datasets
     train_dataset = tf.data.Dataset.from_tensor_slices(
-        (
-            (style_images_train, glyph_ids_train, target_sequences_train),
-            {
-                "raster": true_rasters_train,
-                "command": true_commands_train,
-                "coord": true_coords_train,
-            },
-        )
-    )
-    train_dataset = (
-        train_dataset.shuffle(buffer_size=len(style_images_train))
-        .batch(BATCH_SIZE)
-        .prefetch(tf.data.AUTOTUNE)
+        (style_images_train, glyph_ids_train, encoded_svgs_train, true_rasters_train)
     )
 
     test_dataset = tf.data.Dataset.from_tensor_slices(
-        (
-            (style_images_test, glyph_ids_test, target_sequences_test),
-            {
-                "raster": true_rasters_test,
-                "command": true_commands_test,
-                "coord": true_coords_test,
-            },
-        )
-    )
-    test_dataset = (
-        test_dataset.shuffle(buffer_size=len(style_images_test))
-        .batch(BATCH_SIZE)
-        .prefetch(tf.data.AUTOTUNE)
+        (style_images_test, glyph_ids_test, encoded_svgs_test, true_rasters_test)
     )
 
     return train_dataset, test_dataset
 
 
-
+def prepare_data(style_image, glyph_id, encoded_svg, true_raster):
+    target_sequence = encoded_svg[:-1]
+    ground_truth = encoded_svg[1:]
+    true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
+    true_coord = ground_truth[:, NODE_COMMAND_WIDTH:]
+    return (style_image, glyph_id, target_sequence), {
+        "raster": true_raster,
+        "command": true_command,
+        "coord": true_coord,
+    }
 
 
 class ImageGenerationCallback(tf.keras.callbacks.Callback):
@@ -218,10 +173,9 @@ class ImageGenerationCallback(tf.keras.callbacks.Callback):
             # Don't generate images during pre-training
             return
 
-        for i, (
-            (style_image, glyph_id, target_sequence),
-            (true_raster, true_command, true_coord),
-        ) in enumerate(self.test_dataset):
+        for i, (inputs, outputs) in enumerate(self.test_dataset):
+            (style_image, glyph_id, target_sequence) = inputs
+            true_raster = outputs["raster"]
             # Add batch dimension
             style_image = tf.expand_dims(style_image, axis=0)
             glyph_id = tf.expand_dims(glyph_id, axis=0)
@@ -263,7 +217,10 @@ class SVGGenerationCallback(tf.keras.callbacks.Callback):
 
         for i, (inputs, outputs) in enumerate(self.test_dataset):
             if self.pre_train:
-                raster_image_input, target_sequence_input = inputs
+                (raster_image_input, target_sequence_input), (
+                    true_command,
+                    true_coord,
+                ) = inputs
 
                 # Add batch dimension
                 raster_image_input = tf.expand_dims(raster_image_input, axis=0)
@@ -291,13 +248,24 @@ class SVGGenerationCallback(tf.keras.callbacks.Callback):
             command_tensor = command_output[0]
             coord_tensor = coord_output[0]
 
-            decoded_glyph = NodeGlyph.from_numpy(
-                command_tensor.numpy(), coord_tensor.numpy()
-            )
             try:
-                svg_string = decoded_glyph.to_svg_glyph().to_svg_string()
+                decoded_glyph = NodeGlyph.from_numpy(
+                    command_tensor.numpy(), coord_tensor.numpy()
+                )
+                try:
+                    svg_string = decoded_glyph.to_svg_glyph().to_svg_string()
+                except Exception:
+                    svg_string = (
+                        "Couldn't convert to SVG: " + decoded_glyph.to_debug_string()
+                    )
             except Exception:
-                svg_string = "DEBUG " + decoded_glyph.to_debug_string()
+                command_keys = list(NodeCommand.grammar.keys())
+                svg_string = "Invalid Node Sequence " + " ".join(
+                    [
+                        command_keys[np.argmax(command_tensor[i])]
+                        for i in range(command_tensor.shape[0])
+                    ]
+                )
 
             with self.file_writer.as_default():
                 tf.summary.text(f"Generated SVG - Sample {i}", svg_string, step=epoch)
@@ -316,8 +284,12 @@ def get_data():
     return train_dataset, test_dataset
 
 
-def _preprocess_for_vectorizer_dataset(x, y):
-    return ((y["raster"], x[2]), (y["command"], y["coord"]))
+def _preprocess_for_vectorizer_dataset(style_image, glyph_id, encoded_svg, true_raster):
+    target_sequence = encoded_svg[:-1]
+    ground_truth = encoded_svg[1:]
+    true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
+    true_coord = ground_truth[:, NODE_COMMAND_WIDTH:]
+    return ((true_raster, target_sequence), (true_command, true_coord))
 
 
 def main(
@@ -360,7 +332,9 @@ def main(
     if single_batch:
         print("Reducing dataset to a single batch for overfitting test")
         test_dataset = train_dataset.take(1)
-        train_dataset = train_dataset.take(1).repeat(32)  # Amortize end-of-epoch overhead
+        train_dataset = train_dataset.take(1).repeat(
+            32
+        )  # Amortize end-of-epoch overhead
 
     if pre_train:
         model_to_train = model.vectorizer
@@ -372,11 +346,26 @@ def main(
     else:
         model_to_train = model
         model_save_name = model_name
+        train_dataset = train_dataset.map(prepare_data)
+        test_dataset = test_dataset.map(prepare_data)
 
-    # learning_rate = CustomSchedule(D_MODEL, 1.0)
-    learning_rate = LEARNING_RATE
-    # optimizer = keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9, clipvalue=1.0)
-    optimizer = keras.optimizers.Adam(learning_rate)
+    train_dataset = (
+        train_dataset.shuffle(buffer_size=1000)
+        .cache()
+        .prefetch(tf.data.AUTOTUNE)
+        .batch(BATCH_SIZE)
+    )
+    test_dataset = (
+        test_dataset.shuffle(buffer_size=1000)
+        .cache()
+        .prefetch(tf.data.AUTOTUNE)
+        .batch(BATCH_SIZE)
+    )
+
+    lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=LEARNING_RATE, decay_steps=10000, decay_rate=0.9
+    )
+    optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
 
     # Compile the model
     if pre_train:
@@ -420,7 +409,7 @@ def main(
     checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
         filepath=model_save_name,
         save_weights_only=False,
-        monitor="val_loss",
+        monitor="val_total_loss",
         mode="min",
         save_best_only=True,
     )
@@ -429,14 +418,13 @@ def main(
     model_to_train.fit(
         train_dataset,
         epochs=epochs,
-        # XXX while checking we can overfit, don't bother with val step
-        # validation_data=test_dataset,
         callbacks=[
             tensorboard_callback,
             image_generation_callback,
             svg_generation_callback,
             checkpoint_callback,
         ],
+        **({"validation_data": test_dataset} if not single_batch else {}),
     )
     # Save the model
 

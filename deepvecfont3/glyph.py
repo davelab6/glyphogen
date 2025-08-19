@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -20,11 +20,11 @@ BASIC_SVG_COMMANDS = {
 
 NODE_GLYPH_COMMANDS = {
     "SOS": 0,
-    "N": 6,  # Node with two handles (x, y, hin_x, hin_y, hout_x, hout_y)
-    "NH": 4, # Node with horizontal handles (x, y, hin_x, hout_x)
-    "NV": 4, # Node with vertical handles (x, y, hin_y, hout_y)
-    "NCI": 4,  # Node with curve in, line out (x, y, hin_x, hin_y)
-    "NCO": 4,  # Node with line in, curve out (x, y, hout_x, hout_y)
+    "N": 6,  # Node with two handles (x, y, delta_hin_x, delta_hin_y, delta_hout_x, delta_hout_y)
+    "NH": 4, # Node with horizontal handles (x, y, delta_hin_x, delta_hout_x)
+    "NV": 4, # Node with vertical handles (x, y, delta_hin_y, delta_hout_y)
+    "NCI": 4,  # Node with curve in, line out (x, y, delta_hin_x, delta_hin_y)
+    "NCO": 4,  # Node with line in, curve out (x, y, delta_hout_x, delta_hout_y)
     "L": 2,  # Line node (x, y)
     "LH": 1, # Horizontal line (x)
     "LV": 1, # Vertical line (y)
@@ -35,9 +35,6 @@ NODE_GLYPH_COMMANDS = {
 
 NODE_COMMAND_WIDTH = len(NODE_GLYPH_COMMANDS.keys())
 COORDINATE_WIDTH = max(NODE_GLYPH_COMMANDS.values())
-
-
-
 
 
 class SVGCommand:
@@ -59,13 +56,243 @@ class SVGCommand:
 class NodeCommand(SVGCommand):
     grammar = NODE_GLYPH_COMMANDS
 
+class NodeContour:
+    nodes: List["Node"]
+
+    def __init__(self, nodes: List["Node"]):
+        self.nodes = nodes
+
+    @property
+    def commands(self) -> List[NodeCommand]:
+        return [node.command() for node in self.nodes] + [NodeCommand("Z", [])]
+
+    @property
+    def svg_commands(self) -> List[SVGCommand]:
+        svg_commands: List[SVGCommand] = []
+        if not self.nodes:
+            return []
+
+        svg_commands.append(SVGCommand("M", self.nodes[0].coordinates.tolist()))
+
+        for i in range(len(self.nodes)):
+            p1 = self.nodes[i]
+            p2 = self.nodes[(i + 1) % len(self.nodes)]
+
+            c1 = p1.out_handle if p1.out_handle is not None else p1.coordinates
+            c2 = p2.in_handle if p2.in_handle is not None else p2.coordinates
+
+            is_line = np.array_equal(c1, p1.coordinates) and np.array_equal(c2, p2.coordinates)
+            if is_line:
+                if i == len(self.nodes) - 1:
+                    pass
+                else:
+                    svg_commands.append(SVGCommand("L", p2.coordinates.tolist()))
+            else:
+                svg_commands.append(
+                    SVGCommand(
+                        "C",
+                        np.concatenate((c1, c2, p2.coordinates)).tolist()
+                    )
+                )
+        svg_commands.append(SVGCommand("Z", []))
+        return svg_commands
+    
+    @classmethod
+    def from_svg_contour(cls, contour: List[SVGCommand]) -> "NodeContour":
+        contour = contour[:-1] # Drop Z
+
+        node_positions = []
+        segments = []
+
+        def add_pos(p):
+            p = tuple(p)
+            if p not in node_positions:
+                node_positions.append(p)
+            return node_positions.index(p)
+
+        start_pos = tuple(contour[0].coordinates)
+        start_node_idx = add_pos(start_pos)
+        current_node_idx = start_node_idx
+
+        for cmd in contour:
+            if cmd.command == "M":
+                continue
+            elif cmd.command == "L":
+                end_pos = tuple(cmd.coordinates)
+                end_node_idx = add_pos(end_pos)
+                segments.append(
+                    {"start": current_node_idx, "end": end_node_idx, "type": "line"}
+                )
+                current_node_idx = end_node_idx
+            elif cmd.command == "C":
+                end_pos = tuple(cmd.coordinates[4:6])
+                end_node_idx = add_pos(end_pos)
+                c1 = tuple(cmd.coordinates[0:2])
+                c2 = tuple(cmd.coordinates[2:4])
+                segments.append(
+                    {
+                        "start": current_node_idx,
+                        "end": end_node_idx,
+                        "type": "curve",
+                        "c1": c1,
+                        "c2": c2,
+                    }
+                )
+                current_node_idx = end_node_idx
+        
+        segments.append({"start": current_node_idx, "end": start_node_idx, "type": "line"})
+
+        path_nodes = [{"pos": pos, "in": [], "out": []} for pos in node_positions]
+        for i, seg in enumerate(segments):
+            path_nodes[seg["start"]]["out"].append(i)
+            path_nodes[seg["end"]]["in"].append(i)
+
+        nodes = []
+        contour_obj = cls(nodes)
+        for i, node_info in enumerate(path_nodes):
+            pos = np.array(node_info["pos"])
+            in_seg = segments[node_info["in"][0]] if node_info["in"] else None
+            out_seg = segments[node_info["out"][0]] if node_info["out"] else None
+
+            in_handle = None
+            if in_seg and in_seg["type"] == "curve":
+                in_handle = np.array(in_seg["c2"])
+            
+            out_handle = None
+            if out_seg and out_seg["type"] == "curve":
+                out_handle = np.array(out_seg["c1"])
+            
+            nodes.append(Node(pos, contour_obj, in_handle, out_handle))
+
+        return contour_obj
+    
+    def push_command(self, command: NodeCommand):
+        prev_node = self.nodes[-1] if len(self.nodes) > 0 else None
+        position = np.array([0,0])
+        in_handle: Optional[np.ndarray] = None
+        out_handle: Optional[np.ndarray] = None
+
+        if command.command == "L":
+            position = np.array(command.coordinates)
+        elif command.command == "LH":
+            if prev_node is not None:
+                position = np.array([command.coordinates[0], prev_node.coordinates[1]])
+            else:
+                # We are lenient here because we are coming from the model and want to make as many
+                # sequences as possible work
+                return  # raise ValueError("Invalid LH command: no previous node")
+        elif command.command == "LV":
+            if prev_node is not None:
+                position = np.array([prev_node.coordinates[0], command.coordinates[0]])
+            else:
+                # See above
+                return  # raise ValueError("Invalid LV command: no previous node")
+        elif command.command == "NH":
+            position = np.array(command.coordinates[0:2])
+            in_handle = position + np.array([command.coordinates[2], 0])
+            out_handle = position + np.array([command.coordinates[3], 0])
+        elif command.command == "NV":
+            position = np.array(command.coordinates[0:2])
+            in_handle = position + np.array([0, command.coordinates[2]])
+            out_handle = position + np.array([0, command.coordinates[3]])
+        elif command.command == "NCI":
+            position = np.array(command.coordinates[0:2])
+            in_handle = position + np.array(command.coordinates[2:4])
+        elif command.command == "NCO":
+            position = np.array(command.coordinates[0:2])
+            out_handle = position + np.array(command.coordinates[2:4])
+        elif command.command == "N":
+            position = np.array(command.coordinates[0:2])
+            in_handle = position + np.array(command.coordinates[2:4])
+            out_handle = position + np.array(command.coordinates[4:6])
+        else:
+            # Shouldn't really be here
+            return
+        self.nodes.append(Node(position, self, in_handle, out_handle))
+    
+    def normalize(self) -> None:
+        index_of_bottom_left = min(range(len(self.nodes)), key=lambda i: (self.nodes[i].coordinates[0], self.nodes[i].coordinates[1]))
+        self.nodes = self.nodes[index_of_bottom_left:] + self.nodes[:index_of_bottom_left]
+
+class Node:
+    coordinates: npt.NDArray[np.int_]
+    in_handle: Optional[npt.NDArray[np.int_]]
+    out_handle: Optional[npt.NDArray[np.int_]]
+    
+    _contour: NodeContour
+
+    def __init__(self, coordinates, contour, in_handle=None, out_handle=None):
+        self.coordinates = np.array(coordinates)
+        self.in_handle = np.array(in_handle) if in_handle is not None else None
+        self.out_handle = np.array(out_handle) if out_handle is not None else None
+        self._contour = contour
+
+    @property
+    def index(self) -> int:
+        return self._contour.nodes.index(self)
+    
+    @property
+    def next(self) -> "Node":
+        return self._contour.nodes[(self.index + 1) % len(self._contour.nodes)]
+    
+    @property
+    def previous(self) -> "Node":
+        return self._contour.nodes[self.index - 1]
+    
+    @property
+    def handles_horizontal(self) -> bool:
+        return self.in_handle is not None and self.out_handle is not None and self.in_handle[1] == self.coordinates[1] and self.coordinates[1] == self.out_handle[1]
+    
+    @property
+    def handles_vertical(self) -> bool:
+        return self.in_handle is not None and self.out_handle is not None and self.in_handle[0] == self.coordinates[0] and self.coordinates[0] == self.out_handle[0]
+    
+    # Convert to optimal command representation
+    def command(self) -> NodeCommand:
+        if self.in_handle is None and self.out_handle is None:
+            # It's a line. Can we do better?
+            if self.index > 0 and self.coordinates[0] == self.previous.coordinates[0]:
+                # Vertical line
+                return NodeCommand("LV", [self.coordinates[1]])
+            elif self.index > 0 and self.coordinates[1] == self.previous.coordinates[1]:
+                # Horizontal line
+                return NodeCommand("LH", [self.coordinates[0]])
+            else:
+                return NodeCommand("L", self.coordinates.tolist())
+        
+        # Deal with line-to-curve and curve-to-line
+        if self.in_handle is None and self.out_handle is not None:
+            delta_hout = self.out_handle - self.coordinates
+            return NodeCommand("NCO", np.concatenate((self.coordinates, delta_hout)).tolist())
+        elif self.out_handle is None and self.in_handle is not None:
+            delta_hin = self.in_handle - self.coordinates
+            return NodeCommand("NCI", np.concatenate((self.coordinates, delta_hin)).tolist())
+        
+        # It's a curve. Can we do better?
+        assert self.in_handle is not None and self.out_handle is not None
+        delta_hin = self.in_handle - self.coordinates
+        delta_hout = self.out_handle - self.coordinates
+
+        if self.handles_horizontal:
+            return NodeCommand("NH", [self.coordinates[0], self.coordinates[1], delta_hin[0], delta_hout[0]])
+        elif self.handles_vertical:
+            return NodeCommand("NV", [self.coordinates[0], self.coordinates[1], delta_hin[1], delta_hout[1]])
+        else:
+            return NodeCommand("N", np.concatenate((self.coordinates, delta_hin, delta_hout)).tolist())
 
 
 class NodeGlyph:
-    commands: List[NodeCommand]
+    contours: List[NodeContour]
 
-    def __init__(self, commands: List[NodeCommand]):
-        self.commands = commands
+    def __init__(self, contours: List[NodeContour]):
+        self.contours = contours
+    
+    @property
+    def commands(self) -> List[NodeCommand]:
+        cmds = []
+        for contour in self.contours:
+            cmds.extend(contour.commands)
+        return cmds
 
     def encode(self) -> npt.NDArray[np.int_]:
         # We one-hot encode the commands
@@ -102,150 +329,50 @@ class NodeGlyph:
 
     @classmethod
     def from_numpy(cls, command_tensor, coord_tensor):
-        commands = []
+        contours: List[NodeContour] = []
         command_keys = list(NodeCommand.grammar.keys())
-        sos_index = command_keys.index("SOS")
-        eos_index = command_keys.index("EOS")
+        cur_contour = NodeContour([])
 
         for i in range(command_tensor.shape[0]):
             command_index = np.argmax(command_tensor[i])
+            command_str = command_keys[command_index]
 
-            if command_index == sos_index:
+            if command_str == "SOS":
                 continue
 
-            if command_index == eos_index:
+            if command_str == "EOS":
                 break
 
-            command_str = command_keys[command_index]
-            # A zero vector may be fed to the model, which will be interpreted as 'SOS'
-            # This is padding, so we should stop
-            if command_str == 'SOS' and not np.any(coord_tensor[i]):
-                break
+            if command_str == "Z":
+                contours.append(cur_contour)
+                cur_contour = NodeContour([])
+                continue
 
             num_coords = NodeCommand.grammar[command_str]
             coords = coord_tensor[i, :num_coords].tolist()
-            commands.append(NodeCommand(command_str, coords))
-        return cls(commands)
+            cur_contour.push_command(NodeCommand(command_str, coords))
+        if cur_contour.nodes:
+            contours.append(cur_contour)
+        return cls(contours)
 
     def to_svg_glyph(self) -> "SVGGlyph":
         svg_commands: List[SVGCommand] = []
-        if not self.commands:
-            return SVGGlyph([])
-
-        contours = []
-        current_contour = []
-        for command in self.commands:
-            current_contour.append(command)
-            if command.command == "Z":
-                contours.append(current_contour)
-                current_contour = []
-        if current_contour:
-            contours.append(current_contour)
-
-        for contour in contours:
-            if not contour:
-                continue
-            
-            # Get all node positions first
-            node_positions = []
-            prev_pos = None
-            for i, node_cmd in enumerate(contour):
-                if i == 0:
-                    if node_cmd.command in ("LH", "LV"):
-                        raise ValueError("Contour cannot start with LH or LV")
-                    curr_pos = np.array(node_cmd.coordinates[0:2])
-                elif node_cmd.command == "Z":
-                    continue
-                else:
-                    if node_cmd.command == "LH":
-                        curr_pos = np.array([node_cmd.coordinates[0], prev_pos[1]])
-                    elif node_cmd.command == "LV":
-                        curr_pos = np.array([prev_pos[0], node_cmd.coordinates[0]])
-                    else:
-                        curr_pos = np.array(node_cmd.coordinates[0:2])
-                node_positions.append(curr_pos)
-                prev_pos = curr_pos
-
-            svg_commands.append(SVGCommand("M", list(map(int, node_positions[0]))))
-
-            num_nodes = len(node_positions)
-            is_closed = contour[-1].command == "Z"
-
-            for i in range(num_nodes if is_closed else num_nodes - 1):
-                p1_idx = i
-                p2_idx = (i + 1) % num_nodes
-
-                prev_node_cmd = contour[p1_idx]
-                curr_node_cmd = contour[p2_idx]
-                prev_pos = node_positions[p1_idx]
-                curr_pos = node_positions[p2_idx]
-
-                # Outgoing handle from prev
-                if prev_node_cmd.command in ["N", "NCO"]:
-                    hout = np.array(
-                        prev_node_cmd.coordinates[4:6]
-                        if prev_node_cmd.command == "N"
-                        else prev_node_cmd.coordinates[2:4]
-                    )
-                    c1 = prev_pos + hout
-                elif prev_node_cmd.command == "NH":
-                    hout = np.array([prev_node_cmd.coordinates[3], 0])
-                    c1 = prev_pos + hout
-                elif prev_node_cmd.command == "NV":
-                    hout = np.array([0, prev_node_cmd.coordinates[3]])
-                    c1 = prev_pos + hout
-                else:
-                    c1 = prev_pos
-
-                # Incoming handle to curr
-                if curr_node_cmd.command in ["N", "NCI"]:
-                    hin = np.array(curr_node_cmd.coordinates[2:4])
-                    c2 = curr_pos + hin
-                elif curr_node_cmd.command == "NH":
-                    hin = np.array([curr_node_cmd.coordinates[2], 0])
-                    c2 = curr_pos + hin
-                elif curr_node_cmd.command == "NV":
-                    hin = np.array([0, curr_node_cmd.coordinates[2]])
-                    c2 = curr_pos + hin
-                else:
-                    c2 = curr_pos
-
-                is_line = np.array_equal(c1, prev_pos) and np.array_equal(c2, curr_pos)
-                if is_line:
-                    if is_closed and p2_idx == 0:
-                        pass
-                    else:
-                        svg_commands.append(SVGCommand("L", list(map(int, curr_pos))))
-                else:
-                    svg_commands.append(
-                        SVGCommand(
-                            "C",
-                            list(
-                                map(
-                                    int,
-                                    [
-                                        c1[0],
-                                        c1[1],
-                                        c2[0],
-                                        c2[1],
-                                        curr_pos[0],
-                                        curr_pos[1],
-                                    ],
-                                )
-                            ),
-                        )
-                    )
-            if is_closed:
-                svg_commands.append(SVGCommand("Z", []))
-
+        for contour in self.contours:
+            svg_commands.extend(contour.svg_commands)
         return SVGGlyph(svg_commands)
 
     def to_debug_string(self):
-        path_data = []
+        path_data: List[str] = []
         for cmd in self.commands:
             path_data.append(cmd.command)
             path_data.extend(map(lambda x: str(int(x)), cmd.coordinates))
         return " ".join(path_data)
+
+    def normalize(self):
+        for contour in self.contours:
+            contour.normalize()
+        return self
+
 
 class SVGGlyph:
     commands: List[SVGCommand]
@@ -259,124 +386,22 @@ class SVGGlyph:
         if not self.commands:
             return NodeGlyph([])
 
-        contours = []
+        svg_contours: List[List[SVGCommand]] = []
         current_contour = []
         for command in self.commands:
             current_contour.append(command)
             if command.command == "Z":
-                contours.append(current_contour)
+                svg_contours.append(current_contour)
                 current_contour = []
         if current_contour:
-            contours.append(current_contour)
+            svg_contours.append(current_contour)
 
-        all_node_commands = []
-        for contour in contours:
-            node_positions = []
-            segments = []
-
-            def add_pos(p):
-                if p not in node_positions:
-                    node_positions.append(p)
-                return node_positions.index(p)
-
-            start_pos = tuple(contour[0].coordinates)
-            start_node_idx = add_pos(start_pos)
-            current_node_idx = start_node_idx
-
-            for cmd in contour:
-                if cmd.command == "M":
-                    continue
-                elif cmd.command == "L":
-                    end_pos = tuple(cmd.coordinates)
-                    end_node_idx = add_pos(end_pos)
-                    segments.append(
-                        {"start": current_node_idx, "end": end_node_idx, "type": "line"}
-                    )
-                    current_node_idx = end_node_idx
-                elif cmd.command == "C":
-                    end_pos = tuple(cmd.coordinates[4:6])
-                    end_node_idx = add_pos(end_pos)
-                    c1 = tuple(cmd.coordinates[0:2])
-                    c2 = tuple(cmd.coordinates[2:4])
-                    segments.append(
-                        {
-                            "start": current_node_idx,
-                            "end": end_node_idx,
-                            "type": "curve",
-                            "c1": c1,
-                            "c2": c2,
-                        }
-                    )
-                    current_node_idx = end_node_idx
-                elif cmd.command == "Z":
-                    end_node_idx = start_node_idx
-                    segments.append(
-                        {"start": current_node_idx, "end": end_node_idx, "type": "line"}
-                    )
-                    current_node_idx = end_node_idx
-
-            path_nodes = [{"pos": pos, "in": [], "out": []} for pos in node_positions]
-            for i, seg in enumerate(segments):
-                path_nodes[seg["start"]]["out"].append(i)
-                path_nodes[seg["end"]]["in"].append(i)
-
-            contour_node_commands = []
-            # This assumes the nodes appear in order in node_positions, which should be true
-            # for well-formed glyphs.
-            for i, node in enumerate(path_nodes):
-                pos = node["pos"]
-
-                in_seg = segments[node["in"][0]] if node["in"] else None
-                out_seg = segments[node["out"][0]] if node["out"] else None
-
-                incoming_is_curve = in_seg and in_seg["type"] == "curve"
-                outgoing_is_curve = out_seg and out_seg["type"] == "curve"
-
-                hin, hout = np.array([0, 0]), np.array([0, 0])
-                if incoming_is_curve:
-                    hin = np.array(in_seg["c2"]) - np.array(pos)
-                if outgoing_is_curve:
-                    hout = np.array(out_seg["c1"]) - np.array(pos)
-
-                coords = [pos[0], pos[1]]
-                if incoming_is_curve and outgoing_is_curve:
-                    if hin[1] == 0 and hout[1] == 0:
-                        command = "NH"
-                        coords.extend([hin[0], hout[0]])
-                    elif hin[0] == 0 and hout[0] == 0:
-                        command = "NV"
-                        coords.extend([hin[1], hout[1]])
-                    else:
-                        command = "N"
-                        coords.extend([hin[0], hin[1], hout[0], hout[1]])
-                elif incoming_is_curve and not outgoing_is_curve:
-                    command = "NCI"
-                    coords.extend([hin[0], hin[1]])
-                elif not incoming_is_curve and outgoing_is_curve:
-                    command = "NCO"
-                    coords.extend([hout[0], hout[1]])
-                else:  # both lines
-                    prev_pos = path_nodes[i-1]["pos"]
-                    if pos[0] == prev_pos[0] and i > 0:
-                        command = "LV"
-                        coords = [pos[1]]
-                    elif pos[1] == prev_pos[1] and i > 0:
-                        command = "LH"
-                        coords = [pos[0]]
-                    else:
-                        command = "L"
-
-                contour_node_commands.append(
-                    NodeCommand(command, list(map(int, coords)))
-                )
-            all_node_commands.extend(contour_node_commands)
-            if contour[-1].command == "Z":
-                all_node_commands.append(NodeCommand("Z", []))
-
-        return NodeGlyph(all_node_commands)
+        node_glyph = NodeGlyph([NodeContour.from_svg_contour(contour) for contour in svg_contours])
+        node_glyph.normalize()
+        return node_glyph
 
     def to_svg_string(self):
-        path_data = []
+        path_data: List[str] = []
         for cmd in self.commands:
             path_data.append(cmd.command)
             path_data.extend(map(lambda x: str(int(x)), cmd.coordinates))

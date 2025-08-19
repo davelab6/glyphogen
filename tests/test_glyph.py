@@ -5,6 +5,7 @@ from deepvecfont3.glyph import (
     NodeGlyph,
     NodeCommand,
     SVGCommand,
+    NodeContour,
     NODE_COMMAND_WIDTH,
 )
 from deepvecfont3.hyperparameters import GEN_IMAGE_SIZE
@@ -35,13 +36,12 @@ def test_glyph_extraction():
     assert isinstance(node_glyph, NodeGlyph)
 
 
-def test_node_glyph_conversion():
-    commands = [
-        NodeCommand("N", [10, 20, -5, 0, 5, 0]),
-        NodeCommand("L", [30, 40]),
-        NodeCommand("Z", []),
-    ]
-    node_glyph = NodeGlyph(commands)
+def test_node_glyph_encoding():
+    contour = NodeContour([])
+    contour.push_command(NodeCommand("NCO", [50, 50, 28, 0]))
+    contour.push_command(NodeCommand("NV", [100, 100, -28, +28]))
+    contour.push_command(NodeCommand("NCI", [50, 150, 28, 0]))
+    node_glyph = NodeGlyph([contour])
 
     encoded_glyph = node_glyph.encode()
 
@@ -54,10 +54,12 @@ def test_node_glyph_conversion():
     # Remove the batch dimension for from_numpy
     decoded_glyph = NodeGlyph.from_numpy(command_tensor[0], coord_tensor[0])
 
-    assert len(decoded_glyph.commands) == len(commands)
-    for i, command in enumerate(decoded_glyph.commands):
-        assert command.command == commands[i].command
-        assert command.coordinates == commands[i].coordinates
+    assert len(decoded_glyph.contours) == 1
+    assert len(decoded_glyph.contours[0].commands) == 4
+    assert decoded_glyph.contours[0].commands[0].command == "NCO"
+    assert decoded_glyph.contours[0].commands[1].command == "NCV"
+    assert decoded_glyph.contours[0].commands[2].command == "NCI"
+    assert decoded_glyph.contours[0].commands[3].command == "Z"
 
 
 def test_svg_to_node_glyph_conversion():
@@ -134,22 +136,26 @@ def test_complex_svg_to_node_glyph_conversion():
     # There are 5 points in this path, so 5 nodes + Z
     assert len(node_glyph.commands) == 6
     # The nodes are at: 247,493; 493,246; 403,56; 247,0; 0,246
+    # But we will have normalized them so that they are
+    # 0,246; 247,493; 493,246; 403,56; 247,0
     # Let's check them in order.
 
+    # Node 1: 0, 246. In: L, Out: C. Should be NCO.
+    assert node_glyph.commands[0].command == "NCO"
     # Node 1: 247, 493. In: C, Out: C. All handles are aligned at y=493. Should be NH.
-    assert node_glyph.commands[0].command == "NH"
+    assert node_glyph.commands[1].command == "NH"
     # Node 2: 493, 246. In: C, Out: C. Handle aligned vertically at x=493. Should be NV.
-    assert node_glyph.commands[1].command == "NV"
+    assert node_glyph.commands[2].command == "NV"
     # Node 3: 403, 56. In: C, Out: L. Should be NCI.
-    assert node_glyph.commands[2].command == "NCI"
+    assert node_glyph.commands[3].command == "NCI"
     # Node 4: 247, 0. In: L, Out: L. Should be L.
-    assert node_glyph.commands[3].command == "L"
-    # Node 5: 0, 246. In: L, Out: C. Should be NCO.
-    assert node_glyph.commands[4].command == "NCO"
+    assert node_glyph.commands[4].command == "L"
     # Z command
     assert node_glyph.commands[5].command == "Z"
 
     # Test round-trip
     reconverted_svg_glyph = node_glyph.to_svg_glyph()
     # assert len(reconverted_svg_glyph.commands) == len(svg_commands)
-    assert reconverted_svg_glyph.to_svg_string() == "M 247 493 C 383 493 493 383 493 246 C 493 169 458 101 403 56 L 247 0 L 0 246 C 0 383 110 493 247 493 Z"
+
+    # Visually the same, but order is now normalized
+    assert reconverted_svg_glyph.to_svg_string() == "M 0 246 C 0 383 110 493 247 493 C 383 493 493 383 493 246 C 493 169 458 101 403 56 L 247 0 Z"
