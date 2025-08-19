@@ -217,10 +217,7 @@ class SVGGenerationCallback(tf.keras.callbacks.Callback):
 
         for i, (inputs, outputs) in enumerate(self.test_dataset):
             if self.pre_train:
-                (raster_image_input, target_sequence_input), (
-                    true_command,
-                    true_coord,
-                ) = inputs
+                (raster_image_input, target_sequence_input) = inputs
 
                 # Add batch dimension
                 raster_image_input = tf.expand_dims(raster_image_input, axis=0)
