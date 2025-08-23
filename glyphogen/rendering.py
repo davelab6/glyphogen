@@ -2,11 +2,14 @@ import io
 import subprocess
 from typing import Dict
 
+import numpy as np
 from fontTools.ttLib import TTFont
-from keras.utils import img_to_array
 from PIL import Image, ImageChops
+import diskcache
+from glyphogen.hyperparameters import GEN_IMAGE_SIZE, STYLE_IMAGE_SIZE
 
-from deepvecfont3.hyperparameters import STYLE_IMAGE_SIZE, GEN_IMAGE_SIZE
+cache_dir = "imgcache"
+cache = diskcache.Cache(cache_dir, size_limit=4 * 2**30)  # 4 GB
 
 
 def trim(im):
@@ -17,6 +20,25 @@ def trim(im):
     if bbox:
         return im.crop(bbox)
     return im
+
+
+@cache.memoize()
+def _render(vars_text, font, text):
+    return subprocess.run(
+        [
+            "hb-view",
+            "-o",
+            "-",
+            "-O",
+            "png",
+            vars_text,
+            "--font-size=1024",
+            font,
+            text,
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
 
 
 def render(
@@ -32,21 +54,7 @@ def render(
         vars_text = "--variations=" + ",".join(
             [f"{k}={v}" for k, v in variation.items()]
         )
-    image = subprocess.run(
-        [
-            "hb-view",
-            "-o",
-            "-",
-            "-O",
-            "png",
-            vars_text,
-            "--font-size=upem",
-            font,
-            text,
-        ],
-        check=True,
-        capture_output=True,
-    ).stdout
+    image = _render(vars_text, font, text)
     image = Image.open(io.BytesIO(image))
     width, height = image.size
     if do_trim:
@@ -89,7 +97,9 @@ def render(
         scaled_ascent = ascent * scale
         baseline_y = int(target_size[1] * 0.66)
         new_img2.paste(new_img, (0, int(baseline_y - scaled_ascent)))
-    return img_to_array(new_img2) / 255.0
+    new_img2 = np.asarray(new_img2, dtype=np.float32)
+    new_img2 = new_img2.reshape((new_img2.shape[0], new_img2.shape[1], 1))
+    return new_img2 / 255.0
 
 
 def get_style_image(font, variation):

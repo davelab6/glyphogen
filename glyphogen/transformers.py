@@ -3,11 +3,11 @@ import keras
 from keras import layers, ops
 import tensorflow as tf
 
-from deepvecfont3.glyph import (
+from glyphogen.glyph import (
     NODE_COMMAND_WIDTH,
     COORDINATE_WIDTH,
 )
-from deepvecfont3.hyperparameters import MAX_COMMANDS
+from glyphogen.hyperparameters import MAX_COMMANDS
 
 MAX_COORDINATE = 1500.0  # We scale the coordinates to be in the range [-1, 1]
 
@@ -116,7 +116,7 @@ class TransformerEncoder(layers.Layer):
 
     def call(self, x, training):
         command_input = x[:, :, :NODE_COMMAND_WIDTH]
-        coord_input = x[:, :, NODE_COMMAND_WIDTH:] / MAX_COORDINATE
+        coord_input = ops.cast(x[:, :, NODE_COMMAND_WIDTH:], dtype="float32") / MAX_COORDINATE
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb
@@ -259,7 +259,7 @@ class LSTMDecoder(layers.Layer):
 
     def call(self, x, context=None, training=False):
         command_input = x[:, :, :NODE_COMMAND_WIDTH]
-        coord_input = x[:, :, NODE_COMMAND_WIDTH:] / MAX_COORDINATE
+        coord_input = ops.cast(x[:, :, NODE_COMMAND_WIDTH:], dtype="float32") / MAX_COORDINATE
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
         x = command_emb + coord_emb

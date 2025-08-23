@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 import keras
-from keras import layers, ops
 import tensorflow as tf
+from keras import layers, ops
 
-from deepvecfont3.embedding import StyleEmbedding
-from deepvecfont3.hyperparameters import VECTOR_LOSS_WEIGHT_COORD, VECTOR_LOSS_WEIGHT_COMMAND
-from deepvecfont3.glyph import NODE_GLYPH_COMMANDS, COORDINATE_WIDTH
-from deepvecfont3.transformers import LSTMDecoder
+from glyphogen.embedding import StyleEmbedding
+from glyphogen.hyperparameters import VECTOR_LOSS_WEIGHT_COORD, VECTOR_LOSS_WEIGHT_COMMAND
+from glyphogen.glyph import NODE_GLYPH_COMMANDS, COORDINATE_WIDTH
+from glyphogen.transformers import LSTMDecoder
 
 
 def _calculate_masked_coordinate_loss(y_true_command, y_true_coord, y_pred_coord, arg_counts, delta=10.0):

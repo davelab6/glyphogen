@@ -1,13 +1,15 @@
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import numpy.typing as npt
 import uharfbuzz as hb
 from fontTools.pens.qu2cuPen import Qu2CuPen
-from fontTools.pens.svgPathPen import SVGPathPen
+from fontTools.pens.svgPathPen import SVGPathPen, pointToString
+from fontTools.ttLib import TTFont
 
 from .rendering import render
+from .hyperparameters import MAX_COMMANDS
 
 BASIC_SVG_COMMANDS = {
     "M": 2,  # Move to (2 coordinates)
@@ -21,13 +23,13 @@ BASIC_SVG_COMMANDS = {
 NODE_GLYPH_COMMANDS = {
     "SOS": 0,
     "N": 6,  # Node with two handles (x, y, delta_hin_x, delta_hin_y, delta_hout_x, delta_hout_y)
-    "NH": 4, # Node with horizontal handles (x, y, delta_hin_x, delta_hout_x)
-    "NV": 4, # Node with vertical handles (x, y, delta_hin_y, delta_hout_y)
+    "NH": 4,  # Node with horizontal handles (x, y, delta_hin_x, delta_hout_x)
+    "NV": 4,  # Node with vertical handles (x, y, delta_hin_y, delta_hout_y)
     "NCI": 4,  # Node with curve in, line out (x, y, delta_hin_x, delta_hin_y)
     "NCO": 4,  # Node with line in, curve out (x, y, delta_hout_x, delta_hout_y)
     "L": 2,  # Line node (x, y)
-    "LH": 1, # Horizontal line (x)
-    "LV": 1, # Vertical line (y)
+    "LH": 1,  # Horizontal line (x)
+    "LV": 1,  # Vertical line (y)
     "Z": 0,  # Close path
     "EOS": 0,
 }
@@ -35,6 +37,23 @@ NODE_GLYPH_COMMANDS = {
 
 NODE_COMMAND_WIDTH = len(NODE_GLYPH_COMMANDS.keys())
 COORDINATE_WIDTH = max(NODE_GLYPH_COMMANDS.values())
+
+
+MAX_SEQUENCE_LENGTH = MAX_COMMANDS + 1  # for EOS token
+
+
+class AbsoluteSVGPathPen(SVGPathPen):
+    def _lineTo(self, pt):
+        x, y = pt
+        # duplicate point
+        if x == self._lastX and y == self._lastY:
+            return
+        # write the string
+        t = "L" + " " + pointToString(pt, self._ntos)
+        self._lastCommand = "L"
+        self._commands.append(t)
+        # store for future reference
+        self._lastX, self._lastY = pt
 
 
 class SVGCommand:
@@ -55,6 +74,7 @@ class SVGCommand:
 
 class NodeCommand(SVGCommand):
     grammar = NODE_GLYPH_COMMANDS
+
 
 class NodeContour:
     nodes: List["Node"]
@@ -81,7 +101,9 @@ class NodeContour:
             c1 = p1.out_handle if p1.out_handle is not None else p1.coordinates
             c2 = p2.in_handle if p2.in_handle is not None else p2.coordinates
 
-            is_line = np.array_equal(c1, p1.coordinates) and np.array_equal(c2, p2.coordinates)
+            is_line = np.array_equal(c1, p1.coordinates) and np.array_equal(
+                c2, p2.coordinates
+            )
             if is_line:
                 if i == len(self.nodes) - 1:
                     pass
@@ -89,17 +111,14 @@ class NodeContour:
                     svg_commands.append(SVGCommand("L", p2.coordinates.tolist()))
             else:
                 svg_commands.append(
-                    SVGCommand(
-                        "C",
-                        np.concatenate((c1, c2, p2.coordinates)).tolist()
-                    )
+                    SVGCommand("C", np.concatenate((c1, c2, p2.coordinates)).tolist())
                 )
         svg_commands.append(SVGCommand("Z", []))
         return svg_commands
-    
+
     @classmethod
     def from_svg_contour(cls, contour: List[SVGCommand]) -> "NodeContour":
-        contour = contour[:-1] # Drop Z
+        contour = contour[:-1]  # Drop Z
 
         node_positions = []
         segments = []
@@ -139,8 +158,13 @@ class NodeContour:
                     }
                 )
                 current_node_idx = end_node_idx
-        
-        segments.append({"start": current_node_idx, "end": start_node_idx, "type": "line"})
+            else:
+                # Handle unexpected command types
+                raise ValueError(f"Unexpected SVG command: {cmd.command}")
+
+        segments.append(
+            {"start": current_node_idx, "end": start_node_idx, "type": "line"}
+        )
 
         path_nodes = [{"pos": pos, "in": [], "out": []} for pos in node_positions]
         for i, seg in enumerate(segments):
@@ -157,18 +181,18 @@ class NodeContour:
             in_handle = None
             if in_seg and in_seg["type"] == "curve":
                 in_handle = np.array(in_seg["c2"])
-            
+
             out_handle = None
             if out_seg and out_seg["type"] == "curve":
                 out_handle = np.array(out_seg["c1"])
-            
+
             nodes.append(Node(pos, contour_obj, in_handle, out_handle))
 
         return contour_obj
-    
+
     def push_command(self, command: NodeCommand):
         prev_node = self.nodes[-1] if len(self.nodes) > 0 else None
-        position = np.array([0,0])
+        position = np.array([0, 0])
         in_handle: Optional[np.ndarray] = None
         out_handle: Optional[np.ndarray] = None
 
@@ -209,16 +233,22 @@ class NodeContour:
             # Shouldn't really be here
             return
         self.nodes.append(Node(position, self, in_handle, out_handle))
-    
+
     def normalize(self) -> None:
-        index_of_bottom_left = min(range(len(self.nodes)), key=lambda i: (self.nodes[i].coordinates[0], self.nodes[i].coordinates[1]))
-        self.nodes = self.nodes[index_of_bottom_left:] + self.nodes[:index_of_bottom_left]
+        index_of_bottom_left = min(
+            range(len(self.nodes)),
+            key=lambda i: (self.nodes[i].coordinates[0], self.nodes[i].coordinates[1]),
+        )
+        self.nodes = (
+            self.nodes[index_of_bottom_left:] + self.nodes[:index_of_bottom_left]
+        )
+
 
 class Node:
     coordinates: npt.NDArray[np.int_]
     in_handle: Optional[npt.NDArray[np.int_]]
     out_handle: Optional[npt.NDArray[np.int_]]
-    
+
     _contour: NodeContour
 
     def __init__(self, coordinates, contour, in_handle=None, out_handle=None):
@@ -230,23 +260,33 @@ class Node:
     @property
     def index(self) -> int:
         return self._contour.nodes.index(self)
-    
+
     @property
     def next(self) -> "Node":
         return self._contour.nodes[(self.index + 1) % len(self._contour.nodes)]
-    
+
     @property
     def previous(self) -> "Node":
         return self._contour.nodes[self.index - 1]
-    
+
     @property
     def handles_horizontal(self) -> bool:
-        return self.in_handle is not None and self.out_handle is not None and self.in_handle[1] == self.coordinates[1] and self.coordinates[1] == self.out_handle[1]
-    
+        return (
+            self.in_handle is not None
+            and self.out_handle is not None
+            and self.in_handle[1] == self.coordinates[1]
+            and self.coordinates[1] == self.out_handle[1]
+        )
+
     @property
     def handles_vertical(self) -> bool:
-        return self.in_handle is not None and self.out_handle is not None and self.in_handle[0] == self.coordinates[0] and self.coordinates[0] == self.out_handle[0]
-    
+        return (
+            self.in_handle is not None
+            and self.out_handle is not None
+            and self.in_handle[0] == self.coordinates[0]
+            and self.coordinates[0] == self.out_handle[0]
+        )
+
     # Convert to optimal command representation
     def command(self) -> NodeCommand:
         if self.in_handle is None and self.out_handle is None:
@@ -259,26 +299,38 @@ class Node:
                 return NodeCommand("LH", [self.coordinates[0]])
             else:
                 return NodeCommand("L", self.coordinates.tolist())
-        
+
         # Deal with line-to-curve and curve-to-line
         if self.in_handle is None and self.out_handle is not None:
             delta_hout = self.out_handle - self.coordinates
-            return NodeCommand("NCO", np.concatenate((self.coordinates, delta_hout)).tolist())
+            return NodeCommand(
+                "NCO", np.concatenate((self.coordinates, delta_hout)).tolist()
+            )
         elif self.out_handle is None and self.in_handle is not None:
             delta_hin = self.in_handle - self.coordinates
-            return NodeCommand("NCI", np.concatenate((self.coordinates, delta_hin)).tolist())
-        
+            return NodeCommand(
+                "NCI", np.concatenate((self.coordinates, delta_hin)).tolist()
+            )
+
         # It's a curve. Can we do better?
         assert self.in_handle is not None and self.out_handle is not None
         delta_hin = self.in_handle - self.coordinates
         delta_hout = self.out_handle - self.coordinates
 
         if self.handles_horizontal:
-            return NodeCommand("NH", [self.coordinates[0], self.coordinates[1], delta_hin[0], delta_hout[0]])
+            return NodeCommand(
+                "NH",
+                [self.coordinates[0], self.coordinates[1], delta_hin[0], delta_hout[0]],
+            )
         elif self.handles_vertical:
-            return NodeCommand("NV", [self.coordinates[0], self.coordinates[1], delta_hin[1], delta_hout[1]])
+            return NodeCommand(
+                "NV",
+                [self.coordinates[0], self.coordinates[1], delta_hin[1], delta_hout[1]],
+            )
         else:
-            return NodeCommand("N", np.concatenate((self.coordinates, delta_hin, delta_hout)).tolist())
+            return NodeCommand(
+                "N", np.concatenate((self.coordinates, delta_hin, delta_hout)).tolist()
+            )
 
 
 class NodeGlyph:
@@ -286,7 +338,7 @@ class NodeGlyph:
 
     def __init__(self, contours: List[NodeContour]):
         self.contours = contours
-    
+
     @property
     def commands(self) -> List[NodeCommand]:
         cmds = []
@@ -294,7 +346,7 @@ class NodeGlyph:
             cmds.extend(contour.commands)
         return cmds
 
-    def encode(self) -> npt.NDArray[np.int_]:
+    def encode(self) -> Optional[npt.NDArray[np.int_]]:
         # We one-hot encode the commands
         command_width = len(NodeCommand.grammar.keys())
         # And we pad the coordinates to a fixed length
@@ -310,9 +362,7 @@ class NodeGlyph:
         for command in self.commands:
             # One-hot encode the command
             command_vector = [0] * command_width
-            command_vector[
-                list(NodeCommand.grammar.keys()).index(command.command)
-            ] = 1
+            command_vector[list(NodeCommand.grammar.keys()).index(command.command)] = 1
             # Pad the coordinates
             coordinates = command.coordinates + [0] * (
                 max_coordinates - len(command.coordinates)
@@ -324,8 +374,17 @@ class NodeGlyph:
         eos_command_vector[list(NodeCommand.grammar.keys()).index("EOS")] = 1
         eos_coordinates = [0] * max_coordinates
         output.append(eos_command_vector + eos_coordinates)
+        encoded_glyph = np.array(output, dtype=np.int_)
 
-        return np.array(output, dtype=np.int_)
+        # Pad vector representation or skip
+        if encoded_glyph.shape[0] > MAX_SEQUENCE_LENGTH:
+            return
+        elif encoded_glyph.shape[0] < MAX_SEQUENCE_LENGTH:
+            padding = np.zeros(
+                (MAX_SEQUENCE_LENGTH - encoded_glyph.shape[0], encoded_glyph.shape[1])
+            )
+            encoded_glyph = np.vstack((encoded_glyph, padding))
+        return encoded_glyph
 
     @classmethod
     def from_numpy(cls, command_tensor, coord_tensor):
@@ -396,7 +455,9 @@ class SVGGlyph:
         if current_contour:
             svg_contours.append(current_contour)
 
-        node_glyph = NodeGlyph([NodeContour.from_svg_contour(contour) for contour in svg_contours])
+        node_glyph = NodeGlyph(
+            [NodeContour.from_svg_contour(contour) for contour in svg_contours]
+        )
         node_glyph.normalize()
         return node_glyph
 
@@ -439,10 +500,11 @@ class Glyph:
         Converts the glyph into a vector representation.
         This method should be implemented to return the glyph's path as an SVGGlyph object.
         """
+        scale = 1000 / TTFont(self.font_file)["head"].unitsPerEm
         blob = hb.Blob.from_file_path(self.font_file)
         face = hb.Face(blob)
         font = hb.Font(face)
-        svgpen = SVGPathPen({}, ntos=lambda f: str(quantize(f)))
+        svgpen = AbsoluteSVGPathPen({}, ntos=lambda f: str(int(f * scale)))
         pen = Qu2CuPen(svgpen, max_err=5, all_cubic=True)
         if self.location:
             font.set_variations(self.location)
