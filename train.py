@@ -84,17 +84,17 @@ def main(
 
     train_dataset = (
         train_dataset.shuffle(buffer_size=1000)
-        .prefetch(tf.data.AUTOTUNE)
         .batch(BATCH_SIZE)
+        .prefetch(200)
     )
     test_dataset = (
         test_dataset.shuffle(buffer_size=1000)
-        .prefetch(tf.data.AUTOTUNE)
         .batch(BATCH_SIZE)
+        .prefetch(200)
     )
 
     lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=LEARNING_RATE, decay_steps=10000, decay_rate=0.9
+        initial_learning_rate=LEARNING_RATE, decay_steps=40000, decay_rate=0.9
     )
     optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
 
@@ -105,10 +105,12 @@ def main(
             loss={
                 "command": keras.losses.CategoricalCrossentropy(),
                 "coord": keras.losses.Huber(delta=5.0),
+                "raster": keras.losses.MeanSquaredError(),
             },
             loss_weights={
                 "command": VECTOR_LOSS_WEIGHT_COMMAND,
                 "coord": VECTOR_LOSS_WEIGHT_COORD,
+                "raster": RASTER_LOSS_WEIGHT,
             },
         )
     else:
