@@ -4,12 +4,27 @@ import tensorflow as tf
 from keras import layers, ops
 
 from glyphogen.embedding import StyleEmbedding
-from glyphogen.hyperparameters import VECTOR_LOSS_WEIGHT_COORD, VECTOR_LOSS_WEIGHT_COMMAND
+from glyphogen.hyperparameters import (
+    VECTOR_LOSS_WEIGHT_COORD,
+    VECTOR_LOSS_WEIGHT_COMMAND,
+    RASTER_LOSS_WEIGHT,
+)
 from glyphogen.glyph import NODE_GLYPH_COMMANDS, COORDINATE_WIDTH
 from glyphogen.transformers import LSTMDecoder
+from glyphogen.rasterizer import rasterize_batch
+import datetime
+
+# Set up summary writers
+current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+train_log_dir = "logs/gradient_tape/" + current_time + "/train"
+test_log_dir = "logs/gradient_tape/" + current_time + "/test"
+train_summary_writer = tf.summary.create_file_writer(train_log_dir)
+test_summary_writer = tf.summary.create_file_writer(test_log_dir)
 
 
-def _calculate_masked_coordinate_loss(y_true_command, y_true_coord, y_pred_coord, arg_counts, delta=10.0):
+def _calculate_masked_coordinate_loss(
+    y_true_command, y_true_coord, y_pred_coord, arg_counts, delta=10.0
+):
     """Calculates the masked coordinate loss."""
     true_command_indices = tf.argmax(y_true_command, axis=-1)
     args_needed = tf.gather(arg_counts, true_command_indices)
@@ -25,10 +40,10 @@ def _calculate_masked_coordinate_loss(y_true_command, y_true_coord, y_pred_coord
     abs_error = ops.abs(residuals)
     half = ops.convert_to_tensor(0.5, dtype=abs_error.dtype)
     huber_error = ops.where(
-            abs_error <= delta,
-            half * ops.square(residuals),
-            delta * abs_error - half * ops.square(delta),
-        )
+        abs_error <= delta,
+        half * ops.square(residuals),
+        delta * abs_error - half * ops.square(delta),
+    )
     masked_error = huber_error * coord_mask
     return tf.reduce_sum(masked_error) / tf.reduce_sum(coord_mask)
 
@@ -152,7 +167,9 @@ class VectorizationGenerator(keras.Model):
             d_model=d_model,
             rate=rate,
         )
-        self.arg_counts = tf.constant(list(NODE_GLYPH_COMMANDS.values()), dtype=tf.int32)
+        self.arg_counts = tf.constant(
+            list(NODE_GLYPH_COMMANDS.values()), dtype=tf.int32
+        )
 
     def encode(self, inputs):
         x = self.conv1(inputs)
@@ -186,6 +203,7 @@ class VectorizationGenerator(keras.Model):
         super().compile(optimizer=optimizer, **kwargs)
         self.loss = loss
         self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
+        self.raster_loss_tracker = keras.metrics.Mean(name="raster_loss")
         self.vector_command_loss_tracker = keras.metrics.Mean(
             name="vector_command_loss"
         )
@@ -195,6 +213,7 @@ class VectorizationGenerator(keras.Model):
     def metrics(self):
         return [
             self.total_loss_tracker,
+            self.raster_loss_tracker,
             self.vector_command_loss_tracker,
             self.vector_coord_loss_tracker,
         ]
@@ -226,21 +245,67 @@ class VectorizationGenerator(keras.Model):
                 training=True,
             )
 
-            vector_command_loss = self.loss["command"](
-                true_command, outputs["command"]
+            # Rasterize the predicted vectors
+            vector_rendered_images = rasterize_batch(
+                outputs["command"], outputs["coord"]
             )
+
+            raster_loss = self.loss["raster"](
+                raster_image_input, vector_rendered_images
+            )
+            vector_command_loss = self.loss["command"](true_command, outputs["command"])
             vector_coord_loss = _calculate_masked_coordinate_loss(
                 true_command, true_coord, outputs["coord"], self.arg_counts
             )
 
-            total_loss = vector_command_loss * VECTOR_LOSS_WEIGHT_COMMAND + vector_coord_loss * VECTOR_LOSS_WEIGHT_COORD
+            total_loss = (
+                vector_command_loss * VECTOR_LOSS_WEIGHT_COMMAND
+                + vector_coord_loss * VECTOR_LOSS_WEIGHT_COORD
+                + raster_loss * RASTER_LOSS_WEIGHT
+            )
 
         grads = tape.gradient(total_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
         self.total_loss_tracker.update_state(total_loss)
+        self.raster_loss_tracker.update_state(raster_loss)
         self.vector_command_loss_tracker.update_state(vector_command_loss)
         self.vector_coord_loss_tracker.update_state(vector_coord_loss)
+
+        with train_summary_writer.as_default():
+            tf.summary.scalar(
+                "total_loss",
+                self.total_loss_tracker.result(),
+                step=self.optimizer.iterations,
+            )
+            tf.summary.scalar(
+                "raster_loss",
+                self.raster_loss_tracker.result(),
+                step=self.optimizer.iterations,
+            )
+            tf.summary.scalar(
+                "vector_command_loss",
+                self.vector_command_loss_tracker.result(),
+                step=self.optimizer.iterations,
+            )
+            tf.summary.scalar(
+                "vector_coord_loss",
+                self.vector_coord_loss_tracker.result(),
+                step=self.optimizer.iterations,
+            )
+            if self.optimizer.iterations % 100 == 0:
+                tf.summary.image(
+                    "True Rasters",
+                    raster_image_input,
+                    max_outputs=3,
+                    step=self.optimizer.iterations,
+                )
+                tf.summary.image(
+                    "Vector-Rendered Rasters",
+                    vector_rendered_images,
+                    max_outputs=3,
+                    step=self.optimizer.iterations,
+                )
 
         return {m.name: m.result() for m in self.metrics}
 
@@ -258,14 +323,15 @@ class VectorizationGenerator(keras.Model):
             training=False,
         )
 
-        vector_command_loss = self.loss["command"](
-            true_command, outputs["command"]
-        )
+        vector_command_loss = self.loss["command"](true_command, outputs["command"])
         vector_coord_loss = _calculate_masked_coordinate_loss(
             true_command, true_coord, outputs["coord"], self.arg_counts
         )
 
-        total_loss = vector_command_loss * VECTOR_LOSS_WEIGHT_COMMAND + vector_coord_loss * VECTOR_LOSS_WEIGHT_COORD
+        total_loss = (
+            vector_command_loss * VECTOR_LOSS_WEIGHT_COMMAND
+            + vector_coord_loss * VECTOR_LOSS_WEIGHT_COORD
+        )
 
         self.total_loss_tracker.update_state(total_loss)
         self.vector_command_loss_tracker.update_state(vector_command_loss)
@@ -310,7 +376,9 @@ class GlyphGenerator(keras.Model):
             latent_dim=latent_dim,
             rate=rate,
         )
-        self.arg_counts = tf.constant(list(NODE_GLYPH_COMMANDS.values()), dtype=tf.int32)
+        self.arg_counts = tf.constant(
+            list(NODE_GLYPH_COMMANDS.values()), dtype=tf.int32
+        )
 
     def call(self, inputs, training=False):
         style_image_input, glyph_id_input, target_sequence_input = inputs
@@ -434,7 +502,6 @@ class GlyphGenerator(keras.Model):
         vector_coord_loss = _calculate_masked_coordinate_loss(
             y["command"], y["coord"], coord_output, self.arg_counts
         )
-
 
         total_loss = (
             self.loss_weights["raster"] * raster_loss

@@ -1,7 +1,8 @@
 import tensorflow as tf
 from .glyph import NodeCommand
-from .hyperparameters import GEN_IMAGE_SIZE
+from .hyperparameters import BATCH_SIZE, GEN_IMAGE_SIZE, MAX_COMMANDS
 import pydiffvg_tensorflow as pydiffvg
+import numpy as np
 
 # There's no Metal operator for pydiffvg, and anyway running it on
 # GPU is actually unstable and sometimes produces all zeroes
@@ -113,7 +114,7 @@ def simplify_nodes(cmd, coord):
 def nodes_to_segments(cmd, coord):
     cmd, coord = simplify_nodes(cmd, coord)
     command_tensor = tf.argmax(cmd, axis=-1, output_type=tf.int32)
-    max_len = tf.shape(command_tensor)[0]
+    max_len = MAX_COMMANDS
 
     command_keys = tf.constant(list(NodeCommand.grammar.keys()))
     cmd_n_val = tf.where(tf.equal(command_keys, "N"))[0][0]
