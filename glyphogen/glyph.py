@@ -294,15 +294,8 @@ class Node:
     # Convert to optimal command representation
     def command(self) -> NodeCommand:
         if self.in_handle is None and self.out_handle is None:
-            # It's a line. Can we do better?
-            if self.index > 0 and self.coordinates[0] == self.previous.coordinates[0]:
-                # Vertical line
-                return NodeCommand("LV", [self.coordinates[1]])
-            elif self.index > 0 and self.coordinates[1] == self.previous.coordinates[1]:
-                # Horizontal line
-                return NodeCommand("LH", [self.coordinates[0]])
-            else:
-                return NodeCommand("L", self.coordinates.tolist())
+            # It's a line.
+            return NodeCommand("L", self.coordinates.tolist())
 
         # Deal with line-to-curve and curve-to-line
         if self.in_handle is None and self.out_handle is not None:
