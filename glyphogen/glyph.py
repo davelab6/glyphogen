@@ -28,8 +28,8 @@ NODE_GLYPH_COMMANDS = {
     "NCI": 4,  # Node with curve in, line out (x, y, delta_hin_x, delta_hin_y)
     "NCO": 4,  # Node with line in, curve out (x, y, delta_hout_x, delta_hout_y)
     "L": 2,  # Line node (x, y)
-    "LH": 1,  # Horizontal line (x)
-    "LV": 1,  # Vertical line (y)
+    # "LH": 1,  # Horizontal line (x)
+    # "LV": 1,  # Vertical line (y)
     "Z": 0,  # Close path
     "EOS": 0,
 }
