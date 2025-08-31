@@ -29,12 +29,6 @@ def simplify_nodes(cmd, coord):
         return cmd, coord
 
     # Find indices of all commands
-    lh_indices = tf.cast(
-        tf.where(tf.equal(command_tensor, get_cmd_code("LH"))), tf.int32
-    )
-    lv_indices = tf.cast(
-        tf.where(tf.equal(command_tensor, get_cmd_code("LV"))), tf.int32
-    )
     nh_indices = tf.cast(
         tf.where(tf.equal(command_tensor, get_cmd_code("NH"))), tf.int32
     )
@@ -47,24 +41,6 @@ def simplify_nodes(cmd, coord):
     nco_indices = tf.cast(
         tf.where(tf.equal(command_tensor, get_cmd_code("NCO"))), tf.int32
     )
-
-    # Convert LH commands to L
-    if tf.size(lh_indices) > 0:
-        prev_indices = lh_indices - 1
-        lh_coords = tf.gather_nd(coord, lh_indices)
-        prev_coords = tf.gather_nd(coord, prev_indices)
-        new_lh_coords = tf.stack([lh_coords[:, 0], prev_coords[:, 1]], axis=1)
-        new_lh_coords = tf.pad(new_lh_coords, [[0, 0], [0, 4]])
-        cmd, coord = update_cmd_coord(cmd, coord, lh_indices, "L", new_lh_coords)
-
-    # Convert LV commands to L
-    if tf.size(lv_indices) > 0:
-        prev_indices = lv_indices - 1
-        lv_coords = tf.gather_nd(coord, lv_indices)
-        prev_coords = tf.gather_nd(coord, prev_indices)
-        new_lv_coords = tf.stack([prev_coords[:, 0], lv_coords[:, 0]], axis=1)
-        new_lv_coords = tf.pad(new_lv_coords, [[0, 0], [0, 4]])
-        cmd, coord = update_cmd_coord(cmd, coord, lv_indices, "L", new_lv_coords)
 
     # Convert NH command to N
     if tf.size(nh_indices) > 0:
