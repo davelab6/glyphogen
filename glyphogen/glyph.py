@@ -75,6 +75,10 @@ class SVGCommand:
 class NodeCommand(SVGCommand):
     grammar = NODE_GLYPH_COMMANDS
 
+    @classmethod
+    def encode_command(cls, s: str) -> int:
+        return list(cls.grammar.keys()).index(s)
+
 
 class NodeContour:
     nodes: List["Node"]
@@ -355,14 +359,14 @@ class NodeGlyph:
 
         # Add SOS token
         sos_command_vector = [0] * command_width
-        sos_command_vector[list(NodeCommand.grammar.keys()).index("SOS")] = 1
+        sos_command_vector[NodeCommand.encode_command("SOS")] = 1
         sos_coordinates = [0] * max_coordinates
         output.append(sos_command_vector + sos_coordinates)
 
         for command in self.commands:
             # One-hot encode the command
             command_vector = [0] * command_width
-            command_vector[list(NodeCommand.grammar.keys()).index(command.command)] = 1
+            command_vector[NodeCommand.encode_command(command.command)] = 1
             # Pad the coordinates
             coordinates = command.coordinates + [0] * (
                 max_coordinates - len(command.coordinates)
@@ -371,7 +375,7 @@ class NodeGlyph:
 
         # Add EOS token
         eos_command_vector = [0] * command_width
-        eos_command_vector[list(NodeCommand.grammar.keys()).index("EOS")] = 1
+        eos_command_vector[NodeCommand.encode_command("EOS")] = 1
         eos_coordinates = [0] * max_coordinates
         output.append(eos_command_vector + eos_coordinates)
         encoded_glyph = np.array(output, dtype=np.int_)
