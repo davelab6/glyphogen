@@ -275,20 +275,25 @@ def nodes_to_segments(cmd, coord):
 
 def rasterize_batch(cmds, coords):
     """Render a batch of glyphs from their node representation."""
-    images = []
-    for i in range(tf.shape(cmds)[0]):
-        cmd = cmds[i]
-        coord = coords[i]
-        tf.print("Processing glyph", i, "with cmd shape:", tf.shape(cmd))
+
+    def _rasterize_single_glyph_py(cmd_np, coord_np):
+        # This function is wrapped in tf.py_function, so it gets numpy arrays.
+        # We need to convert them back to tensors to call our @tf.function.
+        cmd = tf.convert_to_tensor(cmd_np)
+        coord = tf.convert_to_tensor(coord_np)
+
         if tf.shape(cmd)[0] == 0:
-            images.append(
-                tf.zeros([GEN_IMAGE_SIZE, GEN_IMAGE_SIZE, 1], dtype=tf.float32)
-            )
-            continue
+            return np.zeros([GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 1], dtype=np.float32)
 
         points, num_control_points, num_cp_splits, point_splits = nodes_to_segments(
             cmd, coord
         )
+
+        # Now we can go back to numpy to create the python list of shapes
+        num_cp_splits = num_cp_splits.numpy()
+        point_splits = point_splits.numpy()
+        num_control_points = num_control_points.numpy()
+        points = points.numpy()
 
         shapes = []
         num_cp_start = 0
@@ -296,8 +301,11 @@ def rasterize_batch(cmds, coords):
         for num_cp_end, point_end in zip(num_cp_splits, point_splits):
             num_cp = num_control_points[num_cp_start:num_cp_end]
             path_points = points[point_start:point_end]
+            # pydiffvg expects tensors, so we convert back
             path = pydiffvg.Path(
-                num_control_points=num_cp, points=path_points, is_closed=True
+                num_control_points=tf.convert_to_tensor(num_cp),
+                points=tf.convert_to_tensor(path_points),
+                is_closed=True,
             )
             shapes.append(path)
             num_cp_start = num_cp_end
@@ -331,6 +339,17 @@ def rasterize_batch(cmds, coords):
         # Invert it, we want black on white
         img = tf.reduce_max(img) - img
         # Pydiffvg outputs RGBA, we just want the alpha channel
-        img = tf.expand_dims(img[:, :, 3], -1)
-        images.append(img)
-    return tf.stack(images)
+        img_numpy = tf.expand_dims(img[:, :, 3], -1).numpy()
+        return img_numpy.astype(np.float32)
+
+    images = tf.map_fn(
+        lambda elems: tf.py_function(
+            _rasterize_single_glyph_py, [elems[0], elems[1]], tf.float32
+        ),
+        (cmds, coords),
+        fn_output_signature=tf.TensorSpec(
+            shape=[GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 1], dtype=tf.float32
+        ),
+    )
+    images.set_shape([None, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 1])
+    return images
