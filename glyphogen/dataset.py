@@ -22,7 +22,7 @@ import tensorflow as tf
 
 font_files = list(glob.glob(BASE_DIR + "/*/*.ttf"))
 # Filter out certain bad fonts
-BANNED = ["noto", "bitcount", "nabla", "jersey"]
+BANNED = ["noto", "bitcount", "nabla", "jersey", "rubik", "winky"]
 font_files = [
     font_file
     for font_file in font_files
@@ -34,32 +34,54 @@ if not font_files:
     raise ValueError(f"No suitable font files found in {BASE_DIR}")
 
 
-def pretrain_dataset_generator(font_file_list, name=""):
-    print(f"Running {name} on {len(font_file_list)} x {len(ALPHABET)} = {len(font_file_list) * len(ALPHABET)} glyphs")
+def _load_and_process_pretrain_glyph(font_file_path_tensor, char_ord_tensor):
+    # This function is designed to be wrapped by tf.py_function.
+    # It takes tensors, converts them to python types, does processing, and returns numpy arrays.
+    font_file_path = font_file_path_tensor.numpy().decode("utf-8")
+    char_ord = char_ord_tensor.numpy()
 
-    for font_file_path in font_file_list:
-        font_file = Path(font_file_path)
-        for i, char in enumerate(ALPHABET):
-            glyph = Glyph(font_file, ord(char), location={})
-            try:
-                raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
-            except Exception as e:
-                print(f"Error rasterizing glyph {char} from {font_file}: {e}")
-                continue
+    # Dummy data to return on error
+    dummy_raster = np.zeros(
+        (GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 1), dtype=np.float32
+    )
+    dummy_seq = np.zeros(
+        (0, NODE_COMMAND_WIDTH + COORDINATE_WIDTH), dtype=np.int32
+    )
+    dummy_cmd = np.zeros((0, NODE_COMMAND_WIDTH), dtype=np.int32)
+    dummy_coord = np.zeros((0, COORDINATE_WIDTH), dtype=np.float32)
 
-            svg_glyph = glyph.vectorize()
-            node_glyph = svg_glyph.to_node_glyph()
-            if not node_glyph.commands:
-                continue
-            encoded_svg = node_glyph.encode()
-            if encoded_svg is None:
-                continue
+    try:
+        glyph = Glyph(Path(font_file_path), int(char_ord), location={})
+        raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
+        svg_glyph = glyph.vectorize()
+        node_glyph = svg_glyph.to_node_glyph()
 
-            target_sequence = encoded_svg[:-1]
-            ground_truth = encoded_svg[1:]
-            true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
-            true_coord = ground_truth[:, NODE_COMMAND_WIDTH:].astype(np.float32)
-            yield ((raster, target_sequence), (true_command, true_coord))
+        if not node_glyph.commands or len(node_glyph.commands) <= 1:
+            print(f"Couldn't process glyph {char_ord} from {font_file_path} (no commands)")
+            return dummy_raster, dummy_seq, dummy_cmd, dummy_coord
+
+        encoded_svg = node_glyph.encode()
+        if encoded_svg is None or len(encoded_svg) <= 1:
+            # print(f"Couldn't process glyph {char_ord} from {font_file_path} (bad encoding)")
+            return dummy_raster, dummy_seq, dummy_cmd, dummy_coord
+
+        target_sequence = encoded_svg[:-1]
+        ground_truth = encoded_svg[1:]
+        true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
+        true_coord = ground_truth[:, NODE_COMMAND_WIDTH:].astype(np.float32)
+        # print(f"Processed glyph {char_ord} from {font_file_path}")
+
+        return raster, target_sequence, true_command, true_coord
+
+    except Exception as e:
+        print(f"Couldn't process glyph {char_ord} from {font_file_path}: {e}")
+        return dummy_raster, dummy_seq, dummy_cmd, dummy_coord
+
+
+def _is_not_dummy(inputs, outputs):
+    # Filter based on sequence length. If it's 0, it's a dummy.
+    # The `target_sequence` is at inputs[1]
+    return tf.shape(inputs[1])[0] > 0
 
 
 def create_real_dataset():
@@ -167,27 +189,47 @@ def get_full_model_data():
     test_dataset = tf.data.Dataset.load("test.tfds")
     return train_dataset, test_dataset
 
+
 def get_pretrain_data():
     # Split list of fonts into train/test
     train_fonts, test_fonts = train_test_split(
         font_files, test_size=0.2, random_state=42
     )
-    output_signature=(
-        (
-            tf.TensorSpec(shape=(GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 1), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, NODE_COMMAND_WIDTH + COORDINATE_WIDTH), dtype=tf.int32),
-        ),
-        (
-            tf.TensorSpec(shape=(None, NODE_COMMAND_WIDTH), dtype=tf.int32),
-            tf.TensorSpec(shape=(None, COORDINATE_WIDTH), dtype=tf.float32),
-        ),
-    )
-    train_dataset = tf.data.Dataset.from_generator(
-        lambda: pretrain_dataset_generator(train_fonts, "train"),
-        output_signature=output_signature
-    )
-    test_dataset = tf.data.Dataset.from_generator(
-        lambda: pretrain_dataset_generator(test_fonts, "test"),
-        output_signature=output_signature
-    )
+
+    def build_dataset(font_list, name):
+        print(f"Building pre-train dataset '{name}' with {len(font_list)} fonts.")
+
+        def generator():
+            for font_file_path in font_list:
+                for char in ALPHABET:
+                    yield (font_file_path, ord(char))
+
+        dataset = tf.data.Dataset.from_generator(
+            generator,
+            output_signature=(
+                tf.TensorSpec(shape=(), dtype=tf.string),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+            ),
+        )
+
+        def map_py_function(path, char_ord):
+            raster, seq, cmd, coord = tf.py_function(
+                _load_and_process_pretrain_glyph,
+                [path, char_ord],
+                [tf.float32, tf.int32, tf.int32, tf.float32],
+            )
+            # Restore shape information lost by tf.py_function
+            raster.set_shape([GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 1])
+            seq.set_shape([None, NODE_COMMAND_WIDTH + COORDINATE_WIDTH])
+            cmd.set_shape([None, NODE_COMMAND_WIDTH])
+            coord.set_shape([None, COORDINATE_WIDTH])
+            return ((raster, seq), (cmd, coord))
+
+        dataset = dataset.map(map_py_function, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.filter(_is_not_dummy)
+        return dataset
+
+    train_dataset = build_dataset(train_fonts, "train")
+    test_dataset = build_dataset(test_fonts, "test")
+
     return train_dataset, test_dataset
