@@ -10,6 +10,7 @@ import numpy as np
 pydiffvg.set_use_gpu(False)
 
 
+@torch.compile
 def simplify_nodes(cmd, coord):
     """Converts optimized node commands into simpler L and N commands."""
     command_tensor = torch.argmax(cmd, axis=-1)
@@ -20,11 +21,15 @@ def simplify_nodes(cmd, coord):
 
     def update_cmd_coord(cmd, coord, indices, new_cmd_str, new_coord):
         new_cmd = get_cmd_code(new_cmd_str)
-        new_cmd_one_hot = torch.nn.functional.one_hot(
-            torch.tensor(new_cmd), num_classes=cmd.shape[-1]
-        ).to(cmd.dtype)
+        new_cmd_one_hot = (
+            torch.nn.functional.one_hot(
+                torch.tensor(new_cmd), num_classes=cmd.shape[-1]
+            )
+            .to(cmd.dtype)
+            .to(cmd.device)
+        )
         new_cmds = new_cmd_one_hot.unsqueeze(0).repeat(indices.shape[0], 1)
-        indices = indices.squeeze(dim=1)
+        indices = indices.squeeze(dim=1).to(cmd.device)
         cmd[indices] = new_cmds
         coord[indices] = new_coord
         return cmd, coord
@@ -102,6 +107,7 @@ def simplify_nodes(cmd, coord):
     return cmd, coord
 
 
+@torch.compile
 def nodes_to_segments(cmd, coord):
     cmd, coord = simplify_nodes(cmd, coord)
     command_tensor = np.argmax(cmd.detach().cpu().numpy(), axis=-1)
@@ -192,7 +198,7 @@ def rasterize_batch(cmds, coords):
     images = []
     for i in range(cmds.shape[0]):
         points, num_control_points, num_cp_splits, point_splits = nodes_to_segments(
-            cmds[i].to("cpu").clone(), coords[i].to("cpu").clone()
+            cmds[i].clone(), coords[i].clone()
         )
 
         if points.shape[0] == 0:
@@ -209,8 +215,8 @@ def rasterize_batch(cmds, coords):
             num_cp = num_control_points[num_cp_start:num_cp_end]
             path_points = points[point_start:point_end]
             path = pydiffvg.Path(
-                num_control_points=num_cp.to(torch.int32),
-                points=path_points,
+                num_control_points=num_cp.to(torch.int32).cpu(),
+                points=path_points.cpu(),
                 is_closed=True,
             )
             shapes.append(path)

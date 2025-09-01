@@ -10,7 +10,6 @@ from glyphogen_torch.dataset import get_full_model_data, get_pretrain_data, coll
 from glyphogen_torch.model import (
     GlyphGenerator,
     VectorizationGenerator,
-    calculate_masked_coordinate_loss,
 )
 from glyphogen_torch.callbacks import log_images, log_svgs, log_pretrain_rasters
 from glyphogen_torch.rasterizer import rasterize_batch
@@ -91,7 +90,6 @@ def main(
 
     raster_loss_fn = torch.nn.MSELoss()
     command_loss_fn = torch.nn.CrossEntropyLoss()
-    # Coord loss is the custom masked huber loss
 
     # Training Loop
     writer = SummaryWriter(
@@ -111,70 +109,37 @@ def main(
             always_stateful=False,
         )
         for i, batch in enumerate(train_loader):
-            if pre_train:
-                (inputs, y) = batch
-                (raster_image_input, target_sequence_input) = inputs
-                (true_command, true_coord) = y
-                raster_image_input, target_sequence_input = raster_image_input.to(
-                    device
-                ), target_sequence_input.to(device)
-                true_command, true_coord = true_command.to(device), true_coord.to(
-                    device
-                )
-                outputs = model_to_train((raster_image_input, target_sequence_input))
-
-                vector_rendered_images = rasterize_batch(
-                    outputs["command"], outputs["coord"]
-                )
-                raster_loss = raster_loss_fn(
-                    raster_image_input.to(device), vector_rendered_images.to(device)
-                )
-            else:
-                (style_image_input, glyph_id_input, target_sequence_input), y = batch
-                style_image_input, glyph_id_input, target_sequence_input = (
-                    style_image_input.to(device),
-                    glyph_id_input.to(device),
-                    target_sequence_input.to(device),
-                )
-                y = {k: v.to(device) for k, v in y.items()}
-
-                outputs = model_to_train(
-                    (style_image_input, glyph_id_input, target_sequence_input)
-                )
-                raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
-                true_command, true_coord = y["command"], y["coord"]
-
-            command_loss = command_loss_fn(outputs["command"], true_command)
-            writer.add_scalar("Loss/command_batch", command_loss.item(), global_step)
-
-            coord_loss = calculate_masked_coordinate_loss(
-                true_command, true_coord, outputs["coord"], model.arg_counts.to(device)
+            optimizer.zero_grad()
+            losses = model_to_train.training_step(
+                batch, raster_loss_fn, command_loss_fn
             )
-            writer.add_scalar("Loss/coord_batch", coord_loss.item(), global_step)
-            writer.add_scalar("Loss/raster_batch", raster_loss.item(), global_step)
-            loss = (
-                RASTER_LOSS_WEIGHT * raster_loss
-                + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
-                + VECTOR_LOSS_WEIGHT_COORD * coord_loss
-            )
+            losses["total_loss"].backward()
+            optimizer.step()
+            total_train_loss += losses["total_loss"].item()
+
             kbar.update(
                 i,
                 values=[
-                    ("total_loss", loss),
-                    ("command_loss", command_loss),
-                    ("coord_loss", coord_loss),
-                    ("raster_loss", raster_loss),
+                    ("total_loss", losses["total_loss"]),
+                    ("command_loss", losses["command_loss"]),
+                    ("coord_loss", losses["coord_loss"]),
+                    ("raster_loss", losses["raster_loss"]),
                 ],
             )
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_train_loss += loss.item()
-
-            writer.add_scalar("Loss/train_batch", loss.item(), global_step)
+            writer.add_scalar(
+                "Loss/train_batch", losses["total_loss"].item(), global_step
+            )
+            writer.add_scalar(
+                "Loss/command_batch", losses["command_loss"].item(), global_step
+            )
+            writer.add_scalar(
+                "Loss/coord_batch", losses["coord_loss"].item(), global_step
+            )
+            writer.add_scalar(
+                "Loss/raster_batch", losses["raster_loss"].item(), global_step
+            )
             if i % 10 == 0:
-                # print(f"Epoch {epoch}, Batch {i}, Loss: {loss.item()}")
                 writer.flush()
 
             global_step += 1
@@ -188,63 +153,10 @@ def main(
             total_val_loss = 0
             with torch.no_grad():
                 for batch in test_loader:
-                    if pre_train:
-                        print("Loading batch")
-                        (inputs, y) = batch
-                        (raster_image_input, target_sequence_input) = inputs
-                        (true_command, true_coord) = y
-                        raster_image_input, target_sequence_input = (
-                            raster_image_input.to(device),
-                            target_sequence_input.to(device),
-                        )
-                        true_command, true_coord = true_command.to(
-                            device
-                        ), true_coord.to(device)
-
-                        outputs = model_to_train(
-                            (raster_image_input, target_sequence_input)
-                        )
-                        vector_rendered_images = rasterize_batch(
-                            outputs["command"], outputs["coord"]
-                        ).to(device)
-                        raster_loss = raster_loss_fn(
-                            raster_image_input, vector_rendered_images
-                        )
-                    else:
-                        (
-                            style_image_input,
-                            glyph_id_input,
-                            target_sequence_input,
-                        ), y = batch
-                        style_image_input, glyph_id_input, target_sequence_input = (
-                            style_image_input.to(device),
-                            glyph_id_input.to(device),
-                            target_sequence_input.to(device),
-                        )
-                        y = {k: v.to(device) for k, v in y.items()}
-
-                        outputs = model_to_train(
-                            (style_image_input, glyph_id_input, target_sequence_input)
-                        )
-                        raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
-                        true_command, true_coord = y["command"], y["coord"]
-
-                    command_loss = command_loss_fn(
-                        outputs["command"].transpose(1, 2), true_command.argmax(dim=-1)
+                    losses = model_to_train.validation_step(
+                        batch, raster_loss_fn, command_loss_fn
                     )
-                    coord_loss = calculate_masked_coordinate_loss(
-                        true_command,
-                        true_coord,
-                        outputs["coord"],
-                        model.arg_counts.to(device),
-                    )
-
-                    loss = (
-                        RASTER_LOSS_WEIGHT * raster_loss
-                        + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
-                        + VECTOR_LOSS_WEIGHT_COORD * coord_loss
-                    )
-                    total_val_loss += loss.item()
+                    total_val_loss += losses["total_loss"].item()
 
             avg_val_loss = (
                 total_val_loss / len(test_loader) if len(test_loader) > 0 else 0

@@ -5,10 +5,15 @@ import torch.nn.functional as F
 
 from glyphogen_torch.embedding import StyleEmbedding
 from glyphogen_torch.lstm import LSTMDecoder
-
-# from glyphogen_torch.rasterizer import rasterize_batch # TODO: Port this
+from glyphogen_torch.rasterizer import rasterize_batch
 
 from glyphogen.glyph import NODE_GLYPH_COMMANDS, COORDINATE_WIDTH
+
+from glyphogen_torch.hyperparameters import (
+    RASTER_LOSS_WEIGHT,
+    VECTOR_LOSS_WEIGHT_COMMAND,
+    VECTOR_LOSS_WEIGHT_COORD,
+)
 
 
 def calculate_masked_coordinate_loss(
@@ -159,6 +164,78 @@ class VectorizationGenerator(nn.Module):
         z = self.output_dense(x)
         return z
 
+    def training_step(self, batch, raster_loss_fn, command_loss_fn):
+        device = next(self.parameters()).device
+        (inputs, y) = batch
+        (raster_image_input, target_sequence_input) = inputs
+        (true_command, true_coord) = y
+        raster_image_input, target_sequence_input = raster_image_input.to(
+            device
+        ), target_sequence_input.to(device)
+        true_command, true_coord = true_command.to(device), true_coord.to(
+            device
+        )
+        outputs = self((raster_image_input, target_sequence_input))
+
+        vector_rendered_images = rasterize_batch(
+            outputs["command"], outputs["coord"]
+        ).to(device)
+        raster_loss = raster_loss_fn(raster_image_input, vector_rendered_images)
+
+        command_loss = command_loss_fn(outputs["command"], true_command)
+        coord_loss = calculate_masked_coordinate_loss(
+            true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
+        )
+
+        total_loss = (
+            RASTER_LOSS_WEIGHT * raster_loss
+            + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
+            + VECTOR_LOSS_WEIGHT_COORD * coord_loss
+        )
+        return {
+            "total_loss": total_loss,
+            "raster_loss": raster_loss,
+            "command_loss": command_loss,
+            "coord_loss": coord_loss,
+        }
+
+    def validation_step(self, batch, raster_loss_fn, command_loss_fn):
+        device = next(self.parameters()).device
+        (inputs, y) = batch
+        (raster_image_input, target_sequence_input) = inputs
+        (true_command, true_coord) = y
+        raster_image_input, target_sequence_input = raster_image_input.to(
+            device
+        ), target_sequence_input.to(device)
+        true_command, true_coord = true_command.to(device), true_coord.to(
+            device
+        )
+
+        outputs = self((raster_image_input, target_sequence_input))
+        vector_rendered_images = rasterize_batch(
+            outputs["command"], outputs["coord"]
+        ).to(device)
+        raster_loss = raster_loss_fn(raster_image_input, vector_rendered_images)
+
+        command_loss = command_loss_fn(
+            outputs["command"].transpose(1, 2), true_command.argmax(dim=-1)
+        )
+        coord_loss = calculate_masked_coordinate_loss(
+            true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
+        )
+
+        total_loss = (
+            RASTER_LOSS_WEIGHT * raster_loss
+            + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
+            + VECTOR_LOSS_WEIGHT_COORD * coord_loss
+        )
+        return {
+            "total_loss": total_loss,
+            "raster_loss": raster_loss,
+            "command_loss": command_loss,
+            "coord_loss": coord_loss,
+        }
+
     def forward(self, inputs):
         raster_image_input, target_sequence_input = inputs
         z = self.encode(raster_image_input)
@@ -187,6 +264,77 @@ class GlyphGenerator(nn.Module):
         self.arg_counts = torch.tensor(
             list(NODE_GLYPH_COMMANDS.values()), dtype=torch.long
         )
+
+    def training_step(self, batch, raster_loss_fn, command_loss_fn):
+        device = next(self.parameters()).device
+        (style_image_input, glyph_id_input, target_sequence_input), y = batch
+        style_image_input, glyph_id_input, target_sequence_input = (
+            style_image_input.to(device),
+            glyph_id_input.to(device),
+            target_sequence_input.to(device),
+        )
+        y = {k: v.to(device) for k, v in y.items()}
+
+        outputs = self(
+            (style_image_input, glyph_id_input, target_sequence_input)
+        )
+        raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
+        true_command, true_coord = y["command"], y["coord"]
+
+        command_loss = command_loss_fn(outputs["command"], true_command)
+        coord_loss = calculate_masked_coordinate_loss(
+            true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
+        )
+
+        total_loss = (
+            RASTER_LOSS_WEIGHT * raster_loss
+            + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
+            + VECTOR_LOSS_WEIGHT_COORD * coord_loss
+        )
+        return {
+            "total_loss": total_loss,
+            "raster_loss": raster_loss,
+            "command_loss": command_loss,
+            "coord_loss": coord_loss,
+        }
+
+    def validation_step(self, batch, raster_loss_fn, command_loss_fn):
+        device = next(self.parameters()).device
+        (style_image_input, glyph_id_input, target_sequence_input), y = batch
+        style_image_input, glyph_id_input, target_sequence_input = (
+            style_image_input.to(device),
+            glyph_id_input.to(device),
+            target_sequence_input.to(device),
+        )
+        y = {k: v.to(device) for k, v in y.items()}
+
+        outputs = self(
+            (style_image_input, glyph_id_input, target_sequence_input)
+        )
+        raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
+        true_command, true_coord = y["command"], y["coord"]
+
+        command_loss = command_loss_fn(
+            outputs["command"].transpose(1, 2), true_command.argmax(dim=-1)
+        )
+        coord_loss = calculate_masked_coordinate_loss(
+            true_command,
+            true_coord,
+            outputs["coord"],
+            self.arg_counts.to(device),
+        )
+
+        total_loss = (
+            RASTER_LOSS_WEIGHT * raster_loss
+            + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
+            + VECTOR_LOSS_WEIGHT_COORD * coord_loss
+        )
+        return {
+            "total_loss": total_loss,
+            "raster_loss": raster_loss,
+            "command_loss": command_loss,
+            "coord_loss": coord_loss,
+        }
 
     def forward(self, inputs):
         style_image_input, glyph_id_input, target_sequence_input = inputs
