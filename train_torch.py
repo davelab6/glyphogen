@@ -4,6 +4,7 @@ import torch
 import datetime
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+import pkbar
 
 from glyphogen_torch.dataset import get_full_model_data, get_pretrain_data, collate_fn
 from glyphogen_torch.model import (
@@ -102,6 +103,13 @@ def main(
     for epoch in range(epochs):
         model_to_train.train()
         total_train_loss = 0
+        kbar = pkbar.Kbar(
+            target=len(train_loader),
+            epoch=epoch,
+            num_epochs=epochs,
+            width=8,
+            always_stateful=False,
+        )
         for i, batch in enumerate(train_loader):
             if pre_train:
                 (inputs, y) = batch
@@ -144,11 +152,19 @@ def main(
             )
             writer.add_scalar("Loss/coord_batch", coord_loss.item(), global_step)
             writer.add_scalar("Loss/raster_batch", raster_loss.item(), global_step)
-
             loss = (
                 RASTER_LOSS_WEIGHT * raster_loss
                 + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
                 + VECTOR_LOSS_WEIGHT_COORD * coord_loss
+            )
+            kbar.update(
+                i,
+                values=[
+                    ("total_loss", loss),
+                    ("command_loss", command_loss),
+                    ("coord_loss", coord_loss),
+                    ("raster_loss", raster_loss),
+                ],
             )
 
             optimizer.zero_grad()
@@ -158,14 +174,13 @@ def main(
 
             writer.add_scalar("Loss/train_batch", loss.item(), global_step)
             if i % 10 == 0:
-                print(f"Epoch {epoch}, Batch {i}, Loss: {loss.item()}")
+                # print(f"Epoch {epoch}, Batch {i}, Loss: {loss.item()}")
                 writer.flush()
 
             global_step += 1
 
         avg_train_loss = total_train_loss / (i + 1)
         writer.add_scalar("Loss/train_epoch", avg_train_loss, epoch)
-        print(f"Epoch {epoch}, Average Train Loss: {avg_train_loss}")
 
         # Validation
         if not single_batch:

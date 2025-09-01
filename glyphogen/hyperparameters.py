@@ -1,5 +1,9 @@
 # Hyperparameters
-NUM_GLYPHS = 32
+import string
+
+ALPHABET = list(string.ascii_lowercase + string.ascii_uppercase + string.digits)
+NUM_GLYPHS = len(ALPHABET)
+
 LATENT_DIM = 64
 NUM_TRANSFORMER_LAYERS = 4
 D_MODEL = 512
@@ -23,10 +27,5 @@ QUANTIZATION_BIN_SIZE = 10
 COORD_RANGE = (-1000, 1000)
 MAX_SEQUENCE_LENGTH = (MAX_COMMANDS * 7) + 1
 
-ALPHABET = ["a", "d", "h", "e", "s", "i", "o", "n", "t"]
-# # While pre-training the vectorizer, shove as many glyphs in as we can
-import string
-
-ALPHABET = list(string.ascii_lowercase + string.ascii_uppercase + string.digits)
 BASE_DIR = "/Users/simon/others-repos/fonts/ofl"
 #BASE_DIR = "/mnt/experiments/fonts/ofl"
