@@ -9,6 +9,7 @@ from glyphogen.glyph import (
 
 MAX_COORDINATE = 1500.0  # We scale the coordinates to be in the range [-1, 1]
 
+
 class LSTMDecoder(nn.Module):
     def __init__(self, d_model, latent_dim, rate=0.1):
         super().__init__()
@@ -28,10 +29,10 @@ class LSTMDecoder(nn.Module):
     def forward(self, x, context=None):
         command_input = x[:, :, :NODE_COMMAND_WIDTH].float()
         coord_input = x[:, :, NODE_COMMAND_WIDTH:].float() / MAX_COORDINATE
-        
+
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
-        
+
         x = command_emb + coord_emb
         x = self.dropout(x)
 
@@ -41,14 +42,14 @@ class LSTMDecoder(nn.Module):
             x = torch.cat([x, context_tiled], dim=-1)
 
         # LSTM expects input of shape (batch, seq_len, input_size)
-        # which is what we have. 
+        # which is what we have.
         x, _ = self.lstm(x)
 
         command_output = self.output_command(x)
-        command_output = self.softmax(command_output)
+        # command_output = self.softmax(command_output)
 
         coord_output = self.output_coords(x)
         coord_output = self.tanh(coord_output)
         coord_output = coord_output * MAX_COORDINATE
-        
+
         return command_output, coord_output

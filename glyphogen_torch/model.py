@@ -172,9 +172,7 @@ class VectorizationGenerator(nn.Module):
         raster_image_input, target_sequence_input = raster_image_input.to(
             device
         ), target_sequence_input.to(device)
-        true_command, true_coord = true_command.to(device), true_coord.to(
-            device
-        )
+        true_command, true_coord = true_command.to(device), true_coord.to(device)
         outputs = self((raster_image_input, target_sequence_input))
 
         vector_rendered_images = rasterize_batch(
@@ -207,9 +205,7 @@ class VectorizationGenerator(nn.Module):
         raster_image_input, target_sequence_input = raster_image_input.to(
             device
         ), target_sequence_input.to(device)
-        true_command, true_coord = true_command.to(device), true_coord.to(
-            device
-        )
+        true_command, true_coord = true_command.to(device), true_coord.to(device)
 
         outputs = self((raster_image_input, target_sequence_input))
         vector_rendered_images = rasterize_batch(
@@ -217,9 +213,7 @@ class VectorizationGenerator(nn.Module):
         ).to(device)
         raster_loss = raster_loss_fn(raster_image_input, vector_rendered_images)
 
-        command_loss = command_loss_fn(
-            outputs["command"].transpose(1, 2), true_command.argmax(dim=-1)
-        )
+        command_loss = command_loss_fn(outputs["command"], true_command)
         coord_loss = calculate_masked_coordinate_loss(
             true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
         )
@@ -275,9 +269,7 @@ class GlyphGenerator(nn.Module):
         )
         y = {k: v.to(device) for k, v in y.items()}
 
-        outputs = self(
-            (style_image_input, glyph_id_input, target_sequence_input)
-        )
+        outputs = self((style_image_input, glyph_id_input, target_sequence_input))
         raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
         true_command, true_coord = y["command"], y["coord"]
 
@@ -308,15 +300,11 @@ class GlyphGenerator(nn.Module):
         )
         y = {k: v.to(device) for k, v in y.items()}
 
-        outputs = self(
-            (style_image_input, glyph_id_input, target_sequence_input)
-        )
+        outputs = self((style_image_input, glyph_id_input, target_sequence_input))
         raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
         true_command, true_coord = y["command"], y["coord"]
 
-        command_loss = command_loss_fn(
-            outputs["command"].transpose(1, 2), true_command.argmax(dim=-1)
-        )
+        command_loss = command_loss_fn(outputs["command"], true_command)
         coord_loss = calculate_masked_coordinate_loss(
             true_command,
             true_coord,

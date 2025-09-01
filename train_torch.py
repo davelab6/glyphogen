@@ -86,7 +86,7 @@ def main(
 
     # Optimizer and Loss
     optimizer = torch.optim.Adam(model_to_train.parameters(), lr=LEARNING_RATE)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
+    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     raster_loss_fn = torch.nn.MSELoss()
     command_loss_fn = torch.nn.CrossEntropyLoss()
@@ -99,6 +99,7 @@ def main(
     global_step = 0
 
     for epoch in range(epochs):
+        print()
         model_to_train.train()
         total_train_loss = 0
         kbar = pkbar.Kbar(
@@ -177,7 +178,7 @@ def main(
             log_images(model_to_train, test_loader, writer, epoch, pre_train)
         log_svgs(model_to_train, test_loader, writer, epoch, pre_train)
 
-        scheduler.step()
+        # scheduler.step()
 
     writer.close()
 
