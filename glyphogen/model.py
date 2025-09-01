@@ -10,7 +10,7 @@ from glyphogen.hyperparameters import (
     RASTER_LOSS_WEIGHT,
 )
 from glyphogen.glyph import NODE_GLYPH_COMMANDS, COORDINATE_WIDTH
-from glyphogen.transformers import LSTMDecoder
+from glyphogen.lstm import LSTMDecoder
 from glyphogen.rasterizer import rasterize_batch
 import datetime
 
