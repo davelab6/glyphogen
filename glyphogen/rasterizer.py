@@ -110,166 +110,99 @@ def simplify_nodes(cmd, coord):
     return cmd, coord
 
 
-@tf.function
 def nodes_to_segments(cmd, coord):
     cmd, coord = simplify_nodes(cmd, coord)
-    command_tensor = tf.argmax(cmd, axis=-1, output_type=tf.int32)
-    max_len = MAX_COMMANDS
+    command_tensor = np.argmax(cmd, axis=-1)
 
-    command_keys = tf.constant(list(NodeCommand.grammar.keys()))
-    cmd_n_val = tf.where(tf.equal(command_keys, "N"))[0][0]
-    cmd_z_val = tf.where(tf.equal(command_keys, "Z"))[0][0]
-    cmd_eos_val = tf.where(tf.equal(command_keys, "EOS"))[0][0]
-    cmd_sos_val = tf.where(tf.equal(command_keys, "SOS"))[0][0]
+    command_keys = list(NodeCommand.grammar.keys())
+    cmd_n_val = command_keys.index("N")
+    cmd_z_val = command_keys.index("Z")
+    cmd_eos_val = command_keys.index("EOS")
+    cmd_sos_val = command_keys.index("SOS")
 
-    # A single flat TensorArray for all points/num_cp in the glyph
-    all_points = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
-    all_num_cp = tf.TensorArray(tf.int32, size=0, dynamic_size=True)
+    all_points = []
+    all_num_cp = []
+    contour_splits = []
+    point_splits = []
 
-    # Store the end indices of each contour
-    contour_splits = tf.TensorArray(tf.int32, size=0, dynamic_size=True)
-    point_splits = tf.TensorArray(tf.int32, size=0, dynamic_size=True)
+    contour_start_index = -1
 
-    i = tf.constant(0)
-    contour_start_index = tf.constant(-1)
-
-    loop_cond = lambda i, csi, ap, anc, cs, ps: i < max_len
-
-    def loop_body(
-        i, contour_start_index, all_points, all_num_cp, contour_splits, point_splits
-    ):
+    for i in range(len(command_tensor)):
         command = command_tensor[i]
-        is_sos = tf.equal(command, tf.cast(cmd_sos_val, dtype=tf.int32))
-        is_z = tf.equal(command, tf.cast(cmd_z_val, dtype=tf.int32))
-        is_eos = tf.equal(command, tf.cast(cmd_eos_val, dtype=tf.int32))
+        is_sos = command == cmd_sos_val
+        is_z = command == cmd_z_val
+        is_eos = command == cmd_eos_val
+        is_contour_boundary = is_z or is_eos
 
-        is_contour_boundary = tf.logical_or(is_z, is_eos)
-
-        def finalize_contour_fn():
-            """Logic to run when a contour boundary is hit."""
-            nonlocal all_points, all_num_cp, contour_splits, point_splits
+        if contour_start_index > -1 and is_contour_boundary:
+            # finalize_contour_fn
             p1_cmd = command_tensor[i - 1]
             p1_coord = coord[i - 1]
             p2_cmd = command_tensor[contour_start_index]
             p2_coord = coord[contour_start_index]
 
-            is_curve = tf.logical_and(
-                tf.equal(p1_cmd, tf.cast(cmd_n_val, dtype=tf.int32)),
-                tf.equal(p2_cmd, tf.cast(cmd_n_val, dtype=tf.int32)),
-            )
+            is_curve = (p1_cmd == cmd_n_val) and (p2_cmd == cmd_n_val)
 
             p1_pos, p2_pos = p1_coord[0:2], p2_coord[0:2]
             p1_hout, p2_hin = p1_pos + p1_coord[4:6], p2_pos + p2_coord[2:4]
 
-            def curve_fn():
-                ap_new = all_points.write(all_points.size(), p1_hout)
-                ap_new = ap_new.write(ap_new.size(), p2_hin)
-                ap_new = ap_new.write(ap_new.size(), p2_pos)
-                anc_new = all_num_cp.write(all_num_cp.size(), 2)
-                return ap_new, anc_new
+            if is_curve:
+                all_points.append(p1_hout)
+                all_points.append(p2_hin)
+                all_points.append(p2_pos)
+                all_num_cp.append(2)
+            else:
+                all_points.append(p2_pos)
+                all_num_cp.append(0)
 
-            def line_fn():
-                ap_new = all_points.write(all_points.size(), p2_pos)
-                anc_new = all_num_cp.write(all_num_cp.size(), 0)
-                return ap_new, anc_new
+            contour_splits.append(len(all_num_cp))
+            point_splits.append(len(all_points))
+            contour_start_index = -1
 
-            new_ap, new_anc = tf.cond(is_curve, curve_fn, line_fn)
+        if is_eos:
+            break
 
-            new_cs = contour_splits.write(contour_splits.size(), new_anc.size())
-            new_ps = point_splits.write(point_splits.size(), new_ap.size())
-            new_csi = -1
-            return new_ap, new_anc, new_cs, new_ps, new_csi
+        is_node = not (is_sos or is_z or is_eos)
 
-        def passthrough_fn():
-            """Logic to run when no contour boundary is hit."""
-            return (
-                all_points,
-                all_num_cp,
-                contour_splits,
-                point_splits,
-                contour_start_index,
-            )
-
-        all_points, all_num_cp, contour_splits, point_splits, contour_start_index = (
-            tf.cond(
-                tf.logical_and(contour_start_index > -1, is_contour_boundary),
-                finalize_contour_fn,
-                passthrough_fn,
-            )
-        )
-
-        is_node = tf.logical_not(tf.logical_or(is_sos, tf.logical_or(is_z, is_eos)))
-
-        def node_logic_fn():
-            nonlocal contour_start_index, all_points, all_num_cp
-
-            def new_contour_fn():
-                # First node of a new contour
-                ap_new = all_points.write(all_points.size(), coord[i, 0:2])
-                return i, ap_new, all_num_cp
-
-            def existing_contour_fn():
-                # Subsequent node in an existing contour
+        if is_node:
+            if contour_start_index == -1:
+                # new_contour_fn
+                all_points.append(coord[i, 0:2])
+                contour_start_index = i
+            else:
+                # existing_contour_fn
                 p1_cmd = command_tensor[i - 1]
                 p1_coord = coord[i - 1]
                 p2_cmd = command
                 p2_coord = coord[i]
 
-                is_curve = tf.logical_and(
-                    tf.equal(p1_cmd, tf.cast(cmd_n_val, dtype=tf.int32)),
-                    tf.equal(p2_cmd, tf.cast(cmd_n_val, dtype=tf.int32)),
-                )
+                is_curve = (p1_cmd == cmd_n_val) and (p2_cmd == cmd_n_val)
 
                 p1_pos, p2_pos = p1_coord[0:2], p2_coord[0:2]
                 p1_hout, p2_hin = p1_pos + p1_coord[4:6], p2_pos + p2_coord[2:4]
 
-                def curve_segment_fn():
-                    ap_new = all_points.write(all_points.size(), p1_hout)
-                    ap_new = ap_new.write(ap_new.size(), p2_hin)
-                    ap_new = ap_new.write(ap_new.size(), p2_pos)
-                    anc_new = all_num_cp.write(all_num_cp.size(), 2)
-                    return ap_new, anc_new
+                if is_curve:
+                    all_points.append(p1_hout)
+                    all_points.append(p2_hin)
+                    all_points.append(p2_pos)
+                    all_num_cp.append(2)
+                else:
+                    all_points.append(p2_pos)
+                    all_num_cp.append(0)
 
-                def line_segment_fn():
-                    ap_new = all_points.write(all_points.size(), p2_pos)
-                    anc_new = all_num_cp.write(all_num_cp.size(), 0)
-                    return ap_new, anc_new
-
-                ap_new, anc_new = tf.cond(is_curve, curve_segment_fn, line_segment_fn)
-                return contour_start_index, ap_new, anc_new
-
-            csi, ap, anc = tf.cond(
-                tf.equal(contour_start_index, -1), new_contour_fn, existing_contour_fn
-            )
-            return csi, ap, anc
-
-        def non_node_logic_fn():
-            return contour_start_index, all_points, all_num_cp
-
-        contour_start_index, all_points, all_num_cp = tf.cond(
-            is_node, node_logic_fn, non_node_logic_fn
-        )
-
+    if not all_points:
         return (
-            i + 1,
-            contour_start_index,
-            all_points,
-            all_num_cp,
-            contour_splits,
-            point_splits,
+            np.array([], dtype=np.float32).reshape(0, 2),
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.int32),
         )
-
-    _, _, all_points, all_num_cp, contour_splits, point_splits = tf.while_loop(
-        loop_cond,
-        loop_body,
-        [i, contour_start_index, all_points, all_num_cp, contour_splits, point_splits],
-    )
 
     return (
-        all_points.stack(),
-        all_num_cp.stack(),
-        contour_splits.stack(),
-        point_splits.stack(),
+        np.array(all_points, dtype=np.float32),
+        np.array(all_num_cp, dtype=np.int32),
+        np.array(contour_splits, dtype=np.int32),
+        np.array(point_splits, dtype=np.int32),
     )
 
 
@@ -278,22 +211,11 @@ def rasterize_batch(cmds, coords):
 
     def _rasterize_single_glyph_py(cmd_np, coord_np):
         # This function is wrapped in tf.py_function, so it gets numpy arrays.
-        # We need to convert them back to tensors to call our @tf.function.
-        cmd = tf.convert_to_tensor(cmd_np)
-        coord = tf.convert_to_tensor(coord_np)
-
-        if tf.shape(cmd)[0] == 0:
-            return np.zeros([GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 1], dtype=np.float32)
-
+        print("Rasterizing glyph")
         points, num_control_points, num_cp_splits, point_splits = nodes_to_segments(
-            cmd, coord
+            cmd_np, coord_np
         )
-
-        # Now we can go back to numpy to create the python list of shapes
-        num_cp_splits = num_cp_splits.numpy()
-        point_splits = point_splits.numpy()
-        num_control_points = num_control_points.numpy()
-        points = points.numpy()
+        print(points, num_control_points)
 
         shapes = []
         num_cp_start = 0
@@ -301,6 +223,8 @@ def rasterize_batch(cmds, coords):
         for num_cp_end, point_end in zip(num_cp_splits, point_splits):
             num_cp = num_control_points[num_cp_start:num_cp_end]
             path_points = points[point_start:point_end]
+            # tf.print("Num control points:", num_cp)
+            # tf.print("Path points:", path_points)
             # pydiffvg expects tensors, so we convert back
             path = pydiffvg.Path(
                 num_control_points=tf.convert_to_tensor(num_cp),
@@ -311,6 +235,10 @@ def rasterize_batch(cmds, coords):
             num_cp_start = num_cp_end
             point_start = point_end
 
+        if len(shapes) == 0:
+            return np.ones((GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 1), dtype=np.float32)
+
+        # Please don't change these. They are correct.
         scale_factor = GEN_IMAGE_SIZE[0] / 1457
         shape_to_canvas = tf.constant(
             [[scale_factor, 0.0, 4.0], [0.0, -scale_factor, 351.0], [0.0, 0.0, 1.0]],
@@ -320,14 +248,16 @@ def rasterize_batch(cmds, coords):
         path_group = pydiffvg.ShapeGroup(
             shape_ids=tf.range(len(shapes)),
             fill_color=tf.constant([0.0, 0.0, 0.0, 1.0]),
-            use_even_odd_rule=False,
+            use_even_odd_rule=True,
             shape_to_canvas=shape_to_canvas,
         )
         shape_groups = [path_group]
         scene_args = pydiffvg.serialize_scene(
             GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], shapes, shape_groups
         )
+
         render = pydiffvg.render
+        print("Rendering", shapes)
         img = render(
             tf.constant(GEN_IMAGE_SIZE[0]),  # width
             tf.constant(GEN_IMAGE_SIZE[1]),  # height
@@ -336,6 +266,7 @@ def rasterize_batch(cmds, coords):
             tf.constant(1),  # seed
             *scene_args,
         )
+        print("Done")
         # Invert it, we want black on white
         img = tf.reduce_max(img) - img
         # Pydiffvg outputs RGBA, we just want the alpha channel

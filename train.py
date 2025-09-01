@@ -83,14 +83,10 @@ def main(
         test_dataset = test_dataset.map(prepare_data)
 
     train_dataset = (
-        train_dataset.shuffle(buffer_size=1000)
-        .batch(BATCH_SIZE)
-        .prefetch(200)
+        train_dataset.shuffle(buffer_size=1000).batch(BATCH_SIZE).prefetch(200)
     )
     test_dataset = (
-        test_dataset.shuffle(buffer_size=1000)
-        .batch(BATCH_SIZE)
-        .prefetch(200)
+        test_dataset.shuffle(buffer_size=1000).batch(BATCH_SIZE).prefetch(200)
     )
 
     lr_schedule = keras.optimizers.schedules.ExponentialDecay(
@@ -112,6 +108,7 @@ def main(
                 "coord": VECTOR_LOSS_WEIGHT_COORD,
                 "raster": RASTER_LOSS_WEIGHT,
             },
+            run_eagerly=True,
         )
     else:
         model_to_train.compile(
