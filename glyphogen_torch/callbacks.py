@@ -81,13 +81,18 @@ def log_svgs(model, test_loader, writer, epoch, pre_train=False, num_samples=3):
             )
             output = model((style_image, glyph_id, target_sequence_input))
 
-    
         command_output = output["command"]
         coord_output = output["coord"]
         for i in range(min(num_samples, command_output.shape[0])):
             command_tensor = command_output[i].detach().cpu().numpy()
             coord_tensor = coord_output[i].detach().cpu().numpy()
-
+            # command_keys = list(NodeCommand.grammar.keys())
+            # svg_string = " ".join(
+            #     [
+            #         command_keys[np.argmax(command_tensor[i])]
+            #         for i in range(command_tensor.shape[0])
+            #     ]
+            # )
             try:
                 decoded_glyph = NodeGlyph.from_numpy(command_tensor, coord_tensor)
                 svg_string = decoded_glyph.to_svg_glyph().to_svg_string()

@@ -42,13 +42,30 @@ def calculate_masked_coordinate_loss(
     return torch.sum(masked_loss) / torch.sum(coord_mask)
 
 
+def find_eos(command_batch):
+    command_keys = list(NODE_GLYPH_COMMANDS.keys())
+    eos_index = command_keys.index("EOS")
+    command_indices = torch.argmax(command_batch, axis=-1)
+    eos_mask = command_indices == eos_index
+    eos_idx = torch.where(
+        torch.any(eos_mask, dim=1),
+        torch.argmax(eos_mask.float(), dim=1),
+        torch.full(
+            (command_batch.shape[0],),
+            command_batch.shape[1],
+            device=command_batch.device,
+            dtype=torch.long,
+        ),
+    )
+    return eos_idx
+
+
 def point_placement_loss(y_true_command, y_pred_command):
     """
     Calculates a loss based on drawing practices.
     """
     command_keys = list(NODE_GLYPH_COMMANDS.keys())
     z_index = command_keys.index("Z")
-    eos_index = command_keys.index("EOS")
     n_index = command_keys.index("N")
     nh_index = command_keys.index("NH")
     nv_index = command_keys.index("NV")
@@ -56,31 +73,8 @@ def point_placement_loss(y_true_command, y_pred_command):
     y_true_command_indices = torch.argmax(y_true_command, axis=-1)
     y_pred_command_indices = torch.argmax(y_pred_command, axis=-1)
 
-    # Find EOS indices
-    true_eos_mask = y_true_command_indices == eos_index
-    pred_eos_mask = y_pred_command_indices == eos_index
-
-    # If no EOS, use sequence length
-    true_eos_idx = torch.where(
-        torch.any(true_eos_mask, dim=1),
-        torch.argmax(true_eos_mask.float(), dim=1),
-        torch.full(
-            (y_true_command.shape[0],),
-            y_true_command.shape[1],
-            device=y_true_command.device,
-            dtype=torch.long,
-        ),
-    )
-    pred_eos_idx = torch.where(
-        torch.any(pred_eos_mask, dim=1),
-        torch.argmax(pred_eos_mask.float(), dim=1),
-        torch.full(
-            (y_pred_command.shape[0],),
-            y_pred_command.shape[1],
-            device=y_pred_command.device,
-            dtype=torch.long,
-        ),
-    )
+    true_eos_idx = find_eos(y_true_command)
+    pred_eos_idx = find_eos(y_pred_command)
 
     # Contour count loss
     batch_size = y_true_command.shape[0]
@@ -109,6 +103,42 @@ def point_placement_loss(y_true_command, y_pred_command):
     handle_loss = pred_n_prob - pred_nh_prob - pred_nv_prob
 
     return contour_loss, eos_loss, handle_loss
+
+
+def sequence_command_loss(y_true_command, y_pred_command):
+    """
+    Calculates the command loss only up to the longest EOS between true and pred.
+    """
+    true_eos_idx = find_eos(y_true_command)
+    pred_eos_idx = find_eos(y_pred_command)
+
+    max_len = torch.max(true_eos_idx, pred_eos_idx)
+
+    batch_size, seq_len, num_classes = y_true_command.shape
+
+    # Create a mask for the sequences
+    indices = torch.arange(seq_len, device=y_true_command.device).expand(batch_size, -1)
+    mask = indices < max_len.unsqueeze(1)  # shape (N, L), boolean
+
+    # Get true class indices
+    y_true_indices = torch.argmax(y_true_command, dim=-1)  # shape (N, L)
+
+    # Apply log_softmax to predictions over the class dimension
+    log_probs = F.log_softmax(y_pred_command, dim=-1)  # shape (N, L, C)
+
+    # Gather the log probabilities of the true classes
+    true_log_probs = torch.gather(log_probs, 2, y_true_indices.unsqueeze(-1)).squeeze(
+        -1
+    )  # shape (N, L)
+
+    # Calculate negative log likelihood loss
+    nll_loss = -true_log_probs
+
+    # Apply mask
+    masked_loss = nll_loss * mask.float()
+
+    # Normalize by the number of unmasked elements
+    return torch.sum(masked_loss) / (torch.sum(mask) + 1e-8)
 
 
 class Decoder(nn.Module):
@@ -217,7 +247,6 @@ class VectorizationGenerator(nn.Module):
         )
 
         self.raster_loss_fn = torch.nn.MSELoss()
-        self.command_loss_fn = torch.nn.CrossEntropyLoss()
 
     @torch.compile(backend="aot_eager")
     def encode(self, inputs):
@@ -268,7 +297,7 @@ class VectorizationGenerator(nn.Module):
                 raster_image_input, vector_rendered_images
             )
 
-        command_loss = self.command_loss_fn(outputs["command"], true_command)
+        command_loss = sequence_command_loss(true_command, outputs["command"])
         coord_loss = calculate_masked_coordinate_loss(
             true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
         )
