@@ -90,9 +90,6 @@ def main(
     optimizer = torch.optim.Adam(model_to_train.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=SCHEDULER_GAMMA)
 
-    raster_loss_fn = torch.nn.MSELoss()
-    command_loss_fn = torch.nn.CrossEntropyLoss()
-
     # Training Loop
     writer = SummaryWriter(
         f"logs/fit/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -123,9 +120,7 @@ def main(
         )
         for i, batch in enumerate(train_loader):
             optimizer.zero_grad()
-            losses = model_to_train.training_step(
-                batch, raster_loss_fn, command_loss_fn, step=global_step
-            )
+            losses = model_to_train.step(batch, step=global_step)
             losses["total_loss"].backward()
             optimizer.step()
             total_train_loss += losses["total_loss"].item()
@@ -159,9 +154,7 @@ def main(
             total_val_loss = 0
             with torch.no_grad():
                 for batch in test_loader:
-                    losses = model_to_train.validation_step(
-                        batch, raster_loss_fn, command_loss_fn
-                    )
+                    losses = model_to_train.step(batch, step=global_step)
                     total_val_loss += losses["total_loss"].item()
 
             avg_val_loss = (

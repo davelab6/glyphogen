@@ -16,7 +16,7 @@ cmd_z_val = command_keys.index("Z")
 cmd_eos_val = command_keys.index("EOS")
 cmd_sos_val = command_keys.index("SOS")
 
-@torch.compile
+@torch.compiler.disable()
 def simplify_nodes(cmd, coord):
     """Converts optimized node commands into simpler L and N commands."""
     command_tensor = torch.argmax(cmd, axis=-1)
@@ -193,6 +193,7 @@ def nodes_to_segments(cmd, coord):
     )
 
 
+@torch.compiler.disable(recursive=False)
 def rasterize_batch(cmds, coords, seed=42):
     """Render a batch of glyphs from their node representation."""
     dead_image = torch.ones(

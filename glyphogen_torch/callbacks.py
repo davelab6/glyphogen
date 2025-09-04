@@ -90,7 +90,7 @@ def log_svgs(model, test_loader, writer, epoch, pre_train=False, num_samples=3):
 
             try:
                 decoded_glyph = NodeGlyph.from_numpy(command_tensor, coord_tensor)
-                svg_string = decoded_glyph.to_debug_string()
+                svg_string = decoded_glyph.to_svg_glyph().to_svg_string()
             except Exception as e:
                 svg_string = f"Couldn't generate SVG: {e}"
 
