@@ -19,14 +19,11 @@ from glyphogen_torch.hyperparameters import (
     NUM_GLYPHS,
     LATENT_DIM,
     D_MODEL,
-    RASTER_LOSS_WEIGHT,
-    VECTOR_LOSS_WEIGHT_COMMAND,
-    VECTOR_LOSS_WEIGHT_COORD,
     RATE,
     EPOCHS,
     LEARNING_RATE,
     SCHEDULER_STEP,
-    SCHEDULER_GAMMA
+    SCHEDULER_GAMMA,
 )
 
 
@@ -79,11 +76,19 @@ def main(
         shuffle=not isinstance(train_dataset, torch.utils.data.IterableDataset),
         collate_fn=collate_fn,
     )
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        collate_fn=collate_fn,
+        shuffle=not isinstance(test_dataset, torch.utils.data.IterableDataset),
+    )
 
     if single_batch:
-        print("Reducing dataset to a single batch for overfitting test")
-        train_loader = [next(iter(train_loader))] * 32  # Repeat the same batch
+        print("Reducing dataset for overfitting test")
+        loader_iter = iter(train_loader)
+        train_loader = [
+            next(loader_iter) for _ in range(32)
+        ]  # Let's have 32 different batches
         test_loader = train_loader
 
     # Optimizer and Loss
@@ -102,9 +107,9 @@ def main(
     LOSSES = ["total_loss", "command_loss", "coord_loss", "raster_loss"]
     if pre_train:
         LOSSES += [
-            "point_placement_contour_loss",
-            "point_placement_eos_loss",
-            "point_placement_handle_loss",
+            "contour_count_loss",
+            "node_count_loss",
+            "handle_smoothness_loss",
         ]
 
     for epoch in range(epochs):

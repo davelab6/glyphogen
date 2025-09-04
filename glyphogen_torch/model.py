@@ -302,29 +302,27 @@ class VectorizationGenerator(nn.Module):
             true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
         )
         (
-            point_placement_contour_loss,
-            point_placement_eos_loss,
-            point_placement_handle_loss,
+            contour_count_loss,
+            node_count_loss,
+            handle_smoothness_loss,
         ) = point_placement_loss(true_command, outputs["command"])
 
         total_loss = (
             VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss
             + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
             + VECTOR_LOSS_WEIGHT_COORD * coord_loss
-            + CONTOUR_COUNT_WEIGHT * point_placement_contour_loss
-            + NODE_COUNT_WEIGHT * point_placement_eos_loss
-            + HANDLE_SMOOTHNESS_WEIGHT * point_placement_handle_loss
+            + CONTOUR_COUNT_WEIGHT * contour_count_loss
+            + NODE_COUNT_WEIGHT * node_count_loss
+            + HANDLE_SMOOTHNESS_WEIGHT * handle_smoothness_loss
         )
         return {
             "total_loss": total_loss,
             "raster_loss": VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss,
             "command_loss": VECTOR_LOSS_WEIGHT_COMMAND * command_loss,
             "coord_loss": VECTOR_LOSS_WEIGHT_COORD * coord_loss,
-            "point_placement_contour_loss": CONTOUR_COUNT_WEIGHT
-            * point_placement_contour_loss,
-            "point_placement_eos_loss": NODE_COUNT_WEIGHT * point_placement_eos_loss,
-            "point_placement_handle_loss": HANDLE_SMOOTHNESS_WEIGHT
-            * point_placement_handle_loss,
+            "contour_count_loss": CONTOUR_COUNT_WEIGHT * contour_count_loss,
+            "node_count_loss": NODE_COUNT_WEIGHT * node_count_loss,
+            "handle_smoothness_loss": HANDLE_SMOOTHNESS_WEIGHT * handle_smoothness_loss,
         }
 
     @torch.compile(backend="aot_eager")
