@@ -25,6 +25,8 @@ from glyphogen_torch.hyperparameters import (
     RATE,
     EPOCHS,
     LEARNING_RATE,
+    SCHEDULER_STEP,
+    SCHEDULER_GAMMA
 )
 
 
@@ -86,7 +88,7 @@ def main(
 
     # Optimizer and Loss
     optimizer = torch.optim.Adam(model_to_train.parameters(), lr=LEARNING_RATE)
-    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=SCHEDULER_GAMMA)
 
     raster_loss_fn = torch.nn.MSELoss()
     command_loss_fn = torch.nn.CrossEntropyLoss()
@@ -95,8 +97,18 @@ def main(
     writer = SummaryWriter(
         f"logs/fit/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     )
+    writer.add_text(
+        f"Hyperparameters", open("glyphogen_torch/hyperparameters.py").read(), 0
+    )
     best_val_loss = float("inf")
     global_step = 0
+    LOSSES = ["total_loss", "command_loss", "coord_loss", "raster_loss"]
+    if pre_train:
+        LOSSES += [
+            "point_placement_contour_loss",
+            "point_placement_eos_loss",
+            "point_placement_handle_loss",
+        ]
 
     for epoch in range(epochs):
         print()
@@ -112,7 +124,7 @@ def main(
         for i, batch in enumerate(train_loader):
             optimizer.zero_grad()
             losses = model_to_train.training_step(
-                batch, raster_loss_fn, command_loss_fn
+                batch, raster_loss_fn, command_loss_fn, step=global_step
             )
             losses["total_loss"].backward()
             optimizer.step()
@@ -121,29 +133,22 @@ def main(
             kbar.update(
                 i,
                 values=[
-                    ("total_loss", losses["total_loss"]),
-                    ("command_loss", losses["command_loss"]),
-                    ("coord_loss", losses["coord_loss"]),
-                    ("raster_loss", losses["raster_loss"]),
+                    (label.replace("_loss", ""), losses[label]) for label in LOSSES
                 ],
             )
 
-            writer.add_scalar(
-                "Loss/train_batch", losses["total_loss"].item(), global_step
-            )
-            writer.add_scalar(
-                "Loss/command_batch", losses["command_loss"].item(), global_step
-            )
-            writer.add_scalar(
-                "Loss/coord_batch", losses["coord_loss"].item(), global_step
-            )
-            writer.add_scalar(
-                "Loss/raster_batch", losses["raster_loss"].item(), global_step
-            )
+            for label in LOSSES:
+                writer.add_scalar(
+                    f"Loss/{label.replace('loss','batch')}",
+                    losses[label].item(),
+                    global_step,
+                )
             if i % 10 == 0:
                 writer.flush()
 
             global_step += 1
+            if global_step % SCHEDULER_STEP == 0:
+                scheduler.step()
 
         avg_train_loss = total_train_loss / (i + 1)
         writer.add_scalar("Loss/train_epoch", avg_train_loss, epoch)
@@ -178,7 +183,8 @@ def main(
             log_images(model_to_train, test_loader, writer, epoch, pre_train)
         log_svgs(model_to_train, test_loader, writer, epoch, pre_train)
 
-        # scheduler.step()
+        # Log the learning rate
+        writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], epoch)
 
     writer.close()
 

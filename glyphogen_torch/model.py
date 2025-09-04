@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from glyphogen_torch.hyperparameters import VECTOR_RASTERIZATION_LOSS_WEIGHT
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -13,7 +14,12 @@ from glyphogen_torch.hyperparameters import (
     RASTER_LOSS_WEIGHT,
     VECTOR_LOSS_WEIGHT_COMMAND,
     VECTOR_LOSS_WEIGHT_COORD,
+    CONTOUR_COUNT_WEIGHT,
+    NODE_COUNT_WEIGHT,
+    HANDLE_SMOOTHNESS_WEIGHT,
 )
+
+SKIP_RASTERIZATION = True
 
 
 def calculate_masked_coordinate_loss(
@@ -34,6 +40,79 @@ def calculate_masked_coordinate_loss(
     masked_loss = huber_loss * coord_mask
 
     return torch.sum(masked_loss) / torch.sum(coord_mask)
+
+
+def point_placement_loss(y_true_command, y_pred_command):
+    """
+    Calculates a loss based on drawing practices.
+    """
+    command_keys = list(NODE_GLYPH_COMMANDS.keys())
+    z_index = command_keys.index("Z")
+    eos_index = command_keys.index("EOS")
+    n_index = command_keys.index("N")
+    nh_index = command_keys.index("NH")
+    nv_index = command_keys.index("NV")
+
+    y_true_command_indices = torch.argmax(y_true_command, axis=-1)
+    y_pred_command_indices = torch.argmax(y_pred_command, axis=-1)
+
+    # Find EOS indices
+    true_eos_mask = y_true_command_indices == eos_index
+    pred_eos_mask = y_pred_command_indices == eos_index
+
+    # If no EOS, use sequence length
+    true_eos_idx = torch.where(
+        torch.any(true_eos_mask, dim=1),
+        torch.argmax(true_eos_mask.float(), dim=1),
+        torch.full(
+            (y_true_command.shape[0],),
+            y_true_command.shape[1],
+            device=y_true_command.device,
+            dtype=torch.long,
+        ),
+    )
+    pred_eos_idx = torch.where(
+        torch.any(pred_eos_mask, dim=1),
+        torch.argmax(pred_eos_mask.float(), dim=1),
+        torch.full(
+            (y_pred_command.shape[0],),
+            y_pred_command.shape[1],
+            device=y_pred_command.device,
+            dtype=torch.long,
+        ),
+    )
+
+    # Contour count loss
+    batch_size = y_true_command.shape[0]
+
+    true_z_counts = []
+    for i in range(batch_size):
+        true_seq = y_true_command_indices[i, : true_eos_idx[i]]
+        true_z_counts.append(torch.sum(true_seq == z_index))
+    true_z_counts = torch.stack(true_z_counts).float()
+
+    pred_z_counts = []
+    for i in range(batch_size):
+        pred_seq = y_pred_command_indices[i, : pred_eos_idx[i]]
+        pred_z_counts.append(torch.sum(pred_seq == z_index))
+    pred_z_counts = torch.stack(pred_z_counts).float()
+
+    contour_loss = torch.mean(torch.abs(true_z_counts - pred_z_counts))
+
+    # Sequence length loss; try to do it in same number of nodes as the designer
+    eos_loss = torch.mean(
+        torch.abs(
+            pred_eos_idx.float() - true_eos_idx.float()
+        )
+    )
+
+    # Handle orientation loss
+    pred_n_prob = torch.mean(y_pred_command[:, :, n_index])
+    pred_nh_prob = torch.mean(y_pred_command[:, :, nh_index])
+    pred_nv_prob = torch.mean(y_pred_command[:, :, nv_index])
+    handle_loss = pred_n_prob - pred_nh_prob - pred_nv_prob
+
+    return contour_loss, eos_loss, handle_loss
 
 
 class Decoder(nn.Module):
@@ -164,7 +243,7 @@ class VectorizationGenerator(nn.Module):
         z = self.output_dense(x)
         return z
 
-    def training_step(self, batch, raster_loss_fn, command_loss_fn):
+    def training_step(self, batch, raster_loss_fn, command_loss_fn, step):
         device = next(self.parameters()).device
         (inputs, y) = batch
         (raster_image_input, target_sequence_input) = inputs
@@ -175,26 +254,43 @@ class VectorizationGenerator(nn.Module):
         true_command, true_coord = true_command.to(device), true_coord.to(device)
         outputs = self((raster_image_input, target_sequence_input))
 
-        vector_rendered_images = rasterize_batch(
-            outputs["command"], outputs["coord"]
-        ).to(device)
-        raster_loss = raster_loss_fn(raster_image_input, vector_rendered_images)
+        if SKIP_RASTERIZATION:
+            raster_loss = raster_loss_fn(raster_image_input, raster_image_input)
+        else:
+            vector_rendered_images = rasterize_batch(
+                outputs["command"], outputs["coord"], seed=step
+            ).to(device)
+            raster_loss = raster_loss_fn(raster_image_input, vector_rendered_images)
 
         command_loss = command_loss_fn(outputs["command"], true_command)
         coord_loss = calculate_masked_coordinate_loss(
             true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
         )
+        (
+            point_placement_contour_loss,
+            point_placement_eos_loss,
+            point_placement_handle_loss,
+        ) = point_placement_loss(true_command, outputs["command"])
 
         total_loss = (
-            RASTER_LOSS_WEIGHT * raster_loss
+            VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss
             + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
             + VECTOR_LOSS_WEIGHT_COORD * coord_loss
+            + CONTOUR_COUNT_WEIGHT * point_placement_contour_loss
+            + NODE_COUNT_WEIGHT * point_placement_eos_loss
+            + HANDLE_SMOOTHNESS_WEIGHT * point_placement_handle_loss
         )
         return {
             "total_loss": total_loss,
-            "raster_loss": raster_loss,
-            "command_loss": command_loss,
-            "coord_loss": coord_loss,
+            "raster_loss": VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss,
+            "command_loss": VECTOR_LOSS_WEIGHT_COMMAND * command_loss,
+            "coord_loss": VECTOR_LOSS_WEIGHT_COORD * coord_loss,
+            "point_placement_contour_loss": CONTOUR_COUNT_WEIGHT
+            * point_placement_contour_loss,
+            "point_placement_eos_loss": NODE_COUNT_WEIGHT
+            * point_placement_eos_loss,
+            "point_placement_handle_loss": HANDLE_SMOOTHNESS_WEIGHT
+            * point_placement_handle_loss,
         }
 
     def validation_step(self, batch, raster_loss_fn, command_loss_fn):
@@ -217,17 +313,31 @@ class VectorizationGenerator(nn.Module):
         coord_loss = calculate_masked_coordinate_loss(
             true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
         )
+        (
+            point_placement_contour_loss,
+            point_placement_eos_loss,
+            point_placement_handle_loss,
+        ) = point_placement_loss(true_command, outputs["command"])
 
         total_loss = (
-            RASTER_LOSS_WEIGHT * raster_loss
+            VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss
             + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
             + VECTOR_LOSS_WEIGHT_COORD * coord_loss
+            + CONTOUR_COUNT_WEIGHT * point_placement_contour_loss
+            + NODE_COUNT_WEIGHT * point_placement_eos_loss
+            + HANDLE_SMOOTHNESS_WEIGHT * point_placement_handle_loss
         )
         return {
             "total_loss": total_loss,
-            "raster_loss": raster_loss,
-            "command_loss": command_loss,
-            "coord_loss": coord_loss,
+            "raster_loss": VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss,
+            "command_loss": VECTOR_LOSS_WEIGHT_COMMAND * command_loss,
+            "coord_loss": VECTOR_LOSS_WEIGHT_COORD * coord_loss,
+            "point_placement_contour_loss": CONTOUR_COUNT_WEIGHT
+            * point_placement_contour_loss,
+            "point_placement_eos_loss": NODE_COUNT_WEIGHT
+            * point_placement_eos_loss,
+            "point_placement_handle_loss": HANDLE_SMOOTHNESS_WEIGHT
+            * point_placement_handle_loss,
         }
 
     def forward(self, inputs):
@@ -353,3 +463,23 @@ def build_model(num_glyphs, d_model, latent_dim=32, rate=0.1):
         latent_dim=latent_dim,
         rate=rate,
     )
+
+
+if __name__ == "__main__":
+    # Example usage:
+    num_glyphs = 42
+    d_model = 512
+    model = build_model(num_glyphs, d_model)
+
+    # Create some dummy input tensors
+    style_image = torch.randn(1, 1, 40, 168)
+    glyph_id = torch.randn(1, num_glyphs)
+    target_sequence = torch.randn(1, 150, 12)
+
+    # Forward pass
+    output = model((style_image, glyph_id, target_sequence))
+
+    # Print output shapes
+    print("Raster output shape:", output["raster"].shape)
+    print("Command output shape:", output["command"].shape)
+    print("Coord output shape:", output["coord"].shape)

@@ -1,3 +1,4 @@
+from glyphogen_torch.glyph import NodeGlyph
 import torch
 from .glyph import NodeCommand
 from .hyperparameters import GEN_IMAGE_SIZE
@@ -9,6 +10,11 @@ import numpy as np
 # (https://github.com/BachiLi/diffvg/issues/96) so we use CPU.
 pydiffvg.set_use_gpu(False)
 
+command_keys = list(NodeCommand.grammar.keys())
+cmd_n_val = command_keys.index("N")
+cmd_z_val = command_keys.index("Z")
+cmd_eos_val = command_keys.index("EOS")
+cmd_sos_val = command_keys.index("SOS")
 
 @torch.compile
 def simplify_nodes(cmd, coord):
@@ -113,12 +119,6 @@ def nodes_to_segments(cmd, coord):
     command_tensor = np.argmax(cmd.detach().cpu().numpy(), axis=-1)
     coord_np = coord.detach().cpu().numpy()
 
-    command_keys = list(NodeCommand.grammar.keys())
-    cmd_n_val = command_keys.index("N")
-    cmd_z_val = command_keys.index("Z")
-    cmd_eos_val = command_keys.index("EOS")
-    cmd_sos_val = command_keys.index("SOS")
-
     all_points = []
     all_num_cp = []
     contour_splits = []
@@ -193,20 +193,20 @@ def nodes_to_segments(cmd, coord):
     )
 
 
-def rasterize_batch(cmds, coords):
+def rasterize_batch(cmds, coords, seed=42):
     """Render a batch of glyphs from their node representation."""
+    dead_image = torch.ones(
+                1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32
+            ) / 2.0
     images = []
     for i in range(cmds.shape[0]):
+        # If there's no EOS token or no Z token, don't bother
+        if cmd_eos_val not in torch.argmax(cmds[i], axis=-1) or cmd_z_val not in torch.argmax(cmds[i], axis=-1):
+            images.append(dead_image)
+            continue
         points, num_control_points, num_cp_splits, point_splits = nodes_to_segments(
             cmds[i].clone(), coords[i].clone()
         )
-
-        if points.shape[0] == 0:
-            img = torch.ones(
-                1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32
-            )
-            images.append(img)
-            continue
 
         shapes = []
         num_cp_start = 0
@@ -250,13 +250,11 @@ def rasterize_batch(cmds, coords):
         render = pydiffvg.RenderFunction.apply
         try:
             img = render(
-                GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 4, 4, 1, None, *scene_args
+                GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 4, 4, seed, None, *scene_args
             )
         except Exception as e:
-            print(f"Rendering failed ({e})")
-            img = torch.zeros(
-                GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 4, dtype=torch.float32
-            )
+            images.append(dead_image)
+            continue
 
         img = torch.max(img) - img
         # Get alpha channel and add channel dimension

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from glyphogen.glyph import (
     NODE_COMMAND_WIDTH,
@@ -23,7 +24,7 @@ class LSTMDecoder(nn.Module):
         self.dropout = nn.Dropout(rate)
         self.output_command = nn.Linear(d_model, NODE_COMMAND_WIDTH)
         self.output_coords = nn.Linear(d_model, COORDINATE_WIDTH)
-        self.softmax = nn.Softmax(dim=-1)
+        # self.softmax = F.log_softmax(dim=-1)
         self.tanh = nn.Tanh()
 
     def forward(self, x, context=None):
@@ -46,7 +47,7 @@ class LSTMDecoder(nn.Module):
         x, _ = self.lstm(x)
 
         command_output = self.output_command(x)
-        # command_output = self.softmax(command_output)
+        # command_output = F.log_softmax(command_output, dim=1)
 
         coord_output = self.output_coords(x)
         coord_output = self.tanh(coord_output)

@@ -64,35 +64,33 @@ def log_svgs(model, test_loader, writer, epoch, pre_train=False, num_samples=3):
     device = next(model.parameters()).device
     model.eval()
     with torch.no_grad():
-        for i, batch in enumerate(test_loader):
-            if i >= num_samples:
-                break
+        batch = next(iter(test_loader))
+        if pre_train:
+            (inputs, y) = batch
+            (raster_image_input, target_sequence_input) = inputs
+            raster_image_input, target_sequence_input = raster_image_input.to(
+                device
+            ), target_sequence_input.to(device)
+            output = model((raster_image_input, target_sequence_input))
+        else:
+            (style_image, glyph_id, target_sequence_input), y = batch
+            style_image, glyph_id, target_sequence_input = (
+                style_image.to(device),
+                glyph_id.to(device),
+                target_sequence_input.to(device),
+            )
+            output = model((style_image, glyph_id, target_sequence_input))
 
-            if pre_train:
-                (inputs, y) = batch
-                (raster_image_input, target_sequence_input) = inputs
-                raster_image_input, target_sequence_input = raster_image_input.to(
-                    device
-                ), target_sequence_input.to(device)
-                output = model((raster_image_input, target_sequence_input))
-            else:
-                (style_image, glyph_id, target_sequence_input), y = batch
-                style_image, glyph_id, target_sequence_input = (
-                    style_image.to(device),
-                    glyph_id.to(device),
-                    target_sequence_input.to(device),
-                )
-                output = model((style_image, glyph_id, target_sequence_input))
-
-            command_output = output["command"]
-            coord_output = output["coord"]
-
-            command_tensor = command_output[0].detach().cpu().numpy()
-            coord_tensor = coord_output[0].detach().cpu().numpy()
+    
+        command_output = output["command"]
+        coord_output = output["coord"]
+        for i in range(min(num_samples, command_output.shape[0])):
+            command_tensor = command_output[i].detach().cpu().numpy()
+            coord_tensor = coord_output[i].detach().cpu().numpy()
 
             try:
                 decoded_glyph = NodeGlyph.from_numpy(command_tensor, coord_tensor)
-                svg_string = decoded_glyph.to_svg_glyph().to_svg_string()
+                svg_string = decoded_glyph.to_debug_string()
             except Exception as e:
                 svg_string = f"Couldn't generate SVG: {e}"
 
