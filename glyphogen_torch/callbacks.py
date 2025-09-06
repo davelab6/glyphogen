@@ -1,3 +1,4 @@
+import random
 import torch
 from .glyph import NodeGlyph, NodeCommand
 import numpy as np
@@ -35,8 +36,12 @@ def log_images(model, test_loader, writer, epoch, pre_train=False, num_images=3)
 def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=3):
     device = next(model.parameters()).device
     model.eval()
+    if isinstance(test_loader, list):
+        random_batch = random.sample(test_loader, 1)[0]
+    else:
+        random_batch = next(iter(test_loader))
     with torch.no_grad():
-        (inputs, y) = next(iter(test_loader))
+        (inputs, y) = random_batch
         (raster_image_input, target_sequence_input) = inputs
         raster_image_input, target_sequence_input = raster_image_input.to(
             device
@@ -47,7 +52,7 @@ def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=3):
             outputs["command"], outputs["coord"]
         ).to(device)
 
-        for i in range(num_images):
+        for i in range(min(num_images, vector_rendered_images.shape[0])):
             writer.add_image(f"Pretrain_Images/True_{i}", raster_image_input[i], epoch)
             writer.add_image(
                 f"Pretrain_Images/Generated_{i}",

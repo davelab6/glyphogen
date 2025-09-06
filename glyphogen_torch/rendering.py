@@ -6,7 +6,7 @@ import numpy as np
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageChops
 import diskcache
-from glyphogen.hyperparameters import GEN_IMAGE_SIZE, STYLE_IMAGE_SIZE
+from glyphogen_torch.hyperparameters import GEN_IMAGE_SIZE, STYLE_IMAGE_SIZE
 
 cache_dir = "imgcache"
 cache = diskcache.Cache(cache_dir, size_limit=4 * 2**30)  # 4 GB

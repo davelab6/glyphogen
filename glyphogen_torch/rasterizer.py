@@ -16,6 +16,7 @@ cmd_z_val = command_keys.index("Z")
 cmd_eos_val = command_keys.index("EOS")
 cmd_sos_val = command_keys.index("SOS")
 
+
 @torch.compiler.disable()
 def simplify_nodes(cmd, coord):
     """Converts optimized node commands into simpler L and N commands."""
@@ -196,13 +197,15 @@ def nodes_to_segments(cmd, coord):
 @torch.compiler.disable(recursive=False)
 def rasterize_batch(cmds, coords, seed=42):
     """Render a batch of glyphs from their node representation."""
-    dead_image = torch.ones(
-                1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32
-            ) / 2.0
+    dead_image = (
+        torch.ones(1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32) / 2.0
+    )
     images = []
     for i in range(cmds.shape[0]):
         # If there's no EOS token or no Z token, don't bother
-        if cmd_eos_val not in torch.argmax(cmds[i], axis=-1) or cmd_z_val not in torch.argmax(cmds[i], axis=-1):
+        if cmd_eos_val not in torch.argmax(
+            cmds[i], axis=-1
+        ) or cmd_z_val not in torch.argmax(cmds[i], axis=-1):
             images.append(dead_image)
             continue
         points, num_control_points, num_cp_splits, point_splits = nodes_to_segments(
@@ -253,7 +256,10 @@ def rasterize_batch(cmds, coords, seed=42):
             img = render(
                 GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 4, 4, seed, None, *scene_args
             )
+            assert img.grad_fn is not None, "No gradients"
+            print("Got a raster and it's OK")
         except Exception as e:
+            print(f"Failed to rasterize: {e}")
             images.append(dead_image)
             continue
 

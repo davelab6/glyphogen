@@ -3,7 +3,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from glyphogen.glyph import (
+from glyphogen_torch.glyph import (
     NODE_COMMAND_WIDTH,
     COORDINATE_WIDTH,
 )

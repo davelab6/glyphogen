@@ -1,23 +1,21 @@
 #!/usr/bin/env python
-from glyphogen_torch.hyperparameters import VECTOR_RASTERIZATION_LOSS_WEIGHT
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 from glyphogen_torch.embedding import StyleEmbedding
-from glyphogen_torch.lstm import LSTMDecoder
-from glyphogen_torch.rasterizer import rasterize_batch
-
-from glyphogen.glyph import NODE_GLYPH_COMMANDS, COORDINATE_WIDTH
-
+from glyphogen_torch.glyph import COORDINATE_WIDTH, NODE_GLYPH_COMMANDS
 from glyphogen_torch.hyperparameters import (
+    CONTOUR_COUNT_WEIGHT,
+    HANDLE_SMOOTHNESS_WEIGHT,
+    NODE_COUNT_WEIGHT,
     RASTER_LOSS_WEIGHT,
     VECTOR_LOSS_WEIGHT_COMMAND,
     VECTOR_LOSS_WEIGHT_COORD,
-    CONTOUR_COUNT_WEIGHT,
-    NODE_COUNT_WEIGHT,
-    HANDLE_SMOOTHNESS_WEIGHT,
+    VECTOR_RASTERIZATION_LOSS_WEIGHT,
 )
+from glyphogen_torch.lstm import LSTMDecoder
+from glyphogen_torch.rasterizer import rasterize_batch
 
 SKIP_RASTERIZATION = True
 
@@ -69,12 +67,10 @@ def point_placement_loss(y_true_command, y_pred_command):
     n_index = command_keys.index("N")
     nh_index = command_keys.index("NH")
     nv_index = command_keys.index("NV")
+    eos_index = command_keys.index("EOS")
 
     y_true_command_indices = torch.argmax(y_true_command, axis=-1)
-    y_pred_command_indices = torch.argmax(y_pred_command, axis=-1)
-
     true_eos_idx = find_eos(y_true_command)
-    pred_eos_idx = find_eos(y_pred_command)
 
     # Contour count loss
     batch_size = y_true_command.shape[0]
@@ -85,21 +81,34 @@ def point_placement_loss(y_true_command, y_pred_command):
         true_z_counts.append(torch.sum(true_seq == z_index))
     true_z_counts = torch.stack(true_z_counts).float()
 
-    pred_z_counts = []
-    for i in range(batch_size):
-        pred_seq = y_pred_command_indices[i, : pred_eos_idx[i]]
-        pred_z_counts.append(torch.sum(pred_seq == z_index))
-    pred_z_counts = torch.stack(pred_z_counts).float()
-
-    contour_loss = torch.mean(torch.abs(true_z_counts - pred_z_counts))
+    pred_probs = F.softmax(y_pred_command, dim=-1)
+    pred_z_probs = pred_probs[:, :, z_index]
+    eos_probs = pred_probs[:, :, eos_index]
+    continue_probs = 1.0 - eos_probs
+    cumprod_continue = torch.cumprod(continue_probs, dim=1)
+    mask = torch.cat(
+        [
+            torch.ones(batch_size, 1, device=y_pred_command.device),
+            cumprod_continue[:, :-1],
+        ],
+        dim=1,
+    )
+    soft_pred_z_counts = torch.sum(pred_z_probs * mask, dim=1)
+    contour_loss = torch.mean(torch.abs(true_z_counts - soft_pred_z_counts))
 
     # Sequence length loss; try to do it in same number of nodes as the designer
-    eos_loss = torch.mean(torch.abs(pred_eos_idx.float() - true_eos_idx.float()))
+    temperature = 1.0  # Or make this a parameter
+    soft_argmax_probs = F.softmax(eos_probs * temperature, dim=1)
+    indices = torch.arange(
+        y_pred_command.shape[1], device=y_pred_command.device, dtype=torch.float32
+    )
+    soft_pred_eos_idx = torch.sum(soft_argmax_probs * indices, dim=1)
+    eos_loss = torch.mean(torch.abs(soft_pred_eos_idx - true_eos_idx.float()))
 
     # Handle orientation loss
-    pred_n_prob = torch.mean(y_pred_command[:, :, n_index])
-    pred_nh_prob = torch.mean(y_pred_command[:, :, nh_index])
-    pred_nv_prob = torch.mean(y_pred_command[:, :, nv_index])
+    pred_n_prob = torch.mean(pred_probs[:, :, n_index])
+    pred_nh_prob = torch.mean(pred_probs[:, :, nh_index])
+    pred_nv_prob = torch.mean(pred_probs[:, :, nv_index])
     handle_loss = pred_n_prob - pred_nh_prob - pred_nv_prob
 
     return contour_loss, eos_loss, handle_loss
@@ -296,7 +305,6 @@ class VectorizationGenerator(nn.Module):
             raster_loss = self.raster_loss_fn(
                 raster_image_input, vector_rendered_images
             )
-
         command_loss = sequence_command_loss(true_command, outputs["command"])
         coord_loss = calculate_masked_coordinate_loss(
             true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
