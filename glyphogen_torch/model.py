@@ -96,14 +96,19 @@ def point_placement_loss(y_true_command, y_pred_command):
     soft_pred_z_counts = torch.sum(pred_z_probs * mask, dim=1)
     contour_loss = torch.mean(torch.abs(true_z_counts - soft_pred_z_counts))
 
-    # Sequence length loss; try to do it in same number of nodes as the designer
+    # Sequence length loss; try to do it in as many nodes as the designer or fewer
     temperature = 1.0  # Or make this a parameter
     soft_argmax_probs = F.softmax(eos_probs * temperature, dim=1)
     indices = torch.arange(
         y_pred_command.shape[1], device=y_pred_command.device, dtype=torch.float32
     )
     soft_pred_eos_idx = torch.sum(soft_argmax_probs * indices, dim=1)
-    eos_loss = torch.mean(torch.abs(soft_pred_eos_idx - true_eos_idx.float()))
+    eos_loss = torch.mean(
+        torch.max(
+            soft_pred_eos_idx - true_eos_idx.float(),
+            torch.zeros_like(soft_pred_eos_idx),
+        )
+    )
 
     # Handle orientation loss
     pred_n_prob = torch.mean(pred_probs[:, :, n_index])
