@@ -20,105 +20,82 @@ cmd_sos_val = command_keys.index("SOS")
 @torch.compiler.disable()
 def simplify_nodes(cmd, coord):
     """Converts optimized node commands into simpler L and N commands."""
-    command_tensor = torch.argmax(cmd, axis=-1)
-    command_keys = list(NodeCommand.grammar.keys())
+    command_tensor = torch.argmax(cmd, dim=-1)
 
     def get_cmd_code(c):
         return NodeCommand.encode_command(c)
 
-    def update_cmd_coord(cmd, coord, indices, new_cmd_str, new_coord):
-        new_cmd = get_cmd_code(new_cmd_str)
-        new_cmd_one_hot = (
-            torch.nn.functional.one_hot(
-                torch.tensor(new_cmd), num_classes=cmd.shape[-1]
-            )
-            .to(cmd.dtype)
-            .to(cmd.device)
-        )
-        new_cmds = new_cmd_one_hot.unsqueeze(0).repeat(indices.shape[0], 1)
-        indices = indices.squeeze(dim=1).to(cmd.device)
-        cmd[indices] = new_cmds
-        coord[indices] = new_coord
-        return cmd, coord
+    is_nh = (command_tensor == get_cmd_code("NH")).unsqueeze(-1)
+    is_nv = (command_tensor == get_cmd_code("NV")).unsqueeze(-1)
+    is_nci = (command_tensor == get_cmd_code("NCI")).unsqueeze(-1)
+    is_nco = (command_tensor == get_cmd_code("NCO")).unsqueeze(-1)
 
-    # Find indices of all commands
-    nh_indices = (command_tensor == get_cmd_code("NH")).nonzero()
-    nv_indices = (command_tensor == get_cmd_code("NV")).nonzero()
-    nci_indices = (command_tensor == get_cmd_code("NCI")).nonzero()
-    nco_indices = (command_tensor == get_cmd_code("NCO")).nonzero()
+    is_simplified_to_n = is_nh | is_nv | is_nci | is_nco
 
-    # Convert NH command to N
-    if nh_indices.numel() > 0:
-        nh_coords = coord[nh_indices.squeeze(dim=1)]
-        new_nh_coords = torch.stack(
-            [
-                nh_coords[:, 0],
-                nh_coords[:, 1],
-                nh_coords[:, 2],
-                torch.zeros_like(nh_coords[:, 1]),
-                nh_coords[:, 3],
-                torch.zeros_like(nh_coords[:, 1]),
-            ],
-            axis=1,
-        )
-        cmd, coord = update_cmd_coord(cmd, coord, nh_indices, "N", new_nh_coords)
+    n_cmd_code = get_cmd_code("N")
+    n_cmd_one_hot = torch.nn.functional.one_hot(
+        torch.tensor(n_cmd_code, device=cmd.device), num_classes=cmd.shape[-1]
+    ).to(cmd.dtype)
 
-    # Convert NV command to N
-    if nv_indices.numel() > 0:
-        nv_coords = coord[nv_indices.squeeze(dim=1)]
-        new_nv_coords = torch.stack(
-            [
-                nv_coords[:, 0],
-                nv_coords[:, 1],
-                torch.zeros_like(nv_coords[:, 0]),
-                nv_coords[:, 2],
-                torch.zeros_like(nv_coords[:, 0]),
-                nv_coords[:, 3],
-            ],
-            axis=1,
-        )
-        cmd, coord = update_cmd_coord(cmd, coord, nv_indices, "N", new_nv_coords)
+    new_cmd = torch.where(is_simplified_to_n, n_cmd_one_hot, cmd)
 
-    # Convert NCI command to N
-    if nci_indices.numel() > 0:
-        nci_coords = coord[nci_indices.squeeze(dim=1)]
-        new_nci_coords = torch.stack(
-            [
-                nci_coords[:, 0],
-                nci_coords[:, 1],
-                nci_coords[:, 2],
-                nci_coords[:, 3],
-                torch.zeros_like(nci_coords[:, 0]),
-                torch.zeros_like(nci_coords[:, 1]),
-            ],
-            axis=1,
-        )
-        cmd, coord = update_cmd_coord(cmd, coord, nci_indices, "N", new_nci_coords)
+    coord_for_nh = torch.stack(
+        [
+            coord[..., 0],
+            coord[..., 1],
+            coord[..., 2],
+            torch.zeros_like(coord[..., 3]),
+            coord[..., 3],
+            torch.zeros_like(coord[..., 5]),
+        ],
+        dim=-1,
+    )
+    coord_for_nv = torch.stack(
+        [
+            coord[..., 0],
+            coord[..., 1],
+            torch.zeros_like(coord[..., 2]),
+            coord[..., 2],
+            torch.zeros_like(coord[..., 4]),
+            coord[..., 3],
+        ],
+        dim=-1,
+    )
+    coord_for_nci = torch.stack(
+        [
+            coord[..., 0],
+            coord[..., 1],
+            coord[..., 2],
+            coord[..., 3],
+            torch.zeros_like(coord[..., 4]),
+            torch.zeros_like(coord[..., 5]),
+        ],
+        dim=-1,
+    )
+    coord_for_nco = torch.stack(
+        [
+            coord[..., 0],
+            coord[..., 1],
+            torch.zeros_like(coord[..., 2]),
+            torch.zeros_like(coord[..., 3]),
+            coord[..., 2],
+            coord[..., 3],
+        ],
+        dim=-1,
+    )
 
-    # Convert NCO command to N
-    if nco_indices.numel() > 0:
-        nco_coords = coord[nco_indices.squeeze(dim=1)]
-        new_nco_coords = torch.stack(
-            [
-                nco_coords[:, 0],
-                nco_coords[:, 1],
-                torch.zeros_like(nco_coords[:, 0]),
-                torch.zeros_like(nco_coords[:, 1]),
-                nco_coords[:, 2],
-                nco_coords[:, 3],
-            ],
-            axis=1,
-        )
-        cmd, coord = update_cmd_coord(cmd, coord, nco_indices, "N", new_nco_coords)
+    new_coord = torch.where(is_nh, coord_for_nh, coord)
+    new_coord = torch.where(is_nv, coord_for_nv, new_coord)
+    new_coord = torch.where(is_nci, coord_for_nci, new_coord)
+    new_coord = torch.where(is_nco, coord_for_nco, new_coord)
 
-    return cmd, coord
+    return new_cmd, new_coord
 
 
-@torch.compile
+@torch.compiler.disable()
 def nodes_to_segments(cmd, coord):
     cmd, coord = simplify_nodes(cmd, coord)
-    command_tensor = np.argmax(cmd.detach().cpu().numpy(), axis=-1)
-    coord_np = coord.detach().cpu().numpy()
+    command_tensor = torch.argmax(cmd, dim=-1)
 
     all_points = []
     all_num_cp = []
@@ -135,10 +112,10 @@ def nodes_to_segments(cmd, coord):
         is_contour_boundary = is_z or is_eos
 
         if contour_start_index > -1 and is_contour_boundary:
-            p1_cmd, p1_coord = command_tensor[i - 1], coord_np[i - 1]
+            p1_cmd, p1_coord = command_tensor[i - 1], coord[i - 1]
             p2_cmd, p2_coord = (
                 command_tensor[contour_start_index],
-                coord_np[contour_start_index],
+                coord[contour_start_index],
             )
             is_curve = (p1_cmd == cmd_n_val) and (p2_cmd == cmd_n_val)
             p1_pos, p2_pos = p1_coord[0:2], p2_coord[0:2]
@@ -146,7 +123,7 @@ def nodes_to_segments(cmd, coord):
 
             if is_curve:
                 all_points.extend([p1_hout, p2_hin, p2_pos])
-                all_num_cp.append(2)
+                all_num_cp.extend([2])
             else:
                 all_points.append(p2_pos)
                 all_num_cp.append(0)
@@ -162,33 +139,33 @@ def nodes_to_segments(cmd, coord):
 
         if is_node:
             if contour_start_index == -1:
-                all_points.append(coord_np[i, 0:2])
+                all_points.append(coord[i, 0:2])
                 contour_start_index = i
             else:
-                p1_cmd, p1_coord = command_tensor[i - 1], coord_np[i - 1]
-                p2_cmd, p2_coord = command, coord_np[i]
+                p1_cmd, p1_coord = command_tensor[i - 1], coord[i - 1]
+                p2_cmd, p2_coord = command, coord[i]
                 is_curve = (p1_cmd == cmd_n_val) and (p2_cmd == cmd_n_val)
                 p1_pos, p2_pos = p1_coord[0:2], p2_coord[0:2]
                 p1_hout, p2_hin = p1_pos + p1_coord[4:6], p2_pos + p2_coord[2:4]
 
                 if is_curve:
                     all_points.extend([p1_hout, p2_hin, p2_pos])
-                    all_num_cp.append(2)
+                    all_num_cp.extend([2])
                 else:
                     all_points.append(p2_pos)
                     all_num_cp.append(0)
 
     if not all_points:
         return (
-            torch.empty(0, 2, dtype=torch.float32),
-            torch.empty(0, dtype=torch.int32),
+            torch.empty(0, 2, dtype=torch.float32, device=coord.device),
+            torch.empty(0, dtype=torch.int32, device=coord.device),
             [],
             [],
         )
 
     return (
-        torch.from_numpy(np.array(all_points, dtype=np.float32)),
-        torch.from_numpy(np.array(all_num_cp, dtype=np.int32)),
+        torch.stack(all_points),
+        torch.tensor(all_num_cp, dtype=torch.int32, device=coord.device),
         contour_splits,
         point_splits,
     )
@@ -197,6 +174,7 @@ def nodes_to_segments(cmd, coord):
 @torch.compiler.disable(recursive=False)
 def rasterize_batch(cmds, coords, seed=42):
     """Render a batch of glyphs from their node representation."""
+    coords.requires_grad_(True)
     dead_image = (
         torch.ones(1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32) / 2.0
     )
@@ -257,7 +235,6 @@ def rasterize_batch(cmds, coords, seed=42):
                 GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 4, 4, seed, None, *scene_args
             )
             assert img.grad_fn is not None, "No gradients"
-            print("Got a raster and it's OK")
         except Exception as e:
             print(f"Failed to rasterize: {e}")
             images.append(dead_image)
