@@ -175,8 +175,8 @@ def nodes_to_segments(cmd, coord):
 def rasterize_batch(cmds, coords, seed=42):
     """Render a batch of glyphs from their node representation."""
     coords.requires_grad_(True)
-    dead_image = (
-        torch.ones(1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32) / 2.0
+    dead_image = torch.ones(
+        1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32
     )
     images = []
     for i in range(cmds.shape[0]):
@@ -207,10 +207,7 @@ def rasterize_batch(cmds, coords, seed=42):
 
         # If there are no shapes, return a blank image
         if len(shapes) == 0:
-            img = torch.ones(
-                1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32
-            )
-            images.append(img)
+            images.append(dead_image)
             continue
 
         scale_factor = GEN_IMAGE_SIZE[0] / 1457
