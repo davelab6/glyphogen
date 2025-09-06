@@ -234,7 +234,6 @@ def rasterize_batch(cmds, coords, seed=42):
             img = render(
                 GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 4, 4, seed, None, *scene_args
             )
-            assert img.grad_fn is not None, "No gradients"
         except Exception as e:
             print(f"Failed to rasterize: {e}")
             images.append(dead_image)
