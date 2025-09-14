@@ -1,14 +1,16 @@
 from pathlib import Path
-from glyphogen.glyph import (
+from glyphogen_torch.glyph import (
     Glyph,
     SVGGlyph,
     NodeGlyph,
     NodeCommand,
     SVGCommand,
     NodeContour,
+)
+from glyphogen_torch.command_defs import (
     NODE_COMMAND_WIDTH,
 )
-from glyphogen.hyperparameters import GEN_IMAGE_SIZE
+from glyphogen_torch.hyperparameters import GEN_IMAGE_SIZE
 import numpy as np
 
 
@@ -74,13 +76,23 @@ def test_svg_to_node_glyph_conversion():
     svg_glyph = SVGGlyph(svg_commands)
     node_glyph = svg_glyph.to_node_glyph()
 
-    assert len(node_glyph.commands) == 4 # 3 nodes + Z
-    assert node_glyph.commands[0].command == "L" # Start of line
+    assert len(node_glyph.commands) == 4  # 3 nodes + Z
+    assert node_glyph.commands[0].command == "L"  # Start of line
     assert node_glyph.commands[0].coordinates == [10, 20]
-    assert node_glyph.commands[1].command == "NCO" # Line to curve
-    assert node_glyph.commands[1].coordinates == [30, 40, 20, 20] # 30,40 pos, 50,60 handle -> 20,20 relative
-    assert node_glyph.commands[2].command == "NCI" # Curve to line
-    assert node_glyph.commands[2].coordinates == [90, 100, -20, -20] # 90,100 pos, 70,80 handle -> -20,-20 relative
+    assert node_glyph.commands[1].command == "NCO"  # Line to curve
+    assert node_glyph.commands[1].coordinates == [
+        30,
+        40,
+        20,
+        20,
+    ]  # 30,40 pos, 50,60 handle -> 20,20 relative
+    assert node_glyph.commands[2].command == "NCI"  # Curve to line
+    assert node_glyph.commands[2].coordinates == [
+        90,
+        100,
+        -20,
+        -20,
+    ]  # 90,100 pos, 70,80 handle -> -20,-20 relative
     assert node_glyph.commands[3].command == "Z"
 
 
@@ -119,6 +131,7 @@ def test_roundtrip_conversion():
     assert reconverted_svg_glyph.commands[3].coordinates == [0, 100]
 
     assert reconverted_svg_glyph.to_svg_string() == "M 0 0 L 100 0 L 100 100 L 0 100 Z"
+
 
 def test_complex_svg_to_node_glyph_conversion():
     # M 247 493 C 383 493 493 383 493 246 C 493 169 458 101 403 56 L 247 0 L 0 246 C 0 383 110 493 247 493 Z
@@ -159,4 +172,7 @@ def test_complex_svg_to_node_glyph_conversion():
     # assert len(reconverted_svg_glyph.commands) == len(svg_commands)
 
     # Visually the same, but order is now normalized
-    assert reconverted_svg_glyph.to_svg_string() == "M 0 246 C 0 383 110 493 247 493 C 383 493 493 383 493 246 C 493 169 458 101 403 56 L 247 0 Z"
+    assert (
+        reconverted_svg_glyph.to_svg_string()
+        == "M 0 246 C 0 383 110 493 247 493 C 383 493 493 383 493 246 C 493 169 458 101 403 56 L 247 0 Z"
+    )

@@ -48,9 +48,14 @@ def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=3):
         ), target_sequence_input.to(device)
 
         outputs = model((raster_image_input, target_sequence_input))
+        raster_loss_fn = torch.nn.MSELoss()
+
         vector_rendered_images = rasterize_batch(
             outputs["command"], outputs["coord"]
         ).to(device)
+
+        raster_loss = raster_loss_fn(raster_image_input, vector_rendered_images)
+        writer.add_scalar("Metrics/raster_metric", 1.0 - raster_loss.item(), epoch)
 
         for i in range(min(num_images, vector_rendered_images.shape[0])):
             writer.add_image(f"Pretrain_Images/True_{i}", raster_image_input[i], epoch)

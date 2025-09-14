@@ -3,12 +3,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from glyphogen_torch.glyph import (
+from glyphogen_torch.command_defs import (
     NODE_COMMAND_WIDTH,
     COORDINATE_WIDTH,
 )
-
-MAX_COORDINATE = 1500.0  # We scale the coordinates to be in the range [-1, 1]
 
 
 class LSTMDecoder(nn.Module):
@@ -29,7 +27,7 @@ class LSTMDecoder(nn.Module):
 
     def forward(self, x, context=None):
         command_input = x[:, :, :NODE_COMMAND_WIDTH].float()
-        coord_input = x[:, :, NODE_COMMAND_WIDTH:].float() / MAX_COORDINATE
+        coord_input = x[:, :, NODE_COMMAND_WIDTH:].float()
 
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
@@ -51,6 +49,5 @@ class LSTMDecoder(nn.Module):
 
         coord_output = self.output_coords(x)
         coord_output = self.tanh(coord_output)
-        coord_output = coord_output * MAX_COORDINATE
 
         return command_output, coord_output

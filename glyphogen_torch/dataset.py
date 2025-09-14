@@ -1,5 +1,6 @@
 import glob
 from pathlib import Path
+import random
 
 import numpy as np
 import torch
@@ -8,7 +9,8 @@ from fontTools.ttLib import TTFont
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, IterableDataset
 
-from glyphogen_torch.glyph import COORDINATE_WIDTH, NODE_COMMAND_WIDTH, Glyph
+from glyphogen_torch.command_defs import COORDINATE_WIDTH, NODE_COMMAND_WIDTH
+from glyphogen_torch.glyph import Glyph
 from glyphogen_torch.hyperparameters import (
     ALPHABET,
     BASE_DIR,
@@ -18,16 +20,19 @@ from glyphogen_torch.hyperparameters import (
 )
 from glyphogen_torch.rendering import get_style_image
 
-font_files = list(glob.glob(BASE_DIR + "/*/*.ttf"))
+font_files = []
 BANNED = ["noto", "bitcount", "nabla", "jersey", "rubik", "winky", "bungee"]
-font_files = [
-    font_file
-    for font_file in font_files
-    if not any(ban in font_file.lower() for ban in BANNED)
-]
-font_files = [font_file for font_file in font_files if "COLR" not in TTFont(font_file)]
-if LIMIT > 0:
-    font_files = font_files[:LIMIT]
+for file in list(glob.glob(BASE_DIR + "/*/*.ttf")):
+    if any(ban in file.lower() for ban in BANNED):
+        continue
+    ttfont = TTFont(file)
+    if "COLR" in ttfont:
+        continue
+    if ttfont["head"].unitsPerEm != 1000:
+        continue
+    font_files.append(file)
+    if LIMIT > 0 and len(font_files) >= LIMIT:
+        break
 if not font_files:
     raise ValueError(f"No suitable font files found in {BASE_DIR}")
 
@@ -58,9 +63,11 @@ class GlyphDataset(Dataset):
             svg_glyph = glyph.vectorize()
             node_glyph = svg_glyph.to_node_glyph()
             if not node_glyph.commands:
+                print(f"No commands for {font_file_path} for char {char}")
                 return None
             encoded_svg = node_glyph.encode()
             if encoded_svg is None:
+                print(f"Failed to encode SVG for {font_file_path} for char {char}")
                 return None
 
             glyph_id_one_hot = torch.nn.functional.one_hot(
@@ -100,12 +107,15 @@ class PretrainGlyphDataset(IterableDataset):
             font_files, test_size=0.2, random_state=42
         )
         self.font_files = self.font_files_train if is_train else self.font_files_test
+        self.cache = {}
 
     def __len__(self):
         return len(self.font_files) * len(self.alphabet)
 
     def __iter__(self):
+        random.shuffle(self.font_files)
         for font_file_path in self.font_files:
+            random.shuffle(self.alphabet)
             for char in self.alphabet:
                 data = self._load_and_process_glyph(font_file_path, ord(char))
                 if data is not None:
@@ -115,13 +125,17 @@ class PretrainGlyphDataset(IterableDataset):
         try:
             glyph = Glyph(Path(font_file_path), int(char_ord), location={})
             raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
-            svg_glyph = glyph.vectorize()
-            node_glyph = svg_glyph.to_node_glyph()
+            if (font_file_path, char_ord) in self.cache:
+                encoded_svg = self.cache[(font_file_path, char_ord)]
+            else:
+                svg_glyph = glyph.vectorize()
+                node_glyph = svg_glyph.to_node_glyph()
 
-            if not node_glyph.commands or len(node_glyph.commands) <= 1:
-                return None
-
-            encoded_svg = node_glyph.encode()
+                if not node_glyph.commands or len(node_glyph.commands) <= 1:
+                    encoded_svg = None
+                else:
+                    encoded_svg = node_glyph.encode()
+                self.cache[(font_file_path, char_ord)] = encoded_svg
             if encoded_svg is None or len(encoded_svg) <= 1:
                 return None
 

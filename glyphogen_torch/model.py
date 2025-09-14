@@ -4,9 +4,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from glyphogen_torch.embedding import StyleEmbedding
-from glyphogen_torch.glyph import COORDINATE_WIDTH, NODE_GLYPH_COMMANDS
+from glyphogen_torch.command_defs import COORDINATE_WIDTH, NODE_GLYPH_COMMANDS
 from glyphogen_torch.hyperparameters import (
     CONTOUR_COUNT_WEIGHT,
+    EOS_SOFTMAX_TEMPERATURE,
     HANDLE_SMOOTHNESS_WEIGHT,
     NODE_COUNT_WEIGHT,
     RASTER_LOSS_WEIGHT,
@@ -58,6 +59,7 @@ def find_eos(command_batch):
     return eos_idx
 
 
+@torch.compile
 def point_placement_loss(y_true_command, y_pred_command):
     """
     Calculates a loss based on drawing practices.
@@ -97,8 +99,7 @@ def point_placement_loss(y_true_command, y_pred_command):
     contour_loss = torch.mean(torch.abs(true_z_counts - soft_pred_z_counts))
 
     # Sequence length loss; try to do it in as many nodes as the designer or fewer
-    temperature = 1.0  # Or make this a parameter
-    soft_argmax_probs = F.softmax(eos_probs * temperature, dim=1)
+    soft_argmax_probs = F.softmax(eos_probs / EOS_SOFTMAX_TEMPERATURE, dim=1)
     indices = torch.arange(
         y_pred_command.shape[1], device=y_pred_command.device, dtype=torch.float32
     )
@@ -297,19 +298,10 @@ class VectorizationGenerator(nn.Module):
         losses = self.losses(y, raster_image_input, outputs, step)
         return losses
 
-    def losses(self, y, raster_image_input, outputs, step):
+    def losses(self, y, _raster_image_input, outputs, step):
         device = next(self.parameters()).device
         (true_command, true_coord) = y
         true_command, true_coord = true_command.to(device), true_coord.to(device)
-        if VECTOR_RASTERIZATION_LOSS_WEIGHT == 0.0:
-            raster_loss = self.raster_loss_fn(raster_image_input, raster_image_input)
-        else:
-            vector_rendered_images = rasterize_batch(
-                outputs["command"], outputs["coord"], seed=step
-            ).to(device)
-            raster_loss = self.raster_loss_fn(
-                raster_image_input, vector_rendered_images
-            )
         command_loss = sequence_command_loss(true_command, outputs["command"])
         coord_loss = calculate_masked_coordinate_loss(
             true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
@@ -320,22 +312,32 @@ class VectorizationGenerator(nn.Module):
             handle_smoothness_loss,
         ) = point_placement_loss(true_command, outputs["command"])
 
+        if SKIP_RASTERIZATION:
+            raster_loss = torch.tensor(0.0, device=device)
+        else:
+            vector_rendered_images = rasterize_batch(
+                outputs["command"], outputs["coord"], step=step
+            ).to(device)
+            raster_loss = self.raster_loss_fn(
+                _raster_image_input, vector_rendered_images
+            )
+
         total_loss = (
-            VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss
-            + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
+            VECTOR_LOSS_WEIGHT_COMMAND * command_loss
             + VECTOR_LOSS_WEIGHT_COORD * coord_loss
             + CONTOUR_COUNT_WEIGHT * contour_count_loss
             + NODE_COUNT_WEIGHT * node_count_loss
             + HANDLE_SMOOTHNESS_WEIGHT * handle_smoothness_loss
+            + VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss
         )
         return {
             "total_loss": total_loss,
-            "raster_loss": VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss,
             "command_loss": VECTOR_LOSS_WEIGHT_COMMAND * command_loss,
             "coord_loss": VECTOR_LOSS_WEIGHT_COORD * coord_loss,
             "contour_count_loss": CONTOUR_COUNT_WEIGHT * contour_count_loss,
             "node_count_loss": NODE_COUNT_WEIGHT * node_count_loss,
             "handle_smoothness_loss": HANDLE_SMOOTHNESS_WEIGHT * handle_smoothness_loss,
+            "raster_metric": raster_loss,
         }
 
     @torch.compile(backend="aot_eager")

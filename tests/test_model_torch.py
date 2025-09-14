@@ -1,7 +1,7 @@
 import torch
 
-from glyphogen.glyph import COORDINATE_WIDTH, NODE_COMMAND_WIDTH
-from glyphogen.hyperparameters import (
+from glyphogen_torch.command_defs import COORDINATE_WIDTH, NODE_COMMAND_WIDTH
+from glyphogen_torch.hyperparameters import (
     BATCH_SIZE,
     D_MODEL,
     GEN_IMAGE_SIZE,
@@ -11,6 +11,7 @@ from glyphogen.hyperparameters import (
     RATE,
 )
 from glyphogen_torch.model import GlyphGenerator
+
 
 def test_output_shapes():
     model = GlyphGenerator(
@@ -31,9 +32,7 @@ def test_output_shapes():
     )
 
     # Get model output
-    outputs = model(
-        (style_image_input, glyph_id_input, target_sequence_input)
-    )
+    outputs = model((style_image_input, glyph_id_input, target_sequence_input))
     generated_glyph_raster = outputs["raster"]
     command_output = outputs["command"]
     coord_output = outputs["coord"]

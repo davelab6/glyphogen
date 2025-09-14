@@ -3,43 +3,21 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import numpy.typing as npt
+import torch
 import uharfbuzz as hb
 from fontTools.pens.qu2cuPen import Qu2CuPen
 from fontTools.pens.svgPathPen import SVGPathPen, pointToString
 from fontTools.ttLib import TTFont
 
+from .hyperparameters import MAX_COMMANDS, MAX_SEQUENCE_LENGTH, RASTER_IMG_SIZE
+from .rasterizer import rasterize_batch
 from .rendering import render
-from .hyperparameters import MAX_COMMANDS
-
-BASIC_SVG_COMMANDS = {
-    "M": 2,  # Move to (2 coordinates)
-    "L": 2,  # Line to (2 coordinates)
-    "H": 1,  # Horizontal line to (1 coordinate)
-    "V": 1,  # Vertical line to (1 coordinate)
-    "C": 6,  # Cubic Bezier curve (6 coordinates)
-    "Z": 0,  # Close path (no coordinates)
-}
-
-NODE_GLYPH_COMMANDS = {
-    "SOS": 0,
-    "N": 6,  # Node with two handles (x, y, delta_hin_x, delta_hin_y, delta_hout_x, delta_hout_y)
-    "NH": 4,  # Node with horizontal handles (x, y, delta_hin_x, delta_hout_x)
-    "NV": 4,  # Node with vertical handles (x, y, delta_hin_y, delta_hout_y)
-    "NCI": 4,  # Node with curve in, line out (x, y, delta_hin_x, delta_hin_y)
-    "NCO": 4,  # Node with line in, curve out (x, y, delta_hout_x, delta_hout_y)
-    "L": 2,  # Line node (x, y)
-    # "LH": 1,  # Horizontal line (x)
-    # "LV": 1,  # Vertical line (y)
-    "Z": 0,  # Close path
-    "EOS": 0,
-}
-
-
-NODE_COMMAND_WIDTH = len(NODE_GLYPH_COMMANDS.keys())
-COORDINATE_WIDTH = max(NODE_GLYPH_COMMANDS.values())
-
-
-MAX_SEQUENCE_LENGTH = MAX_COMMANDS + 1  # for EOS token
+from .command_defs import (
+    BASIC_SVG_COMMANDS,
+    NODE_GLYPH_COMMANDS,
+    SVGCommand,
+    NodeCommand,
+)
 
 
 class AbsoluteSVGPathPen(SVGPathPen):
@@ -54,30 +32,6 @@ class AbsoluteSVGPathPen(SVGPathPen):
         self._commands.append(t)
         # store for future reference
         self._lastX, self._lastY = pt
-
-
-class SVGCommand:
-    grammar = BASIC_SVG_COMMANDS
-    command: str
-    coordinates: List[int]
-
-    def __init__(self, command: str, coordinates: List[int]):
-        if command not in self.grammar:
-            raise ValueError(f"Invalid SVG command: {command}")
-        if len(coordinates) != self.grammar[command]:
-            raise ValueError(
-                f"Invalid number of coordinates for command {command}: expected {self.grammar[command]}, got {len(coordinates)}"
-            )
-        self.command = command
-        self.coordinates = coordinates
-
-
-class NodeCommand(SVGCommand):
-    grammar = NODE_GLYPH_COMMANDS
-
-    @classmethod
-    def encode_command(cls, s: str) -> int:
-        return list(cls.grammar.keys()).index(s)
 
 
 class NodeContour:
@@ -343,42 +297,44 @@ class NodeGlyph:
             cmds.extend(contour.commands)
         return cmds
 
-    def encode(self) -> Optional[npt.NDArray[np.int_]]:
+    def encode(self) -> Optional[npt.NDArray[np.float32]]:
         # We one-hot encode the commands
         command_width = len(NodeCommand.grammar.keys())
         # And we pad the coordinates to a fixed length
         max_coordinates = max(NodeCommand.grammar.values())
-        output: List[List[int]] = []
+        output: List[np.ndarray] = []
 
         # Add SOS token
-        sos_command_vector = [0] * command_width
-        sos_command_vector[NodeCommand.encode_command("SOS")] = 1
-        sos_coordinates = [0] * max_coordinates
-        output.append(sos_command_vector + sos_coordinates)
+        sos_command_vector = np.zeros(command_width, dtype=np.float32)
+        sos_command_vector[NodeCommand.encode_command("SOS")] = 1.0
+        sos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
+        output.append(np.concatenate((sos_command_vector, sos_coordinates)))
 
         for command in self.commands:
             # One-hot encode the command
-            command_vector = [0] * command_width
-            command_vector[NodeCommand.encode_command(command.command)] = 1
-            # Pad the coordinates
-            coordinates = command.coordinates + [0] * (
-                max_coordinates - len(command.coordinates)
+            command_vector = np.zeros(command_width, dtype=np.float32)
+            command_vector[NodeCommand.encode_command(command.command)] = 1.0
+            # Normalize and pad the coordinates
+            norm_coords = np.array(command.coordinates, dtype=np.float32) / 1000.0
+            padded_coords = np.pad(
+                norm_coords, (0, max_coordinates - len(command.coordinates))
             )
-            output.append(command_vector + coordinates)
+            output.append(np.concatenate((command_vector, padded_coords)))
 
         # Add EOS token
-        eos_command_vector = [0] * command_width
-        eos_command_vector[NodeCommand.encode_command("EOS")] = 1
-        eos_coordinates = [0] * max_coordinates
-        output.append(eos_command_vector + eos_coordinates)
-        encoded_glyph = np.array(output, dtype=np.int_)
+        eos_command_vector = np.zeros(command_width, dtype=np.float32)
+        eos_command_vector[NodeCommand.encode_command("EOS")] = 1.0
+        eos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
+        output.append(np.concatenate((eos_command_vector, eos_coordinates)))
+        encoded_glyph = np.array(output, dtype=np.float32)
 
         # Pad vector representation or skip
         if encoded_glyph.shape[0] > MAX_SEQUENCE_LENGTH:
             return
         elif encoded_glyph.shape[0] < MAX_SEQUENCE_LENGTH:
             padding = np.zeros(
-                (MAX_SEQUENCE_LENGTH - encoded_glyph.shape[0], encoded_glyph.shape[1])
+                (MAX_SEQUENCE_LENGTH - encoded_glyph.shape[0], encoded_glyph.shape[1]),
+                dtype=np.float32,
             )
             encoded_glyph = np.vstack((encoded_glyph, padding))
         return encoded_glyph
@@ -405,7 +361,13 @@ class NodeGlyph:
                 continue
 
             num_coords = NodeCommand.grammar[command_str]
-            coords = coord_tensor[i, :num_coords].tolist()
+            # Denormalize and convert to int
+            norm_coords = coord_tensor[i, :num_coords]
+            if torch.is_tensor(norm_coords):
+                norm_coords = norm_coords.cpu().numpy()
+            denorm_coords = (norm_coords * 1000.0).round()
+            coords = denorm_coords.astype(int).tolist()
+
             cur_contour.push_command(NodeCommand(command_str, coords))
         if cur_contour.nodes:
             contours.append(cur_contour)
@@ -480,17 +442,35 @@ class Glyph:
         self.unicode_id = unicode_id
         self.location = location
 
-    def rasterize(self, size: int) -> npt.NDArray[np.float64]:
+    def rasterize(self, size: int = RASTER_IMG_SIZE) -> npt.NDArray[np.float64]:
         """
-        Rasterizes the glyph at a given size.
-        This method should be implemented to convert the glyph into a raster image.
+        Rasterizes the glyph at a given size using the same pipeline as the model.
         """
-        return render(
-            self.font_file,
-            variation=self.location,
-            text=chr(self.unicode_id),
-            target_size=(size, size),
+        node_glyph = self.vectorize().to_node_glyph()
+        encoded_glyph = node_glyph.encode()
+
+        if encoded_glyph is None:
+            # Handle glyphs that are too complex
+            return np.zeros((size, size), dtype=np.float64)
+
+        encoded_tensor = torch.from_numpy(encoded_glyph).float()
+
+        command_width = len(NodeCommand.grammar.keys())
+
+        cmds_tensor = encoded_tensor[:, :command_width]
+        coords_tensor = encoded_tensor[:, command_width:]
+
+        # Add batch dimension
+        cmds_tensor = cmds_tensor.unsqueeze(0)
+        coords_tensor = coords_tensor.unsqueeze(0)
+
+        # Rasterize
+        image_tensor = rasterize_batch(
+            cmds_tensor, coords_tensor, img_size=size, requires_grad=False
         )
+
+        numpy_image = image_tensor.squeeze(0).squeeze(0).cpu().numpy()
+        return np.expand_dims(numpy_image, axis=-1).astype(np.float64)
 
     def vectorize(self) -> SVGGlyph:
         """

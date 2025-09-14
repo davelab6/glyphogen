@@ -1,6 +1,5 @@
-from glyphogen_torch.glyph import NodeGlyph
 import torch
-from .glyph import NodeCommand
+from .command_defs import NodeCommand
 from .hyperparameters import GEN_IMAGE_SIZE
 import pydiffvg
 import numpy as np
@@ -172,12 +171,12 @@ def nodes_to_segments(cmd, coord):
 
 
 @torch.compiler.disable(recursive=False)
-def rasterize_batch(cmds, coords, seed=42):
+def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
     """Render a batch of glyphs from their node representation."""
-    coords.requires_grad_(True)
-    dead_image = torch.ones(
-        1, GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], dtype=torch.float32
-    )
+    if img_size is None:
+        img_size = GEN_IMAGE_SIZE[0]
+    coords.requires_grad_(requires_grad)
+    dead_image = torch.ones(1, img_size, img_size, dtype=torch.float32)
     images = []
     for i in range(cmds.shape[0]):
         # If there's no EOS token or no Z token, don't bother
@@ -210,9 +209,13 @@ def rasterize_batch(cmds, coords, seed=42):
             images.append(dead_image)
             continue
 
-        scale_factor = GEN_IMAGE_SIZE[0] / 1457
+        scale_factor = img_size / 1000.0
         shape_to_canvas = torch.tensor(
-            [[scale_factor, 0.0, 4.0], [0.0, -scale_factor, 351.0], [0.0, 0.0, 1.0]]
+            [
+                [scale_factor, 0.0, 0.0],
+                [0.0, scale_factor, 0.33 * img_size],
+                [0.0, 0.0, 1.0],
+            ]
         )
 
         path_group = pydiffvg.ShapeGroup(
@@ -223,14 +226,12 @@ def rasterize_batch(cmds, coords, seed=42):
         )
         shape_groups = [path_group]
         scene_args = pydiffvg.RenderFunction.serialize_scene(
-            GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], shapes, shape_groups
+            img_size, img_size, shapes, shape_groups
         )
 
         render = pydiffvg.RenderFunction.apply
         try:
-            img = render(
-                GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1], 4, 4, seed, None, *scene_args
-            )
+            img = render(img_size, img_size, 2, 2, seed, None, *scene_args)
         except Exception as e:
             print(f"Failed to rasterize: {e}")
             images.append(dead_image)
