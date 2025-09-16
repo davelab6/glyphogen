@@ -22,7 +22,11 @@ from glyphogen_torch.hyperparameters import (
     SCHEDULER_GAMMA,
     SCHEDULER_STEP,
 )
-from glyphogen_torch.model import GlyphGenerator, VectorizationGenerator
+from glyphogen_torch.model import (
+    GlyphGenerator,
+    VectorizationGenerator,
+    SKIP_RASTERIZATION,
+)
 
 
 def dump_accumulators(accumulators, writer, epoch, batch_idx, val=False):
@@ -137,6 +141,8 @@ def main(
             "node_count_loss",
             "handle_smoothness_loss",
         ]
+        if not SKIP_RASTERIZATION:
+            LOSSES += ["raster_metric"]
     if debug_grads:
         torch._functorch.config.donated_buffer = False
     for epoch in range(epochs):

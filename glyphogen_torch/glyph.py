@@ -17,6 +17,7 @@ from .command_defs import (
     NODE_GLYPH_COMMANDS,
     SVGCommand,
     NodeCommand,
+    MAX_COORDINATE,
 )
 
 
@@ -315,7 +316,9 @@ class NodeGlyph:
             command_vector = np.zeros(command_width, dtype=np.float32)
             command_vector[NodeCommand.encode_command(command.command)] = 1.0
             # Normalize and pad the coordinates
-            norm_coords = np.array(command.coordinates, dtype=np.float32) / 1000.0
+            norm_coords = (
+                np.array(command.coordinates, dtype=np.float32) / MAX_COORDINATE
+            )
             padded_coords = np.pad(
                 norm_coords, (0, max_coordinates - len(command.coordinates))
             )
@@ -365,7 +368,7 @@ class NodeGlyph:
             norm_coords = coord_tensor[i, :num_coords]
             if torch.is_tensor(norm_coords):
                 norm_coords = norm_coords.cpu().numpy()
-            denorm_coords = (norm_coords * 1000.0).round()
+            denorm_coords = (norm_coords * MAX_COORDINATE).round()
             coords = denorm_coords.astype(int).tolist()
 
             cur_contour.push_command(NodeCommand(command_str, coords))

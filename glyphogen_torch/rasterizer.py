@@ -1,5 +1,5 @@
 import torch
-from .command_defs import NodeCommand
+from .command_defs import NodeCommand, MAX_COORDINATE
 from .hyperparameters import GEN_IMAGE_SIZE
 import pydiffvg
 import numpy as np
@@ -194,7 +194,8 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
         point_start = 0
         for num_cp_end, point_end in zip(num_cp_splits, point_splits):
             num_cp = num_control_points[num_cp_start:num_cp_end]
-            path_points = points[point_start:point_end]
+            # Points in the model are normalized to -1 to 1, scale them back up
+            path_points = points[point_start:point_end] * MAX_COORDINATE
             path = pydiffvg.Path(
                 num_control_points=num_cp.to(torch.int32).cpu(),
                 points=path_points.cpu(),
