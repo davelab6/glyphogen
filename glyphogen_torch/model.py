@@ -14,15 +14,18 @@ from glyphogen_torch.hyperparameters import (
     VECTOR_LOSS_WEIGHT_COMMAND,
     VECTOR_LOSS_WEIGHT_COORD,
     VECTOR_RASTERIZATION_LOSS_WEIGHT,
+    HUBER_DELTA,
+    LOSS_IMAGE_SIZE,
+    RASTER_LOSS_CUTOFF,
 )
 from glyphogen_torch.lstm import LSTMDecoder
 from glyphogen_torch.rasterizer import rasterize_batch
 
-SKIP_RASTERIZATION = True
+SKIP_RASTERIZATION = VECTOR_RASTERIZATION_LOSS_WEIGHT == 0.0
 
 
 def calculate_masked_coordinate_loss(
-    y_true_command, y_true_coord, y_pred_coord, arg_counts, delta=10.0
+    y_true_command, y_true_coord, y_pred_coord, arg_counts, delta=HUBER_DELTA
 ):
     """Calculates the masked coordinate loss."""
     true_command_indices = torch.argmax(y_true_command, axis=-1)
@@ -262,6 +265,7 @@ class VectorizationGenerator(nn.Module):
         )
 
         self.raster_loss_fn = torch.nn.MSELoss()
+        self.use_raster = False
 
     @torch.compile(backend="aot_eager")
     def encode(self, inputs):
@@ -298,7 +302,7 @@ class VectorizationGenerator(nn.Module):
         losses = self.losses(y, raster_image_input, outputs, step)
         return losses
 
-    def losses(self, y, _raster_image_input, outputs, step):
+    def losses(self, y, raster_image_input, outputs, step):
         device = next(self.parameters()).device
         (true_command, true_coord) = y
         true_command, true_coord = true_command.to(device), true_coord.to(device)
@@ -316,11 +320,33 @@ class VectorizationGenerator(nn.Module):
             raster_loss = torch.tensor(0.0, device=device)
         else:
             vector_rendered_images = rasterize_batch(
-                outputs["command"], outputs["coord"], step=step
+                outputs["command"],
+                outputs["coord"],
+                seed=step,
+                img_size=LOSS_IMAGE_SIZE,
             ).to(device)
+            # Resize raster_image_input to match vector_rendered_images if needed
+            if raster_image_input.shape != vector_rendered_images.shape:
+                raster_image_input = F.interpolate(
+                    raster_image_input,
+                    size=vector_rendered_images.shape[2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
             raster_loss = self.raster_loss_fn(
-                _raster_image_input, vector_rendered_images
+                raster_image_input, vector_rendered_images
             )
+            # Only apply the loss if we are "close enough" to tweak, otherwise it
+            # makes things worse.
+            if (
+                raster_loss < RASTER_LOSS_CUTOFF and command_loss < 0.25
+            ) or self.use_raster:
+                # Flip over to using raster loss exclusively from now on
+                self.use_raster = True
+            else:
+                raster_loss = torch.tensor(RASTER_LOSS_CUTOFF, device=device)
+            # if self.use_raster:
+            #     coord_loss = coord_loss.detach()  # It's a metric now
 
         total_loss = (
             VECTOR_LOSS_WEIGHT_COMMAND * command_loss
@@ -337,7 +363,7 @@ class VectorizationGenerator(nn.Module):
             "contour_count_loss": CONTOUR_COUNT_WEIGHT * contour_count_loss,
             "node_count_loss": NODE_COUNT_WEIGHT * node_count_loss,
             "handle_smoothness_loss": HANDLE_SMOOTHNESS_WEIGHT * handle_smoothness_loss,
-            "raster_metric": raster_loss,
+            "raster_loss": VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss,
         }
 
     @torch.compile(backend="aot_eager")
