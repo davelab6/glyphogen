@@ -17,6 +17,7 @@ from glyphogen_torch.hyperparameters import (
     GEN_IMAGE_SIZE,
     LIMIT,
     NUM_GLYPHS,
+    MAX_COMMANDS,
 )
 from glyphogen_torch.rendering import get_style_image
 
@@ -64,6 +65,11 @@ class GlyphDataset(Dataset):
             node_glyph = svg_glyph.to_node_glyph()
             if not node_glyph.commands:
                 print(f"No commands for {font_file_path} for char {char}")
+                return None
+            if len(node_glyph.commands) > MAX_COMMANDS:
+                print(
+                    f"Too many commands ({len(node_glyph.commands)}) for {font_file_path} for char {char}"
+                )
                 return None
             encoded_svg = node_glyph.encode()
             if encoded_svg is None:
@@ -130,7 +136,11 @@ class PretrainGlyphDataset(IterableDataset):
             else:
                 svg_glyph = glyph.vectorize()
                 node_glyph = svg_glyph.to_node_glyph()
-
+                if len(node_glyph.commands) > MAX_COMMANDS:
+                    print(
+                        f"Too many commands ({len(node_glyph.commands)}) for {font_file_path} for char {char_ord}"
+                    )
+                    encoded_svg = None
                 if not node_glyph.commands or len(node_glyph.commands) <= 1:
                     encoded_svg = None
                 else:
