@@ -1,15 +1,22 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import diskcache
 import numpy as np
 import numpy.typing as npt
+from PIL import Image
 import torch
 import uharfbuzz as hb
 from fontTools.pens.qu2cuPen import Qu2CuPen
 from fontTools.pens.svgPathPen import SVGPathPen, pointToString
 from fontTools.ttLib import TTFont
 
-from .hyperparameters import MAX_COMMANDS, MAX_SEQUENCE_LENGTH, RASTER_IMG_SIZE
+from .hyperparameters import (
+    BASE_DIR,
+    MAX_COMMANDS,
+    MAX_SEQUENCE_LENGTH,
+    RASTER_IMG_SIZE,
+)
 from .rasterizer import rasterize_batch
 from .rendering import render
 from .command_defs import (
@@ -431,8 +438,7 @@ class SVGGlyph:
         return " ".join(path_data)
 
 
-def quantize(p, mod=5):
-    return int((p // mod) * mod)
+cache_dir = Path("imgcache")
 
 
 class Glyph:
@@ -449,6 +455,28 @@ class Glyph:
         """
         Rasterizes the glyph at a given size using the same pipeline as the model.
         """
+        key = "-".join(
+            [
+                str(self.font_file).replace(BASE_DIR + "/", "").replace("/", "-"),
+                str(self.unicode_id),
+                ",".join({f"{k}:{v}" for k, v in self.location.items()}),
+                str(size),
+            ]
+        )
+        if (cache_dir / (key + ".png")).exists():
+            img = Image.open(cache_dir / (key + ".png")).convert("L")
+            img = np.asarray(img, dtype=np.float32) / 255.0
+            img = np.expand_dims(img, axis=-1)
+        else:
+            img = self._rasterize(size)
+            pil_img = Image.fromarray(
+                (img.squeeze(-1) * 255).astype(np.uint8), mode="L"
+            )
+            cache_dir.mkdir(exist_ok=True)
+            pil_img.save(cache_dir / (key + ".png"))
+        return img
+
+    def _rasterize(self, size: int) -> npt.NDArray[np.float64]:
         node_glyph = self.vectorize().to_node_glyph()
         encoded_glyph = node_glyph.encode()
 
