@@ -192,10 +192,17 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
         shapes = []
         num_cp_start = 0
         point_start = 0
+        baseline = 0.33 * img_size
+        # Points in the model are normalized to -1 to 1, scale them back up
+        # and shift them so the baseline is 1/3 of the way up the image
         for num_cp_end, point_end in zip(num_cp_splits, point_splits):
             num_cp = num_control_points[num_cp_start:num_cp_end]
-            # Points in the model are normalized to -1 to 1, scale them back up
-            path_points = points[point_start:point_end] * MAX_COORDINATE
+            path_points = points[
+                point_start:point_end
+            ] * img_size * 2.0 / 3.0 + torch.tensor([0, baseline], device=points.device)
+            # For my sanity we also flip them vertically
+            path_points[:, 1] = img_size - path_points[:, 1]
+
             path = pydiffvg.Path(
                 num_control_points=num_cp.to(torch.int32).cpu(),
                 points=path_points.cpu(),
@@ -210,20 +217,10 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
             images.append(dead_image)
             continue
 
-        scale_factor = img_size / 1000.0
-        shape_to_canvas = torch.tensor(
-            [
-                [scale_factor, 0.0, 0.0],
-                [0.0, scale_factor, 0.33 * img_size],
-                [0.0, 0.0, 1.0],
-            ]
-        )
-
         path_group = pydiffvg.ShapeGroup(
             shape_ids=torch.arange(len(shapes)),
             fill_color=torch.tensor([0.0, 0.0, 0.0, 1.0]),
             use_even_odd_rule=True,
-            shape_to_canvas=shape_to_canvas,
         )
         shape_groups = [path_group]
         scene_args = pydiffvg.RenderFunction.serialize_scene(
