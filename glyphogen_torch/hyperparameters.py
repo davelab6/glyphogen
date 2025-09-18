@@ -17,16 +17,15 @@ RASTER_LOSS_CUTOFF = 0.02  # Only apply raster loss if less than this value
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = 3.0
-LOSS_IMAGE_SIZE = 128  # Size to rasterize images to for raster loss calculation
+LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
 LEARNING_RATE = 1.6e-4
-SCHEDULER_STEP = 400
-SCHEDULER_GAMMA = 0.9
+FINAL_LEARNING_RATE = 5e-7
 
 GEN_IMAGE_SIZE = (512, 512)
 RASTER_IMG_SIZE = GEN_IMAGE_SIZE[0]
 STYLE_IMAGE_SIZE = (168, 40)
-MAX_COMMANDS = 10
+MAX_COMMANDS = 50
 LIMIT = 0  # Limit the number of fonts to process for testing
 
 # New tokenization hyperparameters

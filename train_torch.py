@@ -19,8 +19,7 @@ from glyphogen_torch.hyperparameters import (
     LEARNING_RATE,
     NUM_GLYPHS,
     RATE,
-    SCHEDULER_GAMMA,
-    SCHEDULER_STEP,
+    FINAL_LEARNING_RATE,
 )
 from glyphogen_torch.model import (
     GlyphGenerator,
@@ -123,7 +122,10 @@ def main(
 
     # Optimizer and Loss
     optimizer = torch.optim.Adam(model_to_train.parameters(), lr=LEARNING_RATE)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=SCHEDULER_GAMMA)
+    # Work out gamma from number of steps and start/end learning rate
+    # final_learning_rate = LEARNING_RATE * (gamma ** epochs)
+    gamma = (FINAL_LEARNING_RATE / LEARNING_RATE) ** (1 / epochs)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     # Training Loop
     writer = SummaryWriter(
@@ -181,8 +183,7 @@ def main(
                 writer.flush()
 
             global_step += 1
-            if global_step % SCHEDULER_STEP == 0:
-                scheduler.step()
+        scheduler.step()
 
         dump_accumulators(loss_accumulators, writer, epoch, i, val=False)
         # Validation
