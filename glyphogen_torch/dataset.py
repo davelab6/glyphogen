@@ -90,11 +90,11 @@ class GlyphDataset(Dataset):
             true_coord = ground_truth[:, NODE_COMMAND_WIDTH:]
 
             return (
-                (
-                    torch.from_numpy(style_image).float(),
-                    glyph_id_one_hot,
-                    torch.from_numpy(target_sequence).long(),
-                ),
+                {
+                    "style_image": torch.from_numpy(style_image).float(),
+                    "glyph_id": glyph_id_one_hot,
+                    "target_sequence": torch.from_numpy(target_sequence).long(),
+                },
                 {
                     "raster": torch.from_numpy(raster).float(),
                     "command": torch.from_numpy(true_command).float(),
@@ -157,10 +157,10 @@ class PretrainGlyphDataset(IterableDataset):
             raster = np.transpose(raster, (2, 0, 1))
 
             return (
-                (
-                    torch.from_numpy(raster).float(),
-                    torch.from_numpy(target_sequence).long(),
-                ),
+                {
+                    "raster_image": torch.from_numpy(raster).float(),
+                    "target_sequence": torch.from_numpy(target_sequence).long(),
+                },
                 (
                     torch.from_numpy(true_command).float(),
                     torch.from_numpy(true_coord).float(),

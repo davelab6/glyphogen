@@ -50,7 +50,13 @@ class NodeContour:
 
     @property
     def commands(self) -> List[NodeCommand]:
-        return [node.command() for node in self.nodes] + [NodeCommand("Z", [])]
+        if not self.nodes:
+            return []
+
+        node_commands = [self.nodes[0].command()]
+        for i in range(1, len(self.nodes)):
+            node_commands.append(self.nodes[i].command(previous_node=self.nodes[i - 1]))
+        return node_commands
 
     @property
     def svg_commands(self) -> List[SVGCommand]:
@@ -254,22 +260,22 @@ class Node:
         )
 
     # Convert to optimal command representation
-    def command(self) -> NodeCommand:
+    def command(self, previous_node: Optional["Node"] = None) -> NodeCommand:
+        coords = self.coordinates
+        if previous_node:
+            coords = self.coordinates - previous_node.coordinates
+
         if self.in_handle is None and self.out_handle is None:
             # It's a line.
-            return NodeCommand("L", self.coordinates.tolist())
+            return NodeCommand("L", coords.tolist())
 
         # Deal with line-to-curve and curve-to-line
         if self.in_handle is None and self.out_handle is not None:
             delta_hout = self.out_handle - self.coordinates
-            return NodeCommand(
-                "NCO", np.concatenate((self.coordinates, delta_hout)).tolist()
-            )
+            return NodeCommand("NCO", np.concatenate((coords, delta_hout)).tolist())
         elif self.out_handle is None and self.in_handle is not None:
             delta_hin = self.in_handle - self.coordinates
-            return NodeCommand(
-                "NCI", np.concatenate((self.coordinates, delta_hin)).tolist()
-            )
+            return NodeCommand("NCI", np.concatenate((coords, delta_hin)).tolist())
 
         # It's a curve. Can we do better?
         assert self.in_handle is not None and self.out_handle is not None
@@ -279,16 +285,16 @@ class Node:
         if self.handles_horizontal:
             return NodeCommand(
                 "NH",
-                [self.coordinates[0], self.coordinates[1], delta_hin[0], delta_hout[0]],
+                [coords[0], coords[1], delta_hin[0], delta_hout[0]],
             )
         elif self.handles_vertical:
             return NodeCommand(
                 "NV",
-                [self.coordinates[0], self.coordinates[1], delta_hin[1], delta_hout[1]],
+                [coords[0], coords[1], delta_hin[1], delta_hout[1]],
             )
         else:
             return NodeCommand(
-                "N", np.concatenate((self.coordinates, delta_hin, delta_hout)).tolist()
+                "N", np.concatenate((coords, delta_hin, delta_hout)).tolist()
             )
 
 
@@ -302,6 +308,7 @@ class NodeGlyph:
     def commands(self) -> List[NodeCommand]:
         cmds = []
         for contour in self.contours:
+            cmds.append(NodeCommand("SOC", []))
             cmds.extend(contour.commands)
         return cmds
 
@@ -311,12 +318,6 @@ class NodeGlyph:
         # And we pad the coordinates to a fixed length
         max_coordinates = max(NodeCommand.grammar.values())
         output: List[np.ndarray] = []
-
-        # Add SOS token
-        sos_command_vector = np.zeros(command_width, dtype=np.float32)
-        sos_command_vector[NodeCommand.encode_command("SOS")] = 1.0
-        sos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
-        output.append(np.concatenate((sos_command_vector, sos_coordinates)))
 
         for command in self.commands:
             # One-hot encode the command
@@ -350,33 +351,47 @@ class NodeGlyph:
         return encoded_glyph
 
     @classmethod
-    def from_numpy(cls, command_tensor, coord_tensor):
+    def from_numpy(cls, command_tensor, coord_tensor, relative: bool = True):
         contours: List[NodeContour] = []
         command_keys = list(NodeCommand.grammar.keys())
         cur_contour = NodeContour([])
+        current_pos = np.array([0, 0])
+        is_first_node_in_contour = True
 
         for i in range(command_tensor.shape[0]):
             command_index = np.argmax(command_tensor[i])
             command_str = command_keys[command_index]
 
-            if command_str == "SOS":
-                continue
-
             if command_str == "EOS":
                 break
 
-            if command_str == "Z":
-                contours.append(cur_contour)
+            if command_str == "SOC":
+                if cur_contour.nodes:
+                    contours.append(cur_contour)
                 cur_contour = NodeContour([])
+                is_first_node_in_contour = True
                 continue
 
             num_coords = NodeCommand.grammar[command_str]
             # Denormalize and convert to int
-            norm_coords = coord_tensor[i, :num_coords]
-            if torch.is_tensor(norm_coords):
-                norm_coords = norm_coords.cpu().numpy()
-            denorm_coords = (norm_coords * MAX_COORDINATE).round()
-            coords = denorm_coords.astype(int).tolist()
+            coords_slice = coord_tensor[i, :num_coords]
+            if torch.is_tensor(coords_slice):
+                coords_slice = coords_slice.cpu().numpy()
+
+            if relative:
+                denorm_coords = (coords_slice * MAX_COORDINATE).round()
+                # Handle relative coordinates. The coordinates for push_command must be absolute.
+                absolute_coords = np.copy(denorm_coords)
+                if is_first_node_in_contour:
+                    current_pos = denorm_coords[0:2]
+                    is_first_node_in_contour = False
+                else:
+                    current_pos = current_pos + denorm_coords[0:2]
+                absolute_coords[0:2] = current_pos
+                coords = absolute_coords.astype(int).tolist()
+            else:
+                coords = coords_slice.round().astype(int).tolist()
+
 
             cur_contour.push_command(NodeCommand(command_str, coords))
         if cur_contour.nodes:

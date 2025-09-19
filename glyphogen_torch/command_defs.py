@@ -10,7 +10,7 @@ BASIC_SVG_COMMANDS = {
 }
 
 NODE_GLYPH_COMMANDS = {
-    "SOS": 0,
+    "SOC": 0,  # Start of Contour
     "N": 6,  # Node with two handles (x, y, delta_hin_x, delta_hin_y, delta_hout_x, delta_hout_y)
     "NH": 4,  # Node with horizontal handles (x, y, delta_hin_x, delta_hout_x)
     "NV": 4,  # Node with vertical handles (x, y, delta_hin_y, delta_hout_y)
@@ -19,7 +19,6 @@ NODE_GLYPH_COMMANDS = {
     "L": 2,  # Line node (x, y)
     # "LH": 1,  # Horizontal line (x)
     # "LV": 1,  # Vertical line (y)
-    "Z": 0,  # Close path
     "EOS": 0,
 }
 

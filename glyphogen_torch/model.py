@@ -4,7 +4,11 @@ import torch.nn.functional as F
 from torch import nn
 
 from glyphogen_torch.embedding import StyleEmbedding
-from glyphogen_torch.command_defs import COORDINATE_WIDTH, NODE_GLYPH_COMMANDS
+from glyphogen_torch.command_defs import (
+    COORDINATE_WIDTH,
+    NODE_GLYPH_COMMANDS,
+    MAX_COORDINATE,
+)
 from glyphogen_torch.hyperparameters import (
     CONTOUR_COUNT_WEIGHT,
     EOS_SOFTMAX_TEMPERATURE,
@@ -22,6 +26,42 @@ from glyphogen_torch.lstm import LSTMDecoder
 from glyphogen_torch.rasterizer import rasterize_batch
 
 SKIP_RASTERIZATION = VECTOR_RASTERIZATION_LOSS_WEIGHT == 0.0
+
+
+@torch.compile
+def unroll_relative_coords(command_tensor, coord_tensor_relative):
+    """Converts a tensor of relative coordinates to absolute coordinates."""
+    batch_size, seq_len, _ = command_tensor.shape
+    device = command_tensor.device
+
+    command_keys = list(NODE_GLYPH_COMMANDS.keys())
+    soc_index = command_keys.index("SOC")
+    command_indices = torch.argmax(command_tensor, dim=-1)
+    is_soc = command_indices == soc_index
+
+    is_first_node_in_contour = torch.zeros_like(is_soc)
+    is_first_node_in_contour[:, 1:] = is_soc[:, :-1]
+
+    current_pos = torch.zeros(
+        batch_size, 2, device=device, dtype=coord_tensor_relative.dtype
+    )
+    coord_tensor_absolute = torch.zeros_like(coord_tensor_relative)
+
+    for i in range(seq_len):
+        is_first = is_first_node_in_contour[:, i]
+        relative_coords_step = coord_tensor_relative[:, i, 0:2]
+
+        current_pos = torch.where(
+            is_first.unsqueeze(-1).expand_as(current_pos),
+            relative_coords_step,
+            current_pos + relative_coords_step,
+        )
+
+        absolute_coords_step = coord_tensor_relative[:, i, :].clone()
+        absolute_coords_step[:, 0:2] = current_pos
+        coord_tensor_absolute[:, i, :] = absolute_coords_step
+
+    return coord_tensor_absolute
 
 
 def calculate_masked_coordinate_loss(
@@ -68,7 +108,7 @@ def point_placement_loss(y_true_command, y_pred_command):
     Calculates a loss based on drawing practices.
     """
     command_keys = list(NODE_GLYPH_COMMANDS.keys())
-    z_index = command_keys.index("Z")
+    soc_index = command_keys.index("SOC")
     n_index = command_keys.index("N")
     nh_index = command_keys.index("NH")
     nv_index = command_keys.index("NV")
@@ -80,14 +120,14 @@ def point_placement_loss(y_true_command, y_pred_command):
     # Contour count loss
     batch_size = y_true_command.shape[0]
 
-    true_z_counts = []
+    true_soc_counts = []
     for i in range(batch_size):
         true_seq = y_true_command_indices[i, : true_eos_idx[i]]
-        true_z_counts.append(torch.sum(true_seq == z_index))
-    true_z_counts = torch.stack(true_z_counts).float()
+        true_soc_counts.append(torch.sum(true_seq == soc_index))
+    true_soc_counts = torch.stack(true_soc_counts).float()
 
     pred_probs = F.softmax(y_pred_command, dim=-1)
-    pred_z_probs = pred_probs[:, :, z_index]
+    pred_soc_probs = pred_probs[:, :, soc_index]
     eos_probs = pred_probs[:, :, eos_index]
     continue_probs = 1.0 - eos_probs
     cumprod_continue = torch.cumprod(continue_probs, dim=1)
@@ -98,8 +138,8 @@ def point_placement_loss(y_true_command, y_pred_command):
         ],
         dim=1,
     )
-    soft_pred_z_counts = torch.sum(pred_z_probs * mask, dim=1)
-    contour_loss = torch.mean(torch.abs(true_z_counts - soft_pred_z_counts))
+    soft_pred_soc_counts = torch.sum(pred_soc_probs * mask, dim=1)
+    contour_loss = torch.mean(torch.abs(true_soc_counts - soft_pred_soc_counts))
 
     # Sequence length loss; try to do it in as many nodes as the designer or fewer
     soft_argmax_probs = F.softmax(eos_probs / EOS_SOFTMAX_TEMPERATURE, dim=1)
@@ -294,21 +334,28 @@ class VectorizationGenerator(nn.Module):
     def step(self, batch, step):
         device = next(self.parameters()).device
         (inputs, y) = batch
-        (raster_image_input, target_sequence_input) = inputs
-        raster_image_input, target_sequence_input = raster_image_input.to(
-            device
-        ), target_sequence_input.to(device)
-        outputs = self((raster_image_input, target_sequence_input))
-        losses = self.losses(y, raster_image_input, outputs, step)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        y = tuple(v.to(device) for v in y)
+
+        outputs = self(inputs)
+        losses = self.losses(y, inputs["raster_image"], outputs, step)
         return losses
 
     def losses(self, y, raster_image_input, outputs, step):
         device = next(self.parameters()).device
-        (true_command, true_coord) = y
-        true_command, true_coord = true_command.to(device), true_coord.to(device)
+        (true_command, true_coord_relative) = y
+
+        # Unroll true coordinates to get absolute for loss calculation
+        true_coord_absolute = unroll_relative_coords(
+            true_command, true_coord_relative * MAX_COORDINATE
+        )
+
         command_loss = sequence_command_loss(true_command, outputs["command"])
         coord_loss = calculate_masked_coordinate_loss(
-            true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
+            true_command,
+            true_coord_absolute,
+            outputs["coord_absolute"],
+            self.arg_counts.to(device),
         )
         (
             contour_count_loss,
@@ -321,7 +368,7 @@ class VectorizationGenerator(nn.Module):
         else:
             vector_rendered_images = rasterize_batch(
                 outputs["command"],
-                outputs["coord"],
+                outputs["coord_absolute"] / MAX_COORDINATE,
                 seed=step,
                 img_size=LOSS_IMAGE_SIZE,
             ).to(device)
@@ -368,12 +415,26 @@ class VectorizationGenerator(nn.Module):
 
     @torch.compile(backend="aot_eager")
     def forward(self, inputs):
-        raster_image_input, target_sequence_input = inputs
+        raster_image_input = inputs["raster_image"]
+        target_sequence_input = inputs["target_sequence"]
         z = self.encode(raster_image_input)
         z = z.unsqueeze(1)
 
-        command_output, coord_output = self.decoder(target_sequence_input, context=z)
-        return {"command": command_output, "coord": coord_output}
+        command_output, coord_output_relative = self.decoder(
+            target_sequence_input, context=z
+        )
+
+        # Scale up relative coordinates
+        coord_output_relative_scaled = coord_output_relative * MAX_COORDINATE
+
+        coord_output_absolute = unroll_relative_coords(
+            command_output, coord_output_relative_scaled
+        )
+        return {
+            "command": command_output,
+            "coord_relative": coord_output_relative,
+            "coord_absolute": coord_output_absolute,
+        }
 
 
 class GlyphGenerator(nn.Module):
@@ -398,15 +459,11 @@ class GlyphGenerator(nn.Module):
 
     def training_step(self, batch, raster_loss_fn, command_loss_fn):
         device = next(self.parameters()).device
-        (style_image_input, glyph_id_input, target_sequence_input), y = batch
-        style_image_input, glyph_id_input, target_sequence_input = (
-            style_image_input.to(device),
-            glyph_id_input.to(device),
-            target_sequence_input.to(device),
-        )
+        inputs, y = batch
+        inputs = {k: v.to(device) for k, v in inputs.items()}
         y = {k: v.to(device) for k, v in y.items()}
 
-        outputs = self((style_image_input, glyph_id_input, target_sequence_input))
+        outputs = self(inputs)
         raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
         true_command, true_coord = y["command"], y["coord"]
 
@@ -429,15 +486,11 @@ class GlyphGenerator(nn.Module):
 
     def validation_step(self, batch, raster_loss_fn, command_loss_fn):
         device = next(self.parameters()).device
-        (style_image_input, glyph_id_input, target_sequence_input), y = batch
-        style_image_input, glyph_id_input, target_sequence_input = (
-            style_image_input.to(device),
-            glyph_id_input.to(device),
-            target_sequence_input.to(device),
-        )
+        inputs, y = batch
+        inputs = {k: v.to(device) for k, v in inputs.items()}
         y = {k: v.to(device) for k, v in y.items()}
 
-        outputs = self((style_image_input, glyph_id_input, target_sequence_input))
+        outputs = self(inputs)
         raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
         true_command, true_coord = y["command"], y["coord"]
 
@@ -462,7 +515,9 @@ class GlyphGenerator(nn.Module):
         }
 
     def forward(self, inputs):
-        style_image_input, glyph_id_input, target_sequence_input = inputs
+        style_image_input = inputs["style_image"]
+        glyph_id_input = inputs["glyph_id"]
+        target_sequence_input = inputs["target_sequence"]
 
         _, _, z = self.style_embedding(style_image_input)
 
@@ -470,11 +525,13 @@ class GlyphGenerator(nn.Module):
         combined = torch.cat([z, glyph_id_embedded], dim=-1)
         generated_glyph_raster = self.raster_decoder(combined)
 
-        vectorizer_output = self.vectorizer(
-            (generated_glyph_raster, target_sequence_input)
-        )
+        vectorizer_inputs = {
+            "raster_image": generated_glyph_raster,
+            "target_sequence": target_sequence_input,
+        }
+        vectorizer_output = self.vectorizer(vectorizer_inputs)
         command_output = vectorizer_output["command"]
-        coord_output = vectorizer_output["coord"]
+        coord_output = vectorizer_output["coord_absolute"]
 
         return {
             "raster": generated_glyph_raster,

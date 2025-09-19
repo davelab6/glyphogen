@@ -22,6 +22,9 @@ class LSTMDecoder(nn.Module):
         self.dropout = nn.Dropout(rate)
         self.output_command = nn.Linear(d_model, NODE_COMMAND_WIDTH)
         self.output_coords = nn.Linear(d_model, COORDINATE_WIDTH)
+        # Initialize bias to zeros to encourage zero-centered output for untrained model
+        nn.init.zeros_(self.output_coords.bias)
+        self.coord_output_scale = nn.Parameter(torch.tensor(0.1))
         # self.softmax = F.log_softmax(dim=-1)
         self.tanh = nn.Tanh()
 
@@ -48,6 +51,6 @@ class LSTMDecoder(nn.Module):
         # command_output = F.log_softmax(command_output, dim=1)
 
         coord_output = self.output_coords(x)
-        coord_output = self.tanh(coord_output)
+        coord_output = self.tanh(coord_output * self.coord_output_scale)
 
         return command_output, coord_output

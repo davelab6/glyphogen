@@ -11,9 +11,8 @@ pydiffvg.set_use_gpu(False)
 
 command_keys = list(NodeCommand.grammar.keys())
 cmd_n_val = command_keys.index("N")
-cmd_z_val = command_keys.index("Z")
+cmd_soc_val = command_keys.index("SOC")
 cmd_eos_val = command_keys.index("EOS")
-cmd_sos_val = command_keys.index("SOS")
 
 
 @torch.compiler.disable()
@@ -101,58 +100,44 @@ def nodes_to_segments(cmd, coord):
     contour_splits = []
     point_splits = []
 
-    contour_start_index = -1
+    contour_nodes = []
 
     for i in range(len(command_tensor)):
         command = command_tensor[i]
-        is_sos = command == cmd_sos_val
-        is_z = command == cmd_z_val
+        is_soc = command == cmd_soc_val
         is_eos = command == cmd_eos_val
-        is_contour_boundary = is_z or is_eos
 
-        if contour_start_index > -1 and is_contour_boundary:
-            p1_cmd, p1_coord = command_tensor[i - 1], coord[i - 1]
-            p2_cmd, p2_coord = (
-                command_tensor[contour_start_index],
-                coord[contour_start_index],
-            )
-            is_curve = (p1_cmd == cmd_n_val) and (p2_cmd == cmd_n_val)
-            p1_pos, p2_pos = p1_coord[0:2], p2_coord[0:2]
-            p1_hout, p2_hin = p1_pos + p1_coord[4:6], p2_pos + p2_coord[2:4]
+        if is_soc or is_eos:
+            if len(contour_nodes) > 0:
+                # Process the collected contour
+                # First point is the start point
+                all_points.append(contour_nodes[0][1][0:2])
 
-            if is_curve:
-                all_points.extend([p1_hout, p2_hin, p2_pos])
-                all_num_cp.extend([2])
-            else:
-                all_points.append(p2_pos)
-                all_num_cp.append(0)
+                # Segments from node to node
+                for j in range(len(contour_nodes)):
+                    p1_cmd, p1_coord = contour_nodes[j]
+                    p2_cmd, p2_coord = contour_nodes[(j + 1) % len(contour_nodes)]
 
-            contour_splits.append(len(all_num_cp))
-            point_splits.append(len(all_points))
-            contour_start_index = -1
+                    is_curve = (p1_cmd == cmd_n_val) and (p2_cmd == cmd_n_val)
+                    p1_pos, p2_pos = p1_coord[0:2], p2_coord[0:2]
+                    p1_hout, p2_hin = p1_pos + p1_coord[4:6], p2_pos + p2_coord[2:4]
 
-        if is_eos:
-            break
+                    if is_curve:
+                        all_points.extend([p1_hout, p2_hin, p2_pos])
+                        all_num_cp.append(2)
+                    else:
+                        all_points.append(p2_pos)
+                        all_num_cp.append(0)
 
-        is_node = not (is_sos or is_z or is_eos)
+                contour_splits.append(len(all_num_cp))
+                point_splits.append(len(all_points))
 
-        if is_node:
-            if contour_start_index == -1:
-                all_points.append(coord[i, 0:2])
-                contour_start_index = i
-            else:
-                p1_cmd, p1_coord = command_tensor[i - 1], coord[i - 1]
-                p2_cmd, p2_coord = command, coord[i]
-                is_curve = (p1_cmd == cmd_n_val) and (p2_cmd == cmd_n_val)
-                p1_pos, p2_pos = p1_coord[0:2], p2_coord[0:2]
-                p1_hout, p2_hin = p1_pos + p1_coord[4:6], p2_pos + p2_coord[2:4]
-
-                if is_curve:
-                    all_points.extend([p1_hout, p2_hin, p2_pos])
-                    all_num_cp.extend([2])
-                else:
-                    all_points.append(p2_pos)
-                    all_num_cp.append(0)
+            contour_nodes = []
+            if is_eos:
+                break
+        else:
+            # It's a node, add it to the current contour
+            contour_nodes.append((command, coord[i]))
 
     if not all_points:
         return (
@@ -179,10 +164,13 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
     dead_image = torch.ones(1, img_size, img_size, dtype=torch.float32)
     images = []
     for i in range(cmds.shape[0]):
-        # If there's no EOS token or no Z token, don't bother
-        if cmd_eos_val not in torch.argmax(
-            cmds[i], axis=-1
-        ) or cmd_z_val not in torch.argmax(cmds[i], axis=-1):
+        # If there's no EOS token or no SOC token, don't bother
+        found_eos = cmd_eos_val in torch.argmax(cmds[i], axis=-1)
+        found_soc = cmd_soc_val in torch.argmax(cmds[i], axis=-1)
+        if not found_eos or not found_soc:
+            # print(
+            #     f"Never found SOC {found_soc} or EOS {found_eos} token, returning blank image"
+            # )
             images.append(dead_image)
             continue
         points, num_control_points, num_cp_splits, point_splits = nodes_to_segments(
@@ -214,6 +202,7 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
 
         # If there are no shapes, return a blank image
         if len(shapes) == 0:
+            # print("No shapes, returning blank image")
             images.append(dead_image)
             continue
 
