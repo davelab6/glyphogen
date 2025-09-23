@@ -1,26 +1,27 @@
 # Hyperparameters
 LATENT_DIM = 32
 D_MODEL = 1024
-RATE = 0.1  # Specifically, the dropout rate
+RATE = 0.2  # Specifically, the dropout rate
 EPOCHS = 100
-BATCH_SIZE = 4
+BATCH_SIZE = 128
 RASTER_LOSS_WEIGHT = 15000.0
 
 # Vectorization sub-model weights
 VECTOR_LOSS_WEIGHT_COMMAND = 1.0  # Keep this at 1, normalize others against it
-VECTOR_RASTERIZATION_LOSS_WEIGHT = 0.1
-VECTOR_LOSS_WEIGHT_COORD = 0.1
-CONTOUR_COUNT_WEIGHT = 0.0
-NODE_COUNT_WEIGHT = 0.00
+VECTOR_RASTERIZATION_LOSS_WEIGHT = 0.01
+VECTOR_LOSS_WEIGHT_COORD = 0.01
+CONTOUR_COUNT_WEIGHT = 0.1
+NODE_COUNT_WEIGHT = 0.0001
 HANDLE_SMOOTHNESS_WEIGHT = 0.0
-RASTER_LOSS_CUTOFF = 0.02  # Only apply raster loss if less than this value
+SIGNED_AREA_WEIGHT = 0.01
+RASTER_LOSS_CUTOFF = 0.05  # Only apply raster loss if raster loss less than this value
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = 3.0
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
-LEARNING_RATE = 3e-3
-FINAL_LEARNING_RATE = 5e-7
+LEARNING_RATE = 3e-4
+FINAL_LEARNING_RATE = 1e-6
 
 GEN_IMAGE_SIZE = (512, 512)
 RASTER_IMG_SIZE = GEN_IMAGE_SIZE[0]
@@ -38,6 +39,7 @@ ALPHABET = ["a", "d", "h", "e", "s", "i", "o", "n", "t"]
 import string
 
 ALPHABET = list(string.ascii_lowercase + string.ascii_uppercase + string.digits)
+
 BASE_DIR = "/Users/simon/others-repos/fonts/ofl"
 # BASE_DIR = "/mnt/experiments/fonts/ofl"
 
