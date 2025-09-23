@@ -15,6 +15,7 @@ from glyphogen_torch.hyperparameters import (
     HANDLE_SMOOTHNESS_WEIGHT,
     NODE_COUNT_WEIGHT,
     RASTER_LOSS_WEIGHT,
+    SIGNED_AREA_WEIGHT,
     VECTOR_LOSS_WEIGHT_COMMAND,
     VECTOR_LOSS_WEIGHT_COORD,
     VECTOR_RASTERIZATION_LOSS_WEIGHT,
@@ -28,7 +29,7 @@ from glyphogen_torch.rasterizer import rasterize_batch
 SKIP_RASTERIZATION = VECTOR_RASTERIZATION_LOSS_WEIGHT == 0.0
 
 
-@torch.compile
+@torch.compiler.disable()
 def unroll_relative_coords(command_tensor, coord_tensor_relative):
     """Converts a tensor of relative coordinates to absolute coordinates."""
     batch_size, seq_len, _ = command_tensor.shape
@@ -119,8 +120,27 @@ def find_eos(command_batch):
     return eos_idx
 
 
+def signed_area(points):
+    """
+    Calculates the signed area of a polygon using the Shoelace formula.
+    The input should be a tensor of shape (N, 2) where N is the number of vertices.
+    """
+    if points.shape[0] < 3:
+        return torch.tensor(0.0, device=points.device, dtype=points.dtype)
+    x = points[:, 0]
+    y = points[:, 1]
+    return 0.5 * (
+        torch.sum(x[:-1] * y[1:])
+        + x[-1] * y[0]
+        - torch.sum(y[:-1] * x[1:])
+        - y[-1] * x[0]
+    )
+
+
 @torch.compile
-def point_placement_loss(y_true_command, y_pred_command):
+def point_placement_loss(
+    y_true_command, y_true_coord, y_pred_command, y_pred_coord
+):
     """
     Calculates a loss based on drawing practices.
     """
@@ -177,7 +197,39 @@ def point_placement_loss(y_true_command, y_pred_command):
     pred_nv_prob = torch.mean(pred_probs[:, :, nv_index])
     handle_loss = pred_n_prob - pred_nh_prob - pred_nv_prob
 
-    return contour_loss, eos_loss, handle_loss
+    # Signed area loss
+    signed_area_loss_total = torch.tensor(0.0, device=y_true_command.device)
+    num_contours_in_batch = 0
+
+    for i in range(batch_size):
+        is_soc_i = y_true_command_indices[i] == soc_index
+        soc_starts = torch.where(is_soc_i)[0]
+
+        if soc_starts.numel() == 0:
+            continue
+
+        eos_pos = true_eos_idx[i]
+        soc_ends = torch.cat((soc_starts[1:], eos_pos.unsqueeze(0)))
+
+        for start, end in zip(soc_starts, soc_ends):
+            if end <= start:
+                continue
+
+            true_points = y_true_coord[i, start:end, :2]
+            pred_points = y_pred_coord[i, start:end, :2]
+
+            true_area = signed_area(true_points)
+            pred_area = signed_area(pred_points)
+
+            signed_area_loss_total += torch.abs(true_area - pred_area)
+            num_contours_in_batch += 1
+
+    if num_contours_in_batch > 0:
+        signed_area_loss = signed_area_loss_total / num_contours_in_batch
+    else:
+        signed_area_loss = torch.tensor(0.0, device=y_true_command.device)
+
+    return contour_loss, eos_loss, handle_loss, signed_area_loss
 
 
 def sequence_command_loss(y_true_command, y_pred_command):
@@ -378,7 +430,14 @@ class VectorizationGenerator(nn.Module):
             contour_count_loss,
             node_count_loss,
             handle_smoothness_loss,
-        ) = point_placement_loss(true_command, outputs["command"])
+            signed_area_loss,
+        ) = point_placement_loss(
+            true_command,
+            true_coord_absolute,
+            outputs["command"],
+            outputs["coord_absolute"],
+        )
+        metrics = {}
 
         if SKIP_RASTERIZATION:
             raster_loss = torch.tensor(0.0, device=device)
@@ -400,17 +459,14 @@ class VectorizationGenerator(nn.Module):
             raster_loss = self.raster_loss_fn(
                 raster_image_input, vector_rendered_images
             )
+            metrics["raster_metric"] = 1.0 - raster_loss
             # Only apply the loss if we are "close enough" to tweak, otherwise it
             # makes things worse.
-            if (
-                raster_loss < RASTER_LOSS_CUTOFF and command_loss < 0.25
-            ) or self.use_raster:
+            if raster_loss < RASTER_LOSS_CUTOFF:
                 # Flip over to using raster loss exclusively from now on
                 self.use_raster = True
             else:
                 raster_loss = torch.tensor(RASTER_LOSS_CUTOFF, device=device)
-            # if self.use_raster:
-            #     coord_loss = coord_loss.detach()  # It's a metric now
 
         total_loss = (
             VECTOR_LOSS_WEIGHT_COMMAND * command_loss
@@ -418,17 +474,27 @@ class VectorizationGenerator(nn.Module):
             + CONTOUR_COUNT_WEIGHT * contour_count_loss
             + NODE_COUNT_WEIGHT * node_count_loss
             + HANDLE_SMOOTHNESS_WEIGHT * handle_smoothness_loss
+            + SIGNED_AREA_WEIGHT * signed_area_loss
             + VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss
         )
-        return {
+        losses = {
             "total_loss": total_loss,
             "command_loss": VECTOR_LOSS_WEIGHT_COMMAND * command_loss,
             "coord_loss": VECTOR_LOSS_WEIGHT_COORD * coord_loss,
-            "contour_count_loss": CONTOUR_COUNT_WEIGHT * contour_count_loss,
-            "node_count_loss": NODE_COUNT_WEIGHT * node_count_loss,
-            "handle_smoothness_loss": HANDLE_SMOOTHNESS_WEIGHT * handle_smoothness_loss,
-            "raster_loss": VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss,
         }
+        if CONTOUR_COUNT_WEIGHT > 0.0:
+            losses["contour_count_loss"] = CONTOUR_COUNT_WEIGHT * contour_count_loss
+        if NODE_COUNT_WEIGHT > 0.0:
+            losses["node_count_loss"] = NODE_COUNT_WEIGHT * node_count_loss
+        if HANDLE_SMOOTHNESS_WEIGHT > 0.0:
+            losses["handle_smoothness_loss"] = (
+                HANDLE_SMOOTHNESS_WEIGHT * handle_smoothness_loss
+            )
+        if SIGNED_AREA_WEIGHT > 0.0:
+            losses["signed_area_loss"] = SIGNED_AREA_WEIGHT * signed_area_loss
+        if not SKIP_RASTERIZATION:
+            losses["raster_loss"] = VECTOR_RASTERIZATION_LOSS_WEIGHT * raster_loss
+        return {**losses, **metrics}
 
     @torch.compile(backend="aot_eager")
     def forward(self, inputs):
