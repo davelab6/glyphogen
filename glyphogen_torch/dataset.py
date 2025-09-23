@@ -1,4 +1,5 @@
 import glob
+import itertools
 from pathlib import Path
 import random
 
@@ -8,6 +9,7 @@ import tqdm
 from fontTools.ttLib import TTFont
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, IterableDataset
+from more_itertools import random_product
 
 from glyphogen_torch.command_defs import COORDINATE_WIDTH, NODE_COMMAND_WIDTH
 from glyphogen_torch.glyph import Glyph
@@ -119,13 +121,12 @@ class PretrainGlyphDataset(IterableDataset):
         return len(self.font_files) * len(self.alphabet)
 
     def __iter__(self):
-        random.shuffle(self.font_files)
-        for font_file_path in self.font_files:
-            random.shuffle(self.alphabet)
-            for char in self.alphabet:
-                data = self._load_and_process_glyph(font_file_path, ord(char))
-                if data is not None:
-                    yield data
+        choices = list(itertools.product(self.font_files, self.alphabet))
+        random.shuffle(choices)
+        for font_file_path, char in choices:
+            data = self._load_and_process_glyph(font_file_path, ord(char))
+            if data is not None:
+                yield data
 
     def _load_and_process_glyph(self, font_file_path, char_ord):
         try:
