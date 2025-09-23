@@ -26,6 +26,7 @@ from .command_defs import (
     NodeCommand,
     MAX_COORDINATE,
 )
+from .model import unroll_relative_coords
 
 
 class AbsoluteSVGPathPen(SVGPathPen):
@@ -172,14 +173,24 @@ class NodeContour:
             position = np.array(command.coordinates)
         elif command.command == "LH":
             if prev_node is not None:
-                position = np.array([command.coordinates[0], prev_node.coordinates[1]])
+                position = np.array(
+                    [
+                        prev_node.coordinates[0] + command.coordinates[0],
+                        prev_node.coordinates[1],
+                    ]
+                )
             else:
                 # We are lenient here because we are coming from the model and want to make as many
                 # sequences as possible work
                 return  # raise ValueError("Invalid LH command: no previous node")
         elif command.command == "LV":
             if prev_node is not None:
-                position = np.array([prev_node.coordinates[0], command.coordinates[0]])
+                position = np.array(
+                    [
+                        prev_node.coordinates[0],
+                        prev_node.coordinates[1] + command.coordinates[0],
+                    ]
+                )
             else:
                 # See above
                 return  # raise ValueError("Invalid LV command: no previous node")
@@ -267,6 +278,11 @@ class Node:
 
         if self.in_handle is None and self.out_handle is None:
             # It's a line.
+            if previous_node:  # Only check for LH/LV if coords are relative
+                if coords[1] == 0:  # Horizontal line
+                    return NodeCommand("LH", [coords[0].item()])
+                if coords[0] == 0:  # Vertical line
+                    return NodeCommand("LV", [coords[1].item()])
             return NodeCommand("L", coords.tolist())
 
         # Deal with line-to-curve and curve-to-line
@@ -380,18 +396,25 @@ class NodeGlyph:
 
             if relative:
                 denorm_coords = (coords_slice * MAX_COORDINATE).round()
-                # Handle relative coordinates. The coordinates for push_command must be absolute.
-                absolute_coords = np.copy(denorm_coords)
-                if is_first_node_in_contour:
-                    current_pos = denorm_coords[0:2]
-                    is_first_node_in_contour = False
+
+                if command_str == "LH":
+                    coords = [int(denorm_coords[0])]  # Only x-delta
+                elif command_str == "LV":
+                    coords = [
+                        int(denorm_coords[0])
+                    ]  # Only y-delta (coords_slice[0] is the y-delta)
                 else:
-                    current_pos = current_pos + denorm_coords[0:2]
-                absolute_coords[0:2] = current_pos
-                coords = absolute_coords.astype(int).tolist()
+                    # Handle relative coordinates. The coordinates for push_command must be absolute.
+                    absolute_coords = np.copy(denorm_coords)
+                    if is_first_node_in_contour:
+                        current_pos = denorm_coords[0:2]
+                        is_first_node_in_contour = False
+                    else:
+                        current_pos = current_pos + denorm_coords[0:2]
+                    absolute_coords[0:2] = current_pos
+                    coords = absolute_coords.astype(int).tolist()
             else:
                 coords = coords_slice.round().astype(int).tolist()
-
 
             cur_contour.push_command(NodeCommand(command_str, coords))
         if cur_contour.nodes:
@@ -510,9 +533,11 @@ class Glyph:
         cmds_tensor = cmds_tensor.unsqueeze(0)
         coords_tensor = coords_tensor.unsqueeze(0)
 
+        coord_tensor_absolute = unroll_relative_coords(cmds_tensor, coords_tensor)
+
         # Rasterize
         image_tensor = rasterize_batch(
-            cmds_tensor, coords_tensor, img_size=size, requires_grad=False
+            cmds_tensor, coord_tensor_absolute, img_size=size, requires_grad=False
         )
 
         numpy_image = image_tensor.squeeze(0).squeeze(0).cpu().numpy()

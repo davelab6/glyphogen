@@ -49,7 +49,24 @@ def unroll_relative_coords(command_tensor, coord_tensor_relative):
 
     for i in range(seq_len):
         is_first = is_first_node_in_contour[:, i]
-        relative_coords_step = coord_tensor_relative[:, i, 0:2]
+
+        current_command_indices = command_indices[:, i]
+        is_lh = current_command_indices == command_keys.index("LH")
+        is_lv = current_command_indices == command_keys.index("LV")
+
+        # For relative line commands (LH, LV), one of the deltas is zero.
+        # For normal commands, both deltas are used.
+        # The value for LH/LV is always taken from the first coordinate.
+        dx = coord_tensor_relative[:, i, 0]
+        dy = coord_tensor_relative[:, i, 1]
+
+        step_dx = torch.where(is_lv, torch.zeros_like(dx), dx)
+        step_dy = torch.where(
+            is_lh,
+            torch.zeros_like(dy),
+            torch.where(is_lv, dx, dy),  # For LV, dy is taken from the first coord
+        )
+        relative_coords_step = torch.stack([step_dx, step_dy], dim=-1)
 
         current_pos = torch.where(
             is_first.unsqueeze(-1).expand_as(current_pos),

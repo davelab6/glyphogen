@@ -29,14 +29,21 @@ def simplify_nodes(cmd, coord):
     is_nco = (command_tensor == get_cmd_code("NCO")).unsqueeze(-1)
 
     is_simplified_to_n = is_nh | is_nv | is_nci | is_nco
+    is_simplified_to_l = (command_tensor == get_cmd_code("LH")).unsqueeze(-1) | (
+        command_tensor == get_cmd_code("LV")
+    ).unsqueeze(-1)
 
     n_cmd_code = get_cmd_code("N")
     n_cmd_one_hot = torch.nn.functional.one_hot(
         torch.tensor(n_cmd_code, device=cmd.device), num_classes=cmd.shape[-1]
     ).to(cmd.dtype)
 
-    new_cmd = torch.where(is_simplified_to_n, n_cmd_one_hot, cmd)
+    l_cmd_code = get_cmd_code("L")
+    l_cmd_one_hot = torch.nn.functional.one_hot(
+        torch.tensor(l_cmd_code, device=cmd.device), num_classes=cmd.shape[-1]
+    ).to(cmd.dtype)
 
+    new_cmd = torch.where(is_simplified_to_n, n_cmd_one_hot, cmd)
     coord_for_nh = torch.stack(
         [
             coord[..., 0],
@@ -82,7 +89,10 @@ def simplify_nodes(cmd, coord):
         dim=-1,
     )
 
-    new_coord = torch.where(is_nh, coord_for_nh, coord)
+    new_cmd = torch.where(is_simplified_to_l, l_cmd_one_hot, new_cmd)
+
+    new_coord = coord.clone()  # Start with original coordinates
+    new_coord = torch.where(is_nh, coord_for_nh, new_coord)
     new_coord = torch.where(is_nv, coord_for_nv, new_coord)
     new_coord = torch.where(is_nci, coord_for_nci, new_coord)
     new_coord = torch.where(is_nco, coord_for_nco, new_coord)
@@ -209,7 +219,7 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
         path_group = pydiffvg.ShapeGroup(
             shape_ids=torch.arange(len(shapes)),
             fill_color=torch.tensor([0.0, 0.0, 0.0, 1.0]),
-            use_even_odd_rule=True,
+            # use_even_odd_rule=True,
         )
         shape_groups = [path_group]
         scene_args = pydiffvg.RenderFunction.serialize_scene(
