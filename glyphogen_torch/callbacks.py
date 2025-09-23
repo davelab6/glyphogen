@@ -105,20 +105,24 @@ def log_svgs(model, test_loader, writer, epoch, pre_train=False, num_samples=3):
         for i in range(min(num_samples, command_output.shape[0])):
             command_tensor = command_output[i].detach().cpu().numpy()
             coord_tensor = coord_output[i].detach().cpu().numpy()
-            # command_keys = list(NodeCommand.grammar.keys())
-            # svg_string = " ".join(
-            #     [
-            #         command_keys[np.argmax(command_tensor[i])]
-            #         for i in range(command_tensor.shape[0])
-            #     ]
-            # )
+            command_keys = list(NodeCommand.grammar.keys())
+            raw_commands = " ".join(
+                [
+                    command_keys[np.argmax(command_tensor[i])]
+                    for i in range(command_tensor.shape[0])
+                ]
+            )
             try:
                 decoded_glyph = NodeGlyph.from_numpy(
                     command_tensor, coord_tensor, relative=False
                 )
                 svg_string = decoded_glyph.to_svg_glyph().to_svg_string()
+                debug_string = decoded_glyph.to_debug_string()
             except Exception as e:
                 svg_string = f"Couldn't generate SVG: {e}"
+                debug_string = "Error in decoding glyph."
 
             writer.add_text(f"SVG/Generated_{i}", svg_string, epoch)
+            writer.add_text(f"SVG/Node_{i}", debug_string, epoch)
+            writer.add_text(f"SVG/Raw_{i}", raw_commands, epoch)
     writer.flush()
