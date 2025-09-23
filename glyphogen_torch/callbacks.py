@@ -1,5 +1,7 @@
 import random
 import torch
+
+from glyphogen_torch.hyperparameters import BATCH_SIZE
 from .glyph import NodeGlyph, NodeCommand
 import numpy as np
 from .rasterizer import rasterize_batch
@@ -34,7 +36,7 @@ def log_images(model, test_loader, writer, epoch, pre_train=False, num_images=3)
     writer.flush()
 
 
-def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=3):
+def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=BATCH_SIZE):
     device = next(model.parameters()).device
     model.eval()
     if isinstance(test_loader, list):
@@ -46,14 +48,10 @@ def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=3):
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         outputs = model(inputs)
-        raster_loss_fn = torch.nn.MSELoss()
 
         vector_rendered_images = rasterize_batch(
             outputs["command"], outputs["coord_absolute"] / MAX_COORDINATE
         ).to(device)
-
-        raster_loss = raster_loss_fn(inputs["raster_image"], vector_rendered_images)
-        writer.add_scalar("Metrics/raster_metric", 1.0 - raster_loss.item(), epoch)
 
         for i in range(min(num_images, vector_rendered_images.shape[0])):
             true_raster = inputs["raster_image"][i]
@@ -62,16 +60,17 @@ def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=3):
             # Create a 3-channel image for overlay
             # true_raster and predicted_raster are (1, H, W)
             # We want (3, H, W) for add_image
-            
-            # Red channel for true raster (alpha 0.5)
-            red_channel = true_raster * 0.5
-            # Green channel for predicted raster (alpha 0.5)
-            green_channel = predicted_raster * 0.5
-            
-            # Combine into an RGB image
-            # Overlapping areas will be red + green = yellow
-            overlay_image = torch.cat([red_channel, green_channel, torch.zeros_like(red_channel)], dim=0)
-            
+            # Desired colors:
+            # - Background: white (where both rasters are 1.0)
+            # - True raster: green
+            # - Predicted raster: red
+            # - Overlap: black / blended
+            red_channel = true_raster
+            green_channel = predicted_raster
+            blue_channel = torch.min(true_raster, predicted_raster)
+
+            overlay_image = torch.cat([red_channel, green_channel, blue_channel], dim=0)
+
             writer.add_image(
                 f"Pretrain_Images/Overlay_{i}",
                 overlay_image,
