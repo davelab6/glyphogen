@@ -493,16 +493,16 @@ class Glyph:
         """
         Rasterizes the glyph at a given size using the same pipeline as the model.
         """
+        font_base = str(self.font_file).replace(BASE_DIR + "/", "").replace("/", "-")
         key = "-".join(
             [
-                str(self.font_file).replace(BASE_DIR + "/", "").replace("/", "-"),
                 str(self.unicode_id),
                 ",".join({f"{k}:{v}" for k, v in self.location.items()}),
                 str(size),
             ]
         )
-        if (cache_dir / (key + ".png")).exists():
-            img = Image.open(cache_dir / (key + ".png")).convert("L")
+        if (cache_dir / font_base / (key + ".png")).exists():
+            img = Image.open(cache_dir / font_base / (key + ".png")).convert("L")
             img = np.asarray(img, dtype=np.float32) / 255.0
             img = np.expand_dims(img, axis=-1)
         else:
@@ -510,8 +510,8 @@ class Glyph:
             pil_img = Image.fromarray(
                 (img.squeeze(-1) * 255).astype(np.uint8), mode="L"
             )
-            cache_dir.mkdir(exist_ok=True)
-            pil_img.save(cache_dir / (key + ".png"))
+            (cache_dir / font_base).mkdir(exist_ok=True)
+            pil_img.save(cache_dir / font_base / (key + ".png"))
         return img
 
     def _rasterize(self, size: int) -> npt.NDArray[np.float64]:
@@ -564,5 +564,13 @@ class Glyph:
         for command in svgpen._commands:
             cmd = command[0] if command[0] != " " else "L"
             coords = [int(p) for p in command[1:].split()]
+            if "XAUG" in self.location:
+                # Add XAUG to the x coordinates
+                for i in range(0, len(coords), 2):
+                    coords[i] += int(self.location["XAUG"])
+            if "YAUG" in self.location:
+                # Add YAUG to the y coordinates
+                for i in range(1, len(coords), 2):
+                    coords[i] += int(self.location["YAUG"])
             path.append(SVGCommand(cmd, coords))
         return SVGGlyph(path)

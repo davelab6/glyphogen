@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.tensorboard import SummaryWriter
+import random
 
 from glyphogen_torch.callbacks import log_images, log_pretrain_rasters, log_svgs
 from glyphogen_torch.dataset import collate_fn, get_full_model_data, get_pretrain_data
@@ -66,7 +67,9 @@ def main(
     vectorizer_model_name=None,
     single_batch=False,
     debug_grads=False,
+    augmentations=20,
 ):
+    random.seed(1234)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
@@ -99,7 +102,7 @@ def main(
 
     # Data
     if pre_train:
-        train_dataset, test_dataset = get_pretrain_data()
+        train_dataset, test_dataset = get_pretrain_data(augmentations=augmentations)
     else:
         train_dataset, test_dataset = get_full_model_data()
 
@@ -134,7 +137,7 @@ def main(
     writer.add_text(
         "Hyperparameters", open("glyphogen_torch/hyperparameters.py").read(), 0
     )
-    best_val_loss = float("inf")
+    best_val_metric = 0
     global_step = 0
     LOSSES = ["total_loss", "command_loss", "coord_loss"]
     if pre_train:
@@ -194,18 +197,22 @@ def main(
 
         with torch.no_grad():
             for i, batch in enumerate(test_loader):
-                losses = model_to_train.step(batch, step=global_step)
+                losses = model_to_train.step(batch, step=global_step, val=True)
                 for loss_key, loss_value in losses.items():
                     loss_accumulators[loss_key] += loss_value
                 total_val_loss += losses["total_loss"].item()
+                # total_val_loss += losses["total_loss"].item()
 
         avg_val_loss = total_val_loss / i
+        avg_val_metric = loss_accumulators["raster_metric"] / i
         dump_accumulators(loss_accumulators, writer, epoch, i, val=True)
-        print(f"Epoch {epoch}, Validation Loss: {avg_val_loss}")
+        print(
+            f"Epoch {epoch}, Validation Loss: {avg_val_loss}; Metric: {avg_val_metric}"
+        )
 
         # Checkpoint
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        if avg_val_metric > best_val_metric:
+            best_val_metric = avg_val_metric
             torch.save(model_to_train.state_dict(), model_save_name)
             print(f"Saved best model to {model_save_name}")
 
@@ -261,6 +268,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to log gradient norms for debugging.",
     )
+    parser.add_argument(
+        "--augmentations",
+        type=int,
+        default=20,
+        help="Number of augmentations to apply.",
+    )
     args = parser.parse_args()
     main(
         model_name=args.model_name,
@@ -269,4 +282,5 @@ if __name__ == "__main__":
         debug_grads=args.debug_grads,
         single_batch=args.single_batch,
         vectorizer_model_name=args.vectorizer_model_name,
+        augmentations=args.augmentations,
     )

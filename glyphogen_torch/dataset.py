@@ -2,6 +2,7 @@ import glob
 import itertools
 from pathlib import Path
 import random
+import warnings
 
 import numpy as np
 import torch
@@ -109,38 +110,55 @@ class GlyphDataset(Dataset):
 
 
 class PretrainGlyphDataset(IterableDataset):
-    def __init__(self, font_files, alphabet, is_train=True):
+    def __init__(self, font_files, alphabet, is_train=True, augmentations=0):
         self.alphabet = alphabet
         self.font_files_train, self.font_files_test = train_test_split(
             font_files, test_size=0.2, random_state=42
         )
         self.font_files = self.font_files_train if is_train else self.font_files_test
         self.cache = {}
+        self.augmentations = [{}]
+        if is_train:
+            self.augmentations += [
+                {"XAUG": random.randint(0, 200), "YAUG": random.randint(-100, 100)}
+                for _ in range(augmentations)
+            ]
+        self.true_length = None
 
     def __len__(self):
-        return len(self.font_files) * len(self.alphabet)
+        if self.true_length is not None:
+            return self.true_length
+        print("Calculating length of dataset...")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for font_file_path in tqdm.tqdm(iter(self), desc="Loading dataset"):
+                pass
+        return self.true_length
 
     def __iter__(self):
-        choices = list(itertools.product(self.font_files, self.alphabet))
+        choices = list(
+            itertools.product(self.font_files, self.alphabet, self.augmentations)
+        )
+        self.true_length = 0
         random.shuffle(choices)
-        for font_file_path, char in choices:
-            data = self._load_and_process_glyph(font_file_path, ord(char))
+        for font_file_path, char, augment in choices:
+            data = self._load_and_process_glyph(font_file_path, ord(char), augment)
             if data is not None:
                 yield data
+                self.true_length += 1
 
-    def _load_and_process_glyph(self, font_file_path, char_ord):
+    def _load_and_process_glyph(self, font_file_path, char_ord, augment):
         try:
-            glyph = Glyph(Path(font_file_path), int(char_ord), location={})
-            raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
+            glyph = Glyph(Path(font_file_path), int(char_ord), location=augment)
             if (font_file_path, char_ord) in self.cache:
                 encoded_svg = self.cache[(font_file_path, char_ord)]
             else:
                 svg_glyph = glyph.vectorize()
                 node_glyph = svg_glyph.to_node_glyph()
                 if len(node_glyph.commands) > MAX_COMMANDS:
-                    print(
-                        f"Too many commands ({len(node_glyph.commands)}) for {font_file_path} for char {char_ord}"
-                    )
+                    # print(
+                    #     f"Too many commands ({len(node_glyph.commands)}) for {font_file_path} for char {char_ord}"
+                    # )
                     encoded_svg = None
                 if not node_glyph.commands or len(node_glyph.commands) <= 1:
                     encoded_svg = None
@@ -149,6 +167,7 @@ class PretrainGlyphDataset(IterableDataset):
                 self.cache[(font_file_path, char_ord)] = encoded_svg
             if encoded_svg is None or len(encoded_svg) <= 1:
                 return None
+            raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
 
             target_sequence = encoded_svg[:-1]
             ground_truth = encoded_svg[1:]
@@ -185,7 +204,9 @@ def get_full_model_data():
     return train_dataset, test_dataset
 
 
-def get_pretrain_data():
-    train_dataset = PretrainGlyphDataset(font_files, ALPHABET, is_train=True)
+def get_pretrain_data(augmentations=20):
+    train_dataset = PretrainGlyphDataset(
+        font_files, ALPHABET, is_train=True, augmentations=augmentations
+    )
     test_dataset = PretrainGlyphDataset(font_files, ALPHABET, is_train=False)
     return train_dataset, test_dataset

@@ -456,17 +456,16 @@ class VectorizationGenerator(nn.Module):
                     mode="bilinear",
                     align_corners=False,
                 )
-            raster_loss = self.raster_loss_fn(
-                raster_image_input, vector_rendered_images
+            raster_loss = weighted_raster_loss(
+                raster_image_input,
+                vector_rendered_images,
+                black_pixel_weight=RASTER_BLACK_PIXEL_WEIGHT,
             )
-            metrics["raster_metric"] = 1.0 - raster_loss
-            # Only apply the loss if we are "close enough" to tweak, otherwise it
-            # makes things worse.
-            if raster_loss < RASTER_LOSS_CUTOFF:
-                # Flip over to using raster loss exclusively from now on
-                self.use_raster = True
-            else:
-                raster_loss = torch.tensor(RASTER_LOSS_CUTOFF, device=device)
+            if val:
+                metrics["raster_metric"] = 1.0 - torch.nn.MSELoss()(
+                    raster_image_input, vector_rendered_images
+                ).detach()
+            metrics["raster_raw"] = raster_loss.detach()
 
         total_loss = (
             VECTOR_LOSS_WEIGHT_COMMAND * command_loss
