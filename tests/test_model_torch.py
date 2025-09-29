@@ -32,7 +32,12 @@ def test_output_shapes():
     )
 
     # Get model output
-    outputs = model((style_image_input, glyph_id_input, target_sequence_input))
+    inputs = {
+        "style_image": style_image_input,
+        "glyph_id": glyph_id_input,
+        "target_sequence": target_sequence_input,
+    }
+    outputs = model(inputs)
     generated_glyph_raster = outputs["raster"]
     command_output = outputs["command"]
     coord_output = outputs["coord"]
