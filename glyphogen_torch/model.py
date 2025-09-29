@@ -22,6 +22,7 @@ from glyphogen_torch.hyperparameters import (
     HUBER_DELTA,
     LOSS_IMAGE_SIZE,
     RASTER_LOSS_CUTOFF,
+    RASTER_BLACK_PIXEL_WEIGHT,
 )
 from glyphogen_torch.lstm import LSTMDecoder
 from glyphogen_torch.rasterizer import rasterize_batch
@@ -29,7 +30,7 @@ from glyphogen_torch.rasterizer import rasterize_batch
 SKIP_RASTERIZATION = VECTOR_RASTERIZATION_LOSS_WEIGHT == 0.0
 
 
-@torch.compiler.disable()
+@torch.compile(backend="aot_eager")
 def unroll_relative_coords(command_tensor, coord_tensor_relative):
     """Converts a tensor of relative coordinates to absolute coordinates."""
     batch_size, seq_len, _ = command_tensor.shape
@@ -82,8 +83,14 @@ def unroll_relative_coords(command_tensor, coord_tensor_relative):
     return coord_tensor_absolute
 
 
+@torch.compile(backend="aot_eager")
 def calculate_masked_coordinate_loss(
-    y_true_command, y_true_coord, y_pred_coord, arg_counts, delta=HUBER_DELTA
+    y_true_command,
+    y_true_coord,
+    y_pred_coord,
+    arg_counts,
+    sequence_mask,
+    delta=HUBER_DELTA,
 ):
     """Calculates the masked coordinate loss."""
     true_command_indices = torch.argmax(y_true_command, axis=-1)
@@ -97,11 +104,15 @@ def calculate_masked_coordinate_loss(
     coord_mask = coord_mask.to(y_pred_coord.dtype)
 
     huber_loss = F.huber_loss(y_pred_coord, y_true_coord, reduction="none", delta=delta)
-    masked_loss = huber_loss * coord_mask
 
-    return torch.sum(masked_loss) / torch.sum(coord_mask)
+    # Combine the argument mask with the sequence length mask
+    combined_mask = coord_mask * sequence_mask.unsqueeze(-1)
+    masked_loss = huber_loss * combined_mask
+
+    return torch.sum(masked_loss) / torch.sum(combined_mask)
 
 
+@torch.compile(backend="aot_eager")
 def find_eos(command_batch):
     command_keys = list(NODE_GLYPH_COMMANDS.keys())
     eos_index = command_keys.index("EOS")
@@ -137,12 +148,18 @@ def signed_area(points):
     )
 
 
-@torch.compile
 def point_placement_loss(
-    y_true_command, y_true_coord, y_pred_command, y_pred_coord
+    y_true_command,
+    y_true_coord,
+    y_pred_command,
+    y_pred_coord,
+    true_eos_idx,
+    sequence_mask,
+    step,
 ):
     """
-    Calculates a loss based on drawing practices.
+    Calculates losses based on drawing practices, ensuring calculations are
+    masked to the length of the true command sequence.
     """
     command_keys = list(NODE_GLYPH_COMMANDS.keys())
     soc_index = command_keys.index("SOC")
@@ -150,68 +167,57 @@ def point_placement_loss(
     nh_index = command_keys.index("NH")
     nv_index = command_keys.index("NV")
     eos_index = command_keys.index("EOS")
-
+    batch_size, seq_len, _ = y_true_command.shape
     y_true_command_indices = torch.argmax(y_true_command, axis=-1)
-    true_eos_idx = find_eos(y_true_command)
+    indices = torch.arange(seq_len, device=y_true_command.device).expand(batch_size, -1)
 
-    # Contour count loss
-    batch_size = y_true_command.shape[0]
-
-    true_soc_counts = []
-    for i in range(batch_size):
-        true_seq = y_true_command_indices[i, : true_eos_idx[i]]
-        true_soc_counts.append(torch.sum(true_seq == soc_index))
-    true_soc_counts = torch.stack(true_soc_counts).float()
-
+    # --- Predicted Probabilities ---
     pred_probs = F.softmax(y_pred_command, dim=-1)
+
+    # --- Contour Count Loss ---
+    true_soc_counts = torch.sum(
+        (y_true_command_indices == soc_index) * sequence_mask, dim=1
+    )
     pred_soc_probs = pred_probs[:, :, soc_index]
+    soft_pred_soc_counts = torch.sum(pred_soc_probs * sequence_mask, dim=1)
+    contour_loss = F.l1_loss(soft_pred_soc_counts, true_soc_counts)
+
+    # --- Node Count Loss (Sequence Length Loss) ---
+    # A more direct 'soft length' formulation.
     eos_probs = pred_probs[:, :, eos_index]
     continue_probs = 1.0 - eos_probs
-    cumprod_continue = torch.cumprod(continue_probs, dim=1)
-    mask = torch.cat(
-        [
-            torch.ones(batch_size, 1, device=y_pred_command.device),
-            cumprod_continue[:, :-1],
-        ],
-        dim=1,
-    )
-    soft_pred_soc_counts = torch.sum(pred_soc_probs * mask, dim=1)
-    contour_loss = torch.mean(torch.abs(true_soc_counts - soft_pred_soc_counts))
+    soft_len = torch.sum(continue_probs * sequence_mask, dim=1)
+    eos_loss = F.l1_loss(soft_len, true_eos_idx.float())
 
-    # Sequence length loss; try to do it in as many nodes as the designer or fewer
-    soft_argmax_probs = F.softmax(eos_probs / EOS_SOFTMAX_TEMPERATURE, dim=1)
-    indices = torch.arange(
-        y_pred_command.shape[1], device=y_pred_command.device, dtype=torch.float32
-    )
-    soft_pred_eos_idx = torch.sum(soft_argmax_probs * indices, dim=1)
-    eos_loss = torch.mean(
-        torch.max(
-            soft_pred_eos_idx - true_eos_idx.float(),
-            torch.zeros_like(soft_pred_eos_idx),
-        )
-    )
-
-    # Handle orientation loss
+    # --- Handle Orientation Loss ---
     pred_n_prob = torch.mean(pred_probs[:, :, n_index])
     pred_nh_prob = torch.mean(pred_probs[:, :, nh_index])
     pred_nv_prob = torch.mean(pred_probs[:, :, nv_index])
     handle_loss = pred_n_prob - pred_nh_prob - pred_nv_prob
 
-    # Signed area loss
+    # --- Signed Area Loss ---
     signed_area_loss_total = torch.tensor(0.0, device=y_true_command.device)
     num_contours_in_batch = 0
 
     for i in range(batch_size):
-        is_soc_i = y_true_command_indices[i] == soc_index
-        soc_starts = torch.where(is_soc_i)[0]
+        item_mask = sequence_mask[i]
+        # Find all explicit SOCs within the valid sequence for this item.
+        explicit_soc_starts = torch.where(
+            (y_true_command_indices[i] == soc_index) * item_mask
+        )[0]
 
-        if soc_starts.numel() == 0:
-            continue
+        # The first contour always starts at index 0.
+        # All contour starts are [0] concatenated with the explicit SOCs.
+        all_contour_starts = torch.cat(
+            [torch.tensor([0], device=y_true_command.device), explicit_soc_starts]
+        )
 
+        # The end of a contour is the start of the next, or the final EOS.
         eos_pos = true_eos_idx[i]
-        soc_ends = torch.cat((soc_starts[1:], eos_pos.unsqueeze(0)))
+        all_contour_ends = torch.cat((all_contour_starts[1:], eos_pos.unsqueeze(0)))
 
-        for start, end in zip(soc_starts, soc_ends):
+        for start, end in zip(all_contour_starts, all_contour_ends):
+            # Skip empty contours that might be created by this logic.
             if end <= start:
                 continue
 
@@ -266,6 +272,42 @@ def sequence_command_loss(y_true_command, y_pred_command):
 
     # Normalize by the number of unmasked elements
     return torch.sum(masked_loss) / (torch.sum(mask) + 1e-8)
+
+
+def weighted_raster_loss(y_true, y_pred, black_pixel_weight=10.0):
+    """
+    Calculates a weighted Mean Squared Error (MSE) loss for raster images.
+
+    This loss function addresses the "imbalanced class" problem inherent in
+    glyph raster images, where the vast majority of pixels are white (background).
+    A standard MSE would allow the model to achieve a deceptively low loss by
+    simply outputting a blank image, as the error from the few black (foreground)
+    pixels would be averaged out over the entire image.
+
+    To counteract this, we apply a higher weight to the errors on pixels that
+    should be black. This forces the model to pay significantly more attention to
+    correctly forming the glyph's shape, rather than just getting the background
+    right.
+
+    Args:
+        y_true: The ground truth raster image (tensor).
+        y_pred: The predicted raster image (tensor).
+        black_pixel_weight: The factor by which to multiply the loss for black pixels.
+
+    Returns:
+        A single scalar tensor representing the weighted loss.
+    """
+    # Element-wise squared error
+    error = F.mse_loss(y_pred, y_true, reduction="none")
+
+    # Create a weight map. Black pixels (value closer to 1) get higher weight.
+    # We use y_true to determine where the black pixels *should* be.
+    weight_map = torch.ones_like(y_true)
+    weight_map[y_true >= 0.5] = black_pixel_weight
+
+    # Apply weights and calculate the mean
+    weighted_error = error * weight_map
+    return torch.mean(weighted_error)
 
 
 class Decoder(nn.Module):
@@ -373,7 +415,6 @@ class VectorizationGenerator(nn.Module):
             list(NODE_GLYPH_COMMANDS.values()), dtype=torch.long
         )
 
-        self.raster_loss_fn = torch.nn.MSELoss()
         self.use_raster = False
 
     @torch.compile(backend="aot_eager")
@@ -400,32 +441,46 @@ class VectorizationGenerator(nn.Module):
         z = self.output_dense(x)
         return z
 
-    def step(self, batch, step):
+    def step(self, batch, step, val=False):
         device = next(self.parameters()).device
         (inputs, y) = batch
         inputs = {k: v.to(device) for k, v in inputs.items()}
         y = tuple(v.to(device) for v in y)
 
         outputs = self(inputs)
-        losses = self.losses(y, inputs["raster_image"], outputs, step)
+        losses = self.losses(y, inputs["raster_image"], outputs, step, val=val)
         return losses
 
-    def losses(self, y, raster_image_input, outputs, step):
+    def losses(self, y, raster_image_input, outputs, step, val=False):
         device = next(self.parameters()).device
         (true_command, true_coord_relative) = y
+        batch_size, seq_len, _ = true_command.shape
+
+        # --- Common Masking ---
+        # Establish a single, authoritative mask based on the ground truth sequence length.
+        true_eos_idx = find_eos(true_command)
+        indices = torch.arange(seq_len, device=device).expand(batch_size, -1)
+        sequence_mask = (indices < true_eos_idx.unsqueeze(1)).float()
 
         # Unroll true coordinates to get absolute for loss calculation
         true_coord_absolute = unroll_relative_coords(
             true_command, true_coord_relative * MAX_COORDINATE
         )
 
+        metrics = {}
+
         command_loss = sequence_command_loss(true_command, outputs["command"])
+        metrics["command_raw"] = command_loss.detach()
+
         coord_loss = calculate_masked_coordinate_loss(
             true_command,
             true_coord_absolute,
             outputs["coord_absolute"],
             self.arg_counts.to(device),
+            sequence_mask,
         )
+        metrics["coord_raw"] = coord_loss.detach()
+
         (
             contour_count_loss,
             node_count_loss,
@@ -436,10 +491,16 @@ class VectorizationGenerator(nn.Module):
             true_coord_absolute,
             outputs["command"],
             outputs["coord_absolute"],
+            true_eos_idx,
+            sequence_mask,
+            step,
         )
-        metrics = {}
+        metrics["contour_count_raw"] = contour_count_loss.detach()
+        metrics["node_count_raw"] = node_count_loss.detach()
+        metrics["handle_smoothness_raw"] = handle_smoothness_loss.detach()
+        metrics["signed_area_raw"] = signed_area_loss.detach()
 
-        if SKIP_RASTERIZATION:
+        if SKIP_RASTERIZATION and not val:
             raster_loss = torch.tensor(0.0, device=device)
         else:
             vector_rendered_images = rasterize_batch(
