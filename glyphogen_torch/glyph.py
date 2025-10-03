@@ -217,6 +217,15 @@ class NodeContour:
             return
         self.nodes.append(Node(position, self, in_handle, out_handle))
 
+    def roll(self, shift: int):
+        """
+        Performs a circular shift on the nodes in the contour.
+        """
+        if not self.nodes:
+            return
+        shift = shift % len(self.nodes)
+        self.nodes = self.nodes[shift:] + self.nodes[:shift]
+
     def normalize(self) -> None:
         index_of_bottom_left = min(
             range(len(self.nodes)),
@@ -280,9 +289,9 @@ class Node:
             # It's a line.
             if previous_node:  # Only check for LH/LV if coords are relative
                 if coords[1] == 0:  # Horizontal line
-                    return NodeCommand("LH", [coords[0].item()])
+                    return NodeCommand("LH", [coords[0].item(), 0])
                 if coords[0] == 0:  # Vertical line
-                    return NodeCommand("LV", [coords[1].item()])
+                    return NodeCommand("LV", [coords[1].item(), 0])
             return NodeCommand("L", coords.tolist())
 
         # Deal with line-to-curve and curve-to-line
@@ -520,7 +529,7 @@ class Glyph:
 
         if encoded_glyph is None:
             # Handle glyphs that are too complex
-            return np.zeros((size, size), dtype=np.float64)
+            return np.zeros((size, size, 1), dtype=np.float64)
 
         encoded_tensor = torch.from_numpy(encoded_glyph).float()
 

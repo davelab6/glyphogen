@@ -30,7 +30,6 @@ from glyphogen_torch.rasterizer import rasterize_batch
 SKIP_RASTERIZATION = VECTOR_RASTERIZATION_LOSS_WEIGHT == 0.0
 
 
-@torch.compile(backend="aot_eager")
 def unroll_relative_coords(command_tensor, coord_tensor_relative):
     """Converts a tensor of relative coordinates to absolute coordinates."""
     batch_size, seq_len, _ = command_tensor.shape
@@ -112,7 +111,6 @@ def calculate_masked_coordinate_loss(
     return torch.sum(masked_loss) / torch.sum(combined_mask)
 
 
-@torch.compile(backend="aot_eager")
 def find_eos(command_batch):
     command_keys = list(NODE_GLYPH_COMMANDS.keys())
     eos_index = command_keys.index("EOS")
@@ -131,6 +129,7 @@ def find_eos(command_batch):
     return eos_idx
 
 
+@torch.compile(dynamic=True)
 def signed_area(points):
     """
     Calculates the signed area of a polygon using the Shoelace formula.
@@ -148,6 +147,7 @@ def signed_area(points):
     )
 
 
+@torch.compiler.disable
 def point_placement_loss(
     y_true_command,
     y_true_coord,
@@ -215,8 +215,12 @@ def point_placement_loss(
         # The end of a contour is the start of the next, or the final EOS.
         eos_pos = true_eos_idx[i]
         all_contour_ends = torch.cat((all_contour_starts[1:], eos_pos.unsqueeze(0)))
+        contour_count = len(all_contour_starts)
 
-        for start, end in zip(all_contour_starts, all_contour_ends):
+        for countour in range(contour_count):
+            start = all_contour_starts[countour]
+            end = all_contour_ends[countour]
+
             # Skip empty contours that might be created by this logic.
             if end <= start:
                 continue
@@ -380,6 +384,7 @@ class Decoder(nn.Module):
         return self.sigmoid(x)
 
 
+@torch.compile(fullgraph=True)
 class VectorizationGenerator(nn.Module):
     def __init__(self, d_model, latent_dim=32, rate=0.1):
         super().__init__()
@@ -442,15 +447,19 @@ class VectorizationGenerator(nn.Module):
         return z
 
     def step(self, batch, step, val=False):
-        device = next(self.parameters()).device
-        (inputs, y) = batch
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        y = tuple(v.to(device) for v in y)
+        with torch.profiler.record_function("h2d copy"):
+            device = next(self.parameters()).device
+            (inputs, y) = batch
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            y = tuple(v.to(device) for v in y)
 
-        outputs = self(inputs)
-        losses = self.losses(y, inputs["raster_image"], outputs, step, val=val)
+        with torch.profiler.record_function("forward step"):
+            outputs = self(inputs)
+        with torch.profiler.record_function("losses"):
+            losses = self.losses(y, inputs["raster_image"], outputs, step, val=val)
         return losses
 
+    @torch.compile()
     def losses(self, y, raster_image_input, outputs, step, val=False):
         device = next(self.parameters()).device
         (true_command, true_coord_relative) = y
@@ -523,9 +532,12 @@ class VectorizationGenerator(nn.Module):
                 black_pixel_weight=RASTER_BLACK_PIXEL_WEIGHT,
             )
             if val:
-                metrics["raster_metric"] = 1.0 - torch.nn.MSELoss()(
-                    raster_image_input, vector_rendered_images
-                ).detach()
+                metrics["raster_metric"] = (
+                    1.0
+                    - torch.nn.MSELoss()(
+                        raster_image_input, vector_rendered_images
+                    ).detach()
+                )
             metrics["raster_raw"] = raster_loss.detach()
 
         total_loss = (

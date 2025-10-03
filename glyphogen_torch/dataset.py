@@ -26,7 +26,7 @@ from glyphogen_torch.rendering import get_style_image
 
 font_files = []
 BANNED = ["noto", "bitcount", "nabla", "jersey", "rubik", "winky", "bungee"]
-for file in list(glob.glob(BASE_DIR + "/*/*.ttf")):
+for file in sorted(list(glob.glob(BASE_DIR + "/*/*.ttf"))):
     if any(ban in file.lower() for ban in BANNED):
         continue
     ttfont = TTFont(file)
@@ -110,14 +110,23 @@ class GlyphDataset(Dataset):
 
 
 class PretrainGlyphDataset(IterableDataset):
-    def __init__(self, font_files, alphabet, is_train=True, augmentations=0):
+    def __init__(
+        self,
+        font_files,
+        alphabet: list[str],
+        is_train=True,
+        augmentations=0,
+        roll_augmentations=0,
+    ):
         self.alphabet = alphabet
         self.font_files_train, self.font_files_test = train_test_split(
             font_files, test_size=0.2, random_state=42
         )
         self.font_files = self.font_files_train if is_train else self.font_files_test
+        self.is_train = is_train
         self.cache = {}
         self.augmentations = [{}]
+        self.roll_augmentations = roll_augmentations if is_train else 0
         if is_train:
             self.augmentations += [
                 {"XAUG": random.randint(0, 200), "YAUG": random.randint(-100, 100)}
@@ -128,26 +137,51 @@ class PretrainGlyphDataset(IterableDataset):
     def __len__(self):
         if self.true_length is not None:
             return self.true_length
-        print("Calculating length of dataset...")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            for font_file_path in tqdm.tqdm(iter(self), desc="Loading dataset"):
-                pass
-        return self.true_length
+        # Guess
+        print(
+            f"Generating dataset with {len(self.font_files)} fonts, {len(self.alphabet)} chars, {len(self.augmentations)} augmentations, and {self.roll_augmentations} roll augmentations"
+        )
+        return (
+            len(self.font_files)
+            * len(self.alphabet)
+            * len(self.augmentations)
+            * (1 + self.roll_augmentations)
+        )
+        # print("Calculating length of dataset...")
+        # with warnings.catch_warnings():
+        #     warnings.simplefilter("ignore")
+        #     for font_file_path in tqdm.tqdm(iter(self), desc="Loading dataset"):
+        #         pass
+        # return self.true_length
 
     def __iter__(self):
+        worker_total_num = torch.utils.data.get_worker_info().num_workers
+        worker_id = torch.utils.data.get_worker_info().id
+        # Split the font files between workers
+        if worker_total_num > 1:
+            font_files_per_worker = np.array_split(self.font_files, worker_total_num)[
+                worker_id
+            ]
+            print(f"Worker {worker_id} processing {len(font_files_per_worker)} fonts")
+        else:
+            font_files_per_worker = self.font_files
+        self.font_files = font_files_per_worker.tolist()
+
         choices = list(
             itertools.product(self.font_files, self.alphabet, self.augmentations)
         )
         self.true_length = 0
         random.shuffle(choices)
         for font_file_path, char, augment in choices:
-            data = self._load_and_process_glyph(font_file_path, ord(char), augment)
-            if data is not None:
-                yield data
-                self.true_length += 1
+            for roll in range(self.roll_augmentations + 1):
+                data = self._load_and_process_glyph(
+                    font_file_path, ord(char), augment, roll=roll
+                )
+                if data is not None:
+                    yield data
+                    self.true_length += 1
 
-    def _load_and_process_glyph(self, font_file_path, char_ord, augment):
+    def _load_and_process_glyph(self, font_file_path, char_ord, augment, roll=0):
         try:
             glyph = Glyph(Path(font_file_path), int(char_ord), location=augment)
             if (font_file_path, char_ord) in self.cache:
@@ -155,6 +189,13 @@ class PretrainGlyphDataset(IterableDataset):
             else:
                 svg_glyph = glyph.vectorize()
                 node_glyph = svg_glyph.to_node_glyph()
+
+                # Augmentation: Randomly roll the starting point of closed contours for training data
+                if roll:
+                    for contour in node_glyph.contours:
+                        if contour.nodes:
+                            contour.roll(roll)
+
                 if len(node_glyph.commands) > MAX_COMMANDS:
                     # print(
                     #     f"Too many commands ({len(node_glyph.commands)}) for {font_file_path} for char {char_ord}"
@@ -164,7 +205,7 @@ class PretrainGlyphDataset(IterableDataset):
                     encoded_svg = None
                 else:
                     encoded_svg = node_glyph.encode()
-                self.cache[(font_file_path, char_ord)] = encoded_svg
+                # self.cache[(font_file_path, char_ord)] = encoded_svg
             if encoded_svg is None or len(encoded_svg) <= 1:
                 return None
             raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
@@ -192,10 +233,11 @@ class PretrainGlyphDataset(IterableDataset):
 
 
 def collate_fn(batch):
-    batch = [b for b in batch if b is not None]
-    if not batch:
-        return None, None
-    return torch.utils.data.dataloader.default_collate(batch)
+    with torch.profiler.record_function("collate"):
+        batch = [b for b in batch if b is not None]
+        if not batch:
+            return None, None
+        return torch.utils.data.dataloader.default_collate(batch)
 
 
 def get_full_model_data():
@@ -204,9 +246,19 @@ def get_full_model_data():
     return train_dataset, test_dataset
 
 
-def get_pretrain_data(augmentations=20):
+def get_pretrain_data(augmentations=20, roll_augmentations=2):
     train_dataset = PretrainGlyphDataset(
-        font_files, ALPHABET, is_train=True, augmentations=augmentations
+        font_files,
+        ALPHABET,
+        is_train=True,
+        augmentations=augmentations,
+        roll_augmentations=roll_augmentations,
     )
-    test_dataset = PretrainGlyphDataset(font_files, ALPHABET, is_train=False)
+    test_dataset = PretrainGlyphDataset(
+        font_files,
+        ALPHABET,
+        is_train=False,
+        augmentations=augmentations,
+        roll_augmentations=0,
+    )
     return train_dataset, test_dataset

@@ -68,12 +68,15 @@ def main(
     single_batch=False,
     debug_grads=False,
     augmentations=20,
+    roll_augmentations=2,
 ):
     random.seed(1234)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.capture_dynamic_output_shape_ops = True
     print(f"Using device: {device}")
     # torch.autograd.set_detect_anomaly(True)
 
@@ -102,7 +105,9 @@ def main(
 
     # Data
     if pre_train:
-        train_dataset, test_dataset = get_pretrain_data(augmentations=augmentations)
+        train_dataset, test_dataset = get_pretrain_data(
+            augmentations=augmentations, roll_augmentations=roll_augmentations
+        )
     else:
         train_dataset, test_dataset = get_full_model_data()
 
@@ -110,11 +115,17 @@ def main(
         train_dataset,
         batch_size=BATCH_SIZE,
         collate_fn=collate_fn,
+        drop_last=True,
+        pin_memory=True,
+        num_workers=8,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
         collate_fn=collate_fn,
+        drop_last=True,
+        pin_memory=True,
+        num_workers=8,
     )
 
     if single_batch:
@@ -203,8 +214,8 @@ def main(
                 total_val_loss += losses["total_loss"].item()
                 # total_val_loss += losses["total_loss"].item()
 
-        avg_val_loss = total_val_loss / i
-        avg_val_metric = loss_accumulators["raster_metric"] / i
+        avg_val_loss = total_val_loss / (0.1 + i)
+        avg_val_metric = loss_accumulators["raster_metric"] / (0.1 + i)
         dump_accumulators(loss_accumulators, writer, epoch, i, val=True)
         print(
             f"Epoch {epoch}, Validation Loss: {avg_val_loss}; Metric: {avg_val_metric}"
@@ -271,8 +282,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--augmentations",
         type=int,
-        default=20,
+        default=0,
         help="Number of augmentations to apply.",
+    )
+    parser.add_argument(
+        "--roll-augmentations",
+        type=int,
+        default=2,
+        help="Number of roll augmentations to apply.",
     )
     args = parser.parse_args()
     main(
@@ -283,4 +300,5 @@ if __name__ == "__main__":
         single_batch=args.single_batch,
         vectorizer_model_name=args.vectorizer_model_name,
         augmentations=args.augmentations,
+        roll_augmentations=args.roll_augmentations,
     )

@@ -4,11 +4,6 @@ from .hyperparameters import GEN_IMAGE_SIZE
 import pydiffvg
 import numpy as np
 
-# There's no Metal operator for pydiffvg, and anyway running it on
-# GPU is actually unstable and sometimes produces all zeroes
-# (https://github.com/BachiLi/diffvg/issues/96) so we use CPU.
-pydiffvg.set_use_gpu(False)
-
 command_keys = list(NodeCommand.grammar.keys())
 cmd_n_val = command_keys.index("N")
 cmd_soc_val = command_keys.index("SOC")
@@ -171,7 +166,7 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
     if img_size is None:
         img_size = GEN_IMAGE_SIZE[0]
     coords.requires_grad_(requires_grad)
-    dead_image = torch.ones(1, img_size, img_size, dtype=torch.float32)
+    dead_image = torch.ones(1, img_size, img_size, dtype=torch.float32).to(cmds.device)
     images = []
     for i in range(cmds.shape[0]):
         # If there's no EOS token or no SOC token, don't bother
@@ -228,7 +223,7 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
 
         render = pydiffvg.RenderFunction.apply
         try:
-            img = render(img_size, img_size, 2, 2, seed, None, *scene_args)
+            img = render(img_size, img_size, 2, 2, seed, None, *scene_args).to(cmds.device)
         except Exception as e:
             print(f"Failed to rasterize: {e}")
             images.append(dead_image)
