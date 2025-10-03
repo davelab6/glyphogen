@@ -2,7 +2,6 @@ import glob
 import itertools
 from pathlib import Path
 import random
-import warnings
 
 import numpy as np
 import torch
@@ -155,17 +154,18 @@ class PretrainGlyphDataset(IterableDataset):
         # return self.true_length
 
     def __iter__(self):
-        worker_total_num = torch.utils.data.get_worker_info().num_workers
-        worker_id = torch.utils.data.get_worker_info().id
-        # Split the font files between workers
-        if worker_total_num > 1:
-            font_files_per_worker = np.array_split(self.font_files, worker_total_num)[
-                worker_id
-            ]
-            print(f"Worker {worker_id} processing {len(font_files_per_worker)} fonts")
-        else:
-            font_files_per_worker = self.font_files
-        self.font_files = font_files_per_worker.tolist()
+        if torch.utils.data.get_worker_info():
+            worker_total_num = torch.utils.data.get_worker_info().num_workers
+            worker_id = torch.utils.data.get_worker_info().id
+            # Split the font files between workers
+            if worker_total_num > 1:
+                font_files_per_worker = np.array_split(
+                    self.font_files, worker_total_num
+                )[worker_id]
+                print(
+                    f"Worker {worker_id} processing {len(font_files_per_worker)} fonts"
+                )
+                self.font_files = font_files_per_worker.tolist()
 
         choices = list(
             itertools.product(self.font_files, self.alphabet, self.augmentations)
@@ -174,6 +174,9 @@ class PretrainGlyphDataset(IterableDataset):
         random.shuffle(choices)
         for font_file_path, char, augment in choices:
             for roll in range(self.roll_augmentations + 1):
+                # print(
+                #     f"Processing font {font_file_path} char {char} augment {augment} roll {roll}"
+                # )
                 data = self._load_and_process_glyph(
                     font_file_path, ord(char), augment, roll=roll
                 )

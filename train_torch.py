@@ -117,7 +117,7 @@ def main(
         collate_fn=collate_fn,
         drop_last=True,
         pin_memory=True,
-        num_workers=8,
+        num_workers=1,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -125,7 +125,7 @@ def main(
         collate_fn=collate_fn,
         drop_last=True,
         pin_memory=True,
-        num_workers=8,
+        num_workers=1,
     )
 
     if single_batch:

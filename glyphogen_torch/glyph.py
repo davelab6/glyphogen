@@ -1,4 +1,5 @@
 from pathlib import Path
+from time import sleep
 from typing import Dict, List, Optional
 
 import diskcache
@@ -9,7 +10,10 @@ import torch
 import uharfbuzz as hb
 from fontTools.pens.qu2cuPen import Qu2CuPen
 from fontTools.pens.svgPathPen import SVGPathPen, pointToString
+import pathops
 from fontTools.ttLib import TTFont
+from fontTools.ttLib.removeOverlaps import _simplify
+
 
 from .hyperparameters import (
     BASE_DIR,
@@ -511,6 +515,7 @@ class Glyph:
             ]
         )
         if (cache_dir / font_base / (key + ".png")).exists():
+            # print("Loading", cache_dir / font_base / (key + ".png"))
             img = Image.open(cache_dir / font_base / (key + ".png")).convert("L")
             img = np.asarray(img, dtype=np.float32) / 255.0
             img = np.expand_dims(img, axis=-1)
@@ -520,6 +525,7 @@ class Glyph:
                 (img.squeeze(-1) * 255).astype(np.uint8), mode="L"
             )
             (cache_dir / font_base).mkdir(exist_ok=True)
+            # print("Saving", cache_dir / font_base / (key + ".png"))
             pil_img.save(cache_dir / font_base / (key + ".png"))
         return img
 
@@ -546,13 +552,17 @@ class Glyph:
 
         # Rasterize
         image_tensor = rasterize_batch(
-            cmds_tensor, coord_tensor_absolute, img_size=size, requires_grad=False
+            cmds_tensor,
+            coord_tensor_absolute,
+            img_size=size,
+            requires_grad=False,
+            device=torch.device("cpu"),
         )
 
         numpy_image = image_tensor.squeeze(0).squeeze(0).cpu().numpy()
         return np.expand_dims(numpy_image, axis=-1).astype(np.float64)
 
-    def vectorize(self) -> SVGGlyph:
+    def vectorize(self, remove_overlaps: bool = True) -> SVGGlyph:
         """
         Converts the glyph into a vector representation.
         This method should be implemented to return the glyph's path as an SVGGlyph object.
@@ -569,7 +579,17 @@ class Glyph:
         path = []
         if glyph is None:
             return SVGGlyph([])
-        font.draw_glyph_with_pen(glyph, pen)
+
+        if remove_overlaps:
+            # Simplify and remove overlaps
+            skpath = pathops.Path()
+            pathPen = skpath.getPen()
+            font.draw_glyph_with_pen(glyph, pathPen)
+            skpath = _simplify(skpath, chr(self.unicode_id))
+            skpath.draw(pen)
+        else:
+            font.draw_glyph_with_pen(glyph, pen)
+
         for command in svgpen._commands:
             cmd = command[0] if command[0] != " " else "L"
             coords = [int(p) for p in command[1:].split()]
@@ -583,3 +603,8 @@ class Glyph:
                     coords[i] += int(self.location["YAUG"])
             path.append(SVGCommand(cmd, coords))
         return SVGGlyph(path)
+
+
+def simplify(glyph):
+    glyph.draw(pathPen)
+    path = _simplify(path)

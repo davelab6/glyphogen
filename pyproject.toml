@@ -18,6 +18,7 @@ dependencies = [
     "pkbar",
     "scikit-image",
     "tensorboard",
+    "skia-pathops",
 ]
 # Also pydiffvg but that's not on pypi!
 

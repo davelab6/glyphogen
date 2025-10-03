@@ -161,10 +161,16 @@ def nodes_to_segments(cmd, coord):
 
 
 @torch.compiler.disable(recursive=False)
-def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
+def rasterize_batch(
+    cmds, coords, seed=42, img_size=None, requires_grad=True, device=None
+):
     """Render a batch of glyphs from their node representation."""
     if img_size is None:
         img_size = GEN_IMAGE_SIZE[0]
+    if device is not None:
+        pydiffvg.set_device(device)
+    else:
+        pydiffvg.set_device(cmds.device)
     coords.requires_grad_(requires_grad)
     dead_image = torch.ones(1, img_size, img_size, dtype=torch.float32).to(cmds.device)
     images = []
@@ -223,7 +229,9 @@ def rasterize_batch(cmds, coords, seed=42, img_size=None, requires_grad=True):
 
         render = pydiffvg.RenderFunction.apply
         try:
-            img = render(img_size, img_size, 2, 2, seed, None, *scene_args).to(cmds.device)
+            img = render(img_size, img_size, 2, 2, seed, None, *scene_args).to(
+                cmds.device
+            )
         except Exception as e:
             print(f"Failed to rasterize: {e}")
             images.append(dead_image)
