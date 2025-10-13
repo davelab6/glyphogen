@@ -2,6 +2,7 @@ import glob
 import itertools
 from pathlib import Path
 import random
+import os
 
 import numpy as np
 import torch
@@ -131,6 +132,13 @@ class PretrainGlyphDataset(IterableDataset):
                 {"XAUG": random.randint(0, 200), "YAUG": random.randint(-100, 100)}
                 for _ in range(augmentations)
             ]
+        new_augs = []
+        for roll in range(0, self.roll_augmentations + 1):
+            for aug in self.augmentations:
+                new_aug = aug.copy()
+                new_aug["ROLL"] = roll
+                new_augs.append(new_aug)
+        self.augmentations = new_augs
         self.true_length = None
 
     def __len__(self):
@@ -138,14 +146,9 @@ class PretrainGlyphDataset(IterableDataset):
             return self.true_length
         # Guess
         print(
-            f"Generating dataset with {len(self.font_files)} fonts, {len(self.alphabet)} chars, {len(self.augmentations)} augmentations, and {self.roll_augmentations} roll augmentations"
+            f"Generating dataset with {len(self.font_files)} fonts, {len(self.alphabet)} chars, {len(self.augmentations)} augmentations"
         )
-        return (
-            len(self.font_files)
-            * len(self.alphabet)
-            * len(self.augmentations)
-            * (1 + self.roll_augmentations)
-        )
+        return len(self.font_files) * len(self.alphabet) * len(self.augmentations)
         # print("Calculating length of dataset...")
         # with warnings.catch_warnings():
         #     warnings.simplefilter("ignore")
@@ -162,10 +165,10 @@ class PretrainGlyphDataset(IterableDataset):
                 font_files_per_worker = np.array_split(
                     self.font_files, worker_total_num
                 )[worker_id]
-                print(
-                    f"Worker {worker_id} processing {len(font_files_per_worker)} fonts"
-                )
                 self.font_files = font_files_per_worker.tolist()
+        else:
+            worker_total_num = 1
+            worker_id = 1
 
         choices = list(
             itertools.product(self.font_files, self.alphabet, self.augmentations)
@@ -173,21 +176,17 @@ class PretrainGlyphDataset(IterableDataset):
         self.true_length = 0
         random.shuffle(choices)
         for font_file_path, char, augment in choices:
-            for roll in range(self.roll_augmentations + 1):
-                # print(
-                #     f"Processing font {font_file_path} char {char} augment {augment} roll {roll}"
-                # )
-                data = self._load_and_process_glyph(
-                    font_file_path, ord(char), augment, roll=roll
-                )
-                if data is not None:
-                    yield data
-                    self.true_length += 1
+            data = self._load_and_process_glyph(font_file_path, ord(char), augment)
+            if data is not None:
+                yield data
+                self.true_length += 1
 
-    def _load_and_process_glyph(self, font_file_path, char_ord, augment, roll=0):
+    def _load_and_process_glyph(self, font_file_path, char_ord, augment):
         try:
-            # It's inefficient to do this every time, but for now it's the simplest
-            # way to ensure we have the node_glyph for the contour count.
+            roll = augment.get("ROLL", 0)
+            if "ROLL" in augment:
+                del augment["ROLL"]
+
             glyph = Glyph(Path(font_file_path), int(char_ord), location=augment)
             svg_glyph = glyph.vectorize()
             node_glyph = svg_glyph.to_node_glyph()
