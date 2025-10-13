@@ -232,7 +232,7 @@ def point_placement_loss(
     return eos_loss, handle_loss, signed_area_loss
 
 
-def sequence_command_loss(y_true_command, y_pred_command, synonym_penalty=0.1):
+def sequence_command_loss(y_true_command, y_pred_command, synonym_penalty=0.2):
     """
     Calculates a synonym-aware command loss.
 
@@ -243,9 +243,12 @@ def sequence_command_loss(y_true_command, y_pred_command, synonym_penalty=0.1):
     """
     # Define synonym sets based on the confusion matrix analysis
     command_keys = list(NODE_GLYPH_COMMANDS.keys())
-    node_set = {command_keys.index(cmd) for cmd in ["N", "NH", "NV", "NCI"]}
+    nh_set = {command_keys.index(cmd) for cmd in ["N", "NH"]}
+    nv_set = {command_keys.index(cmd) for cmd in ["N", "NV"]}
     nco_set = {command_keys.index(cmd) for cmd in ["NCO", "L"]}
-    synonym_sets = [node_set, nco_set]
+    lh_set = {command_keys.index(cmd) for cmd in ["L", "LH"]}
+    lv_set = {command_keys.index(cmd) for cmd in ["L", "LV"]}
+    synonym_sets = [nh_set, nv_set, nco_set, lh_set, lv_set]
 
     # Standard loss calculation setup
     true_eos_idx = find_eos(y_true_command)
@@ -470,9 +473,7 @@ class VectorizationGenerator(nn.Module):
         with torch.profiler.record_function("forward step"):
             outputs = self(inputs)
         with torch.profiler.record_function("losses"):
-            losses = self.losses(
-                y, inputs, outputs, step, val=val
-            )
+            losses = self.losses(y, inputs, outputs, step, val=val)
         return losses, outputs
 
     @torch.compile()
