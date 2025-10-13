@@ -170,7 +170,7 @@ def point_placement_loss(
     indices = torch.arange(seq_len, device=y_true_command.device).expand(batch_size, -1)
 
     # --- Predicted Probabilities ---
-    pred_probs = F.softmax(y_pred_command / CONTOUR_LOSS_TEMPERATURE, dim=-1)
+    pred_probs = F.softmax(y_pred_command, dim=-1)
 
     # --- Node Count Loss (Sequence Length Loss) ---
     # A more direct 'soft length' formulation.
@@ -232,37 +232,60 @@ def point_placement_loss(
     return eos_loss, handle_loss, signed_area_loss
 
 
-def sequence_command_loss(y_true_command, y_pred_command):
+def sequence_command_loss(y_true_command, y_pred_command, synonym_penalty=0.1):
     """
-    Calculates the command loss only up to the longest EOS between true and pred.
+    Calculates a synonym-aware command loss.
+
+    This loss function understands that some commands are functionally similar
+    (e.g., a generic Node 'N' vs. a specialized horizontal Node 'NH'). It applies
+    a smaller penalty when the model predicts a valid synonym, and the full
+    penalty for more significant errors.
     """
+    # Define synonym sets based on the confusion matrix analysis
+    command_keys = list(NODE_GLYPH_COMMANDS.keys())
+    node_set = {command_keys.index(cmd) for cmd in ["N", "NH", "NV", "NCI"]}
+    nco_set = {command_keys.index(cmd) for cmd in ["NCO", "L"]}
+    synonym_sets = [node_set, nco_set]
+
+    # Standard loss calculation setup
     true_eos_idx = find_eos(y_true_command)
     pred_eos_idx = find_eos(y_pred_command)
-
     max_len = torch.max(true_eos_idx, pred_eos_idx)
 
     batch_size, seq_len, num_classes = y_true_command.shape
+    device = y_true_command.device
 
-    # Create a mask for the sequences
-    indices = torch.arange(seq_len, device=y_true_command.device).expand(batch_size, -1)
-    mask = indices < max_len.unsqueeze(1)  # shape (N, L), boolean
+    indices = torch.arange(seq_len, device=device).expand(batch_size, -1)
+    mask = (indices < max_len.unsqueeze(1)).float()
 
-    # Get true class indices
-    y_true_indices = torch.argmax(y_true_command, dim=-1)  # shape (N, L)
+    y_true_indices = torch.argmax(y_true_command, dim=-1)
+    y_pred_indices = torch.argmax(y_pred_command, dim=-1)
 
-    # Apply log_softmax to predictions over the class dimension
-    log_probs = F.log_softmax(y_pred_command, dim=-1)  # shape (N, L, C)
+    # Calculate per-token cross-entropy loss
+    nll_loss = F.cross_entropy(
+        y_pred_command.permute(0, 2, 1), y_true_indices, reduction="none"
+    )
 
-    # Gather the log probabilities of the true classes
-    true_log_probs = torch.gather(log_probs, 2, y_true_indices.unsqueeze(-1)).squeeze(
-        -1
-    )  # shape (N, L)
+    # --- Synonym-aware scaling ---
+    # Start with full penalty for all tokens
+    scales = torch.ones_like(nll_loss)
 
-    # Calculate negative log likelihood loss
-    nll_loss = -true_log_probs
+    # Check for errors where both true and pred are in the same synonym set
+    is_error = y_true_indices != y_pred_indices
 
-    # Apply mask
-    masked_loss = nll_loss * mask.float()
+    for syn_set in synonym_sets:
+        is_true_in_set = torch.zeros_like(is_error)
+        is_pred_in_set = torch.zeros_like(is_error)
+        for idx in syn_set:
+            is_true_in_set |= y_true_indices == idx
+            is_pred_in_set |= y_pred_indices == idx
+
+        is_synonym_error = is_error & is_true_in_set & is_pred_in_set
+        scales[is_synonym_error] = synonym_penalty
+
+    # Apply scaling and sequence mask
+    scaled_loss = nll_loss * scales
+    masked_loss = scaled_loss * mask
 
     # Normalize by the number of unmasked elements
     return torch.sum(masked_loss) / (torch.sum(mask) + 1e-8)
