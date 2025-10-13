@@ -5,13 +5,11 @@ from torch import nn
 
 from glyphogen.embedding import StyleEmbedding
 from glyphogen.command_defs import (
-    COORDINATE_WIDTH,
     NODE_GLYPH_COMMANDS,
     MAX_COORDINATE,
 )
 from glyphogen.hyperparameters import (
     CONTOUR_COUNT_WEIGHT,
-    EOS_SOFTMAX_TEMPERATURE,
     HANDLE_SMOOTHNESS_WEIGHT,
     NODE_COUNT_WEIGHT,
     RASTER_LOSS_WEIGHT,
@@ -21,7 +19,6 @@ from glyphogen.hyperparameters import (
     VECTOR_RASTERIZATION_LOSS_WEIGHT,
     HUBER_DELTA,
     LOSS_IMAGE_SIZE,
-    RASTER_LOSS_CUTOFF,
     RASTER_BLACK_PIXEL_WEIGHT,
 )
 from glyphogen.lstm import LSTMDecoder
@@ -175,7 +172,6 @@ def point_placement_loss(
     pred_probs = F.softmax(y_pred_command / CONTOUR_LOSS_TEMPERATURE, dim=-1)
 
     contour_loss = torch.tensor(0.0, device=y_pred_command.device)
-
 
     # --- Node Count Loss (Sequence Length Loss) ---
     # A more direct 'soft length' formulation.
@@ -452,9 +448,7 @@ class VectorizationGenerator(nn.Module):
         with torch.profiler.record_function("forward step"):
             outputs = self(inputs)
         with torch.profiler.record_function("losses"):
-            losses = self.losses(
-                y, inputs, outputs, step, val=val
-            )
+            losses = self.losses(y, inputs, outputs, step, val=val)
         return losses
 
     @torch.compile()
@@ -513,7 +507,6 @@ class VectorizationGenerator(nn.Module):
         pred_contour_count = outputs["pred_contour_count"].squeeze(-1)
         contour_count_loss = F.l1_loss(pred_contour_count, true_contour_count)
         metrics["contour_count_raw"] = contour_count_loss.detach()
-
 
         if SKIP_RASTERIZATION and not val:
             raster_loss = torch.tensor(0.0, device=device)
