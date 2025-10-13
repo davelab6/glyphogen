@@ -12,9 +12,9 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, IterableDataset
 from more_itertools import random_product
 
-from glyphogen_torch.command_defs import COORDINATE_WIDTH, NODE_COMMAND_WIDTH
-from glyphogen_torch.glyph import Glyph
-from glyphogen_torch.hyperparameters import (
+from glyphogen.command_defs import COORDINATE_WIDTH, NODE_COMMAND_WIDTH
+from glyphogen.glyph import Glyph
+from glyphogen.hyperparameters import (
     ALPHABET,
     BASE_DIR,
     GEN_IMAGE_SIZE,
@@ -22,7 +22,7 @@ from glyphogen_torch.hyperparameters import (
     NUM_GLYPHS,
     MAX_COMMANDS,
 )
-from glyphogen_torch.rendering import get_style_image
+from glyphogen.rendering import get_style_image
 
 font_files = []
 BANNED = ["noto", "bitcount", "nabla", "jersey", "rubik", "winky", "bungee"]

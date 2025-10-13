@@ -1,6 +1,6 @@
 from pathlib import Path
 import pytest
-from glyphogen_torch.glyph import (
+from glyphogen.glyph import (
     Glyph,
     SVGGlyph,
     NodeGlyph,
@@ -9,14 +9,14 @@ from glyphogen_torch.glyph import (
     NodeContour,
     Node,
 )
-from glyphogen_torch.command_defs import (
+from glyphogen.command_defs import (
     NODE_COMMAND_WIDTH,
 )
-from glyphogen_torch.hyperparameters import GEN_IMAGE_SIZE
+from glyphogen.hyperparameters import GEN_IMAGE_SIZE
 import numpy as np
 import torch
-from glyphogen_torch.model import unroll_relative_coords
-from glyphogen_torch.command_defs import MAX_COORDINATE
+from glyphogen.model import unroll_relative_coords
+from glyphogen.command_defs import MAX_COORDINATE
 
 
 def test_glyph_extraction():

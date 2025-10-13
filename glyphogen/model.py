@@ -3,13 +3,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from glyphogen_torch.embedding import StyleEmbedding
-from glyphogen_torch.command_defs import (
+from glyphogen.embedding import StyleEmbedding
+from glyphogen.command_defs import (
     COORDINATE_WIDTH,
     NODE_GLYPH_COMMANDS,
     MAX_COORDINATE,
 )
-from glyphogen_torch.hyperparameters import (
+from glyphogen.hyperparameters import (
     CONTOUR_COUNT_WEIGHT,
     EOS_SOFTMAX_TEMPERATURE,
     HANDLE_SMOOTHNESS_WEIGHT,
@@ -24,8 +24,8 @@ from glyphogen_torch.hyperparameters import (
     RASTER_LOSS_CUTOFF,
     RASTER_BLACK_PIXEL_WEIGHT,
 )
-from glyphogen_torch.lstm import LSTMDecoder
-from glyphogen_torch.rasterizer import rasterize_batch
+from glyphogen.lstm import LSTMDecoder
+from glyphogen.rasterizer import rasterize_batch
 
 SKIP_RASTERIZATION = VECTOR_RASTERIZATION_LOSS_WEIGHT == 0.0
 

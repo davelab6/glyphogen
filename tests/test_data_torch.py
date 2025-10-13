@@ -3,10 +3,10 @@ import numpy as np
 import pytest
 from torch.utils.data import DataLoader
 
-from glyphogen_torch.glyph import NodeGlyph
-from glyphogen_torch.command_defs import NODE_GLYPH_COMMANDS, NODE_COMMAND_WIDTH
-from glyphogen_torch.dataset import GlyphDataset, collate_fn, font_files
-from glyphogen_torch.hyperparameters import BATCH_SIZE, ALPHABET
+from glyphogen.glyph import NodeGlyph
+from glyphogen.command_defs import NODE_GLYPH_COMMANDS, NODE_COMMAND_WIDTH
+from glyphogen.dataset import GlyphDataset, collate_fn, font_files
+from glyphogen.hyperparameters import BATCH_SIZE, ALPHABET
 
 # Get the index for the commands from the grammar
 command_keys = list(NODE_GLYPH_COMMANDS.keys())

@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import DataLoader
-from glyphogen_torch.dataset import get_pretrain_data, collate_fn
-from glyphogen_torch.rasterizer import rasterize_batch
+from glyphogen.dataset import get_pretrain_data, collate_fn
+from glyphogen.rasterizer import rasterize_batch
 import pydiffvg
 import torch.nn.functional as F
 

@@ -2,10 +2,10 @@ import torch
 from torch.utils.data import DataLoader
 import pydiffvg
 import os
-from glyphogen_torch.dataset import collate_fn, PretrainGlyphDataset
-from glyphogen_torch.rasterizer import rasterize_batch
-from glyphogen_torch.model import calculate_masked_coordinate_loss
-from glyphogen_torch.glyph import NODE_GLYPH_COMMANDS
+from glyphogen.dataset import collate_fn, PretrainGlyphDataset
+from glyphogen.rasterizer import rasterize_batch
+from glyphogen.model import calculate_masked_coordinate_loss
+from glyphogen.glyph import NODE_GLYPH_COMMANDS
 import torch.nn.functional as F
 
 

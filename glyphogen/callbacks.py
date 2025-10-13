@@ -1,7 +1,7 @@
 import random
 import torch
 
-from glyphogen_torch.hyperparameters import BATCH_SIZE
+from glyphogen.hyperparameters import BATCH_SIZE
 from .glyph import NodeGlyph, NodeCommand
 import numpy as np
 from .rasterizer import rasterize_batch
