@@ -186,44 +186,43 @@ class PretrainGlyphDataset(IterableDataset):
 
     def _load_and_process_glyph(self, font_file_path, char_ord, augment, roll=0):
         try:
+            # It's inefficient to do this every time, but for now it's the simplest
+            # way to ensure we have the node_glyph for the contour count.
             glyph = Glyph(Path(font_file_path), int(char_ord), location=augment)
-            if (font_file_path, char_ord) in self.cache:
-                encoded_svg = self.cache[(font_file_path, char_ord)]
-            else:
-                svg_glyph = glyph.vectorize()
-                node_glyph = svg_glyph.to_node_glyph()
+            svg_glyph = glyph.vectorize()
+            node_glyph = svg_glyph.to_node_glyph()
 
-                # Augmentation: Randomly roll the starting point of closed contours for training data
-                if roll:
-                    for contour in node_glyph.contours:
-                        if contour.nodes:
-                            contour.roll(roll)
+            if not node_glyph.commands or len(node_glyph.commands) <= 1:
+                return None
 
-                if len(node_glyph.commands) > MAX_COMMANDS:
-                    # print(
-                    #     f"Too many commands ({len(node_glyph.commands)}) for {font_file_path} for char {char_ord}"
-                    # )
-                    encoded_svg = None
-                if not node_glyph.commands or len(node_glyph.commands) <= 1:
-                    encoded_svg = None
-                else:
-                    encoded_svg = node_glyph.encode()
-                # self.cache[(font_file_path, char_ord)] = encoded_svg
+            true_contour_count = len(node_glyph.contours)
+
+            # Augmentation: Randomly roll the starting point of closed contours
+            if roll:
+                for contour in node_glyph.contours:
+                    if contour.nodes:
+                        contour.roll(roll)
+
+            if len(node_glyph.commands) > MAX_COMMANDS:
+                return None
+
+            encoded_svg = node_glyph.encode()
             if encoded_svg is None or len(encoded_svg) <= 1:
                 return None
+
             raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
+            raster = np.transpose(raster, (2, 0, 1))
 
             target_sequence = encoded_svg[:-1]
             ground_truth = encoded_svg[1:]
             true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
             true_coord = ground_truth[:, NODE_COMMAND_WIDTH:].astype(np.float32)
 
-            raster = np.transpose(raster, (2, 0, 1))
-
             return (
                 {
                     "raster_image": torch.from_numpy(raster).float(),
                     "target_sequence": torch.from_numpy(target_sequence).long(),
+                    "contour_count": torch.tensor(true_contour_count).float(),
                 },
                 (
                     torch.from_numpy(true_command).float(),

@@ -172,15 +172,10 @@ def point_placement_loss(
     indices = torch.arange(seq_len, device=y_true_command.device).expand(batch_size, -1)
 
     # --- Predicted Probabilities ---
-    pred_probs = F.softmax(y_pred_command, dim=-1)
+    pred_probs = F.softmax(y_pred_command / CONTOUR_LOSS_TEMPERATURE, dim=-1)
 
-    # --- Contour Count Loss ---
-    true_soc_counts = torch.sum(
-        (y_true_command_indices == soc_index) * sequence_mask, dim=1
-    )
-    pred_soc_probs = pred_probs[:, :, soc_index]
-    soft_pred_soc_counts = torch.sum(pred_soc_probs * sequence_mask, dim=1)
-    contour_loss = F.l1_loss(soft_pred_soc_counts, true_soc_counts)
+    contour_loss = torch.tensor(0.0, device=y_pred_command.device)
+
 
     # --- Node Count Loss (Sequence Length Loss) ---
     # A more direct 'soft length' formulation.
@@ -412,6 +407,7 @@ class VectorizationGenerator(nn.Module):
         self.norm_dense = nn.LayerNorm(latent_dim)
         self.sigmoid = nn.Sigmoid()
         self.output_dense = nn.Linear(latent_dim, latent_dim)
+        self.contour_head = nn.Linear(latent_dim, 1)
 
         self.decoder = torch.compile(
             LSTMDecoder(d_model=d_model, latent_dim=latent_dim, rate=rate)
@@ -456,13 +452,17 @@ class VectorizationGenerator(nn.Module):
         with torch.profiler.record_function("forward step"):
             outputs = self(inputs)
         with torch.profiler.record_function("losses"):
-            losses = self.losses(y, inputs["raster_image"], outputs, step, val=val)
+            losses = self.losses(
+                y, inputs, outputs, step, val=val
+            )
         return losses
 
     @torch.compile()
-    def losses(self, y, raster_image_input, outputs, step, val=False):
+    def losses(self, y, inputs, outputs, step, val=False):
         device = next(self.parameters()).device
         (true_command, true_coord_relative) = y
+        raster_image_input = inputs["raster_image"]
+        true_contour_count = inputs["contour_count"]
         batch_size, seq_len, _ = true_command.shape
 
         # --- Common Masking ---
@@ -491,7 +491,7 @@ class VectorizationGenerator(nn.Module):
         metrics["coord_raw"] = coord_loss.detach()
 
         (
-            contour_count_loss,
+            _,  # contour_count_loss,
             node_count_loss,
             handle_smoothness_loss,
             signed_area_loss,
@@ -504,10 +504,16 @@ class VectorizationGenerator(nn.Module):
             sequence_mask,
             step,
         )
-        metrics["contour_count_raw"] = contour_count_loss.detach()
+        # metrics["contour_count_raw"] = contour_count_loss.detach()
         metrics["node_count_raw"] = node_count_loss.detach()
         metrics["handle_smoothness_raw"] = handle_smoothness_loss.detach()
         metrics["signed_area_raw"] = signed_area_loss.detach()
+
+        # New contour count loss
+        pred_contour_count = outputs["pred_contour_count"].squeeze(-1)
+        contour_count_loss = F.l1_loss(pred_contour_count, true_contour_count)
+        metrics["contour_count_raw"] = contour_count_loss.detach()
+
 
         if SKIP_RASTERIZATION and not val:
             raster_loss = torch.tensor(0.0, device=device)
@@ -573,10 +579,13 @@ class VectorizationGenerator(nn.Module):
         raster_image_input = inputs["raster_image"]
         target_sequence_input = inputs["target_sequence"]
         z = self.encode(raster_image_input)
-        z = z.unsqueeze(1)
+
+        pred_contour_count = self.contour_head(z)
+
+        z_unsq = z.unsqueeze(1)
 
         command_output, coord_output_relative = self.decoder(
-            target_sequence_input, context=z
+            target_sequence_input, context=z_unsq
         )
 
         # Scale up relative coordinates
@@ -589,6 +598,7 @@ class VectorizationGenerator(nn.Module):
             "command": command_output,
             "coord_relative": coord_output_relative,
             "coord_absolute": coord_output_absolute,
+            "pred_contour_count": pred_contour_count,
         }
 
 
