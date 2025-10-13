@@ -172,8 +172,6 @@ def point_placement_loss(
     # --- Predicted Probabilities ---
     pred_probs = F.softmax(y_pred_command / CONTOUR_LOSS_TEMPERATURE, dim=-1)
 
-    contour_loss = torch.tensor(0.0, device=y_pred_command.device)
-
     # --- Node Count Loss (Sequence Length Loss) ---
     # A more direct 'soft length' formulation.
     eos_probs = pred_probs[:, :, eos_index]
@@ -231,7 +229,7 @@ def point_placement_loss(
     else:
         signed_area_loss = torch.tensor(0.0, device=y_true_command.device)
 
-    return contour_loss, eos_loss, handle_loss, signed_area_loss
+    return eos_loss, handle_loss, signed_area_loss
 
 
 def sequence_command_loss(y_true_command, y_pred_command):
@@ -449,8 +447,10 @@ class VectorizationGenerator(nn.Module):
         with torch.profiler.record_function("forward step"):
             outputs = self(inputs)
         with torch.profiler.record_function("losses"):
-            losses = self.losses(y, inputs, outputs, step, val=val)
-        return losses
+            losses = self.losses(
+                y, inputs, outputs, step, val=val
+            )
+        return losses, outputs
 
     @torch.compile()
     def losses(self, y, inputs, outputs, step, val=False):
@@ -486,7 +486,6 @@ class VectorizationGenerator(nn.Module):
         metrics["coord_raw"] = coord_loss.detach()
 
         (
-            _,  # contour_count_loss,
             node_count_loss,
             handle_smoothness_loss,
             signed_area_loss,
@@ -499,12 +498,11 @@ class VectorizationGenerator(nn.Module):
             sequence_mask,
             step,
         )
-        # metrics["contour_count_raw"] = contour_count_loss.detach()
         metrics["node_count_raw"] = node_count_loss.detach()
         metrics["handle_smoothness_raw"] = handle_smoothness_loss.detach()
         metrics["signed_area_raw"] = signed_area_loss.detach()
 
-        # New contour count loss
+        # Contour count loss from regression head
         pred_contour_count = outputs["pred_contour_count"].squeeze(-1)
         contour_count_loss = F.l1_loss(pred_contour_count, true_contour_count)
         metrics["contour_count_raw"] = contour_count_loss.detach()

@@ -5,7 +5,8 @@ from glyphogen.hyperparameters import BATCH_SIZE
 from .glyph import NodeGlyph, NodeCommand
 import numpy as np
 from .rasterizer import rasterize_batch
-from .command_defs import MAX_COORDINATE
+from .command_defs import MAX_COORDINATE, NODE_GLYPH_COMMANDS
+from .model import find_eos
 
 
 def log_images(model, test_loader, writer, epoch, pre_train=False, num_images=3):
@@ -126,3 +127,71 @@ def log_svgs(model, test_loader, writer, epoch, pre_train=False, num_samples=3):
             writer.add_text(f"SVG/Node_{i}", debug_string, epoch)
             writer.add_text(f"SVG/Raw_{i}", raw_commands, epoch)
     writer.flush()
+
+
+def init_confusion_matrix_state():
+    """Initializes a state dictionary for collecting confusion matrix data."""
+    return {
+        "all_true_indices": [],
+        "all_pred_indices": [],
+        "all_masks": [],
+    }
+
+def collect_confusion_matrix_data(state, outputs, y):
+    """Collects prediction and ground truth data from a validation batch."""
+    true_command, _ = y
+    pred_command = outputs["command"]
+
+    # Create sequence mask to ignore padding
+    true_eos_idx = find_eos(true_command)
+    batch_size, seq_len, _ = true_command.shape
+    device = true_command.device
+    indices = torch.arange(seq_len, device=device).expand(batch_size, -1)
+    sequence_mask = indices < true_eos_idx.unsqueeze(1)
+
+    true_indices = torch.argmax(true_command, dim=-1)
+    pred_indices = torch.argmax(pred_command, dim=-1)
+
+    state["all_true_indices"].append(true_indices.detach().cpu())
+    state["all_pred_indices"].append(pred_indices.detach().cpu())
+    state["all_masks"].append(sequence_mask.detach().cpu())
+
+def log_confusion_matrix(state, writer, epoch):
+    """Computes and logs the confusion matrix at the end of an epoch."""
+    if not state["all_true_indices"]:
+        return
+
+    true_indices = torch.cat(state["all_true_indices"])
+    pred_indices = torch.cat(state["all_pred_indices"])
+    mask = torch.cat(state["all_masks"])
+
+    masked_true = torch.masked_select(true_indices, mask)
+    masked_pred = torch.masked_select(pred_indices, mask)
+
+    num_classes = len(NODE_GLYPH_COMMANDS)
+    matrix = torch.zeros((num_classes, num_classes), dtype=torch.int32)
+
+    # This is a bit slow, but simple and reliable
+    for i in range(masked_true.shape[0]):
+        true_label = masked_true[i]
+        pred_label = masked_pred[i]
+        if true_label < num_classes and pred_label < num_classes:
+            matrix[true_label, pred_label] += 1
+
+    # Format as Markdown table
+    command_names = list(NODE_GLYPH_COMMANDS.keys())
+    header = "| True \ Pred | " + " | ".join(command_names) + " |\n"
+    separator = "|--- " * (num_classes + 1) + "|\n"
+    body = ""
+    for i, name in enumerate(command_names):
+        row = f"| **{name}** | "
+        for j in range(num_classes):
+            row += f"{matrix[i, j].item()} | "
+        body += row + "\n"
+
+    markdown_string = header + separator + body
+
+    writer.add_text("Diagnostics/Confusion Matrix", markdown_string, epoch)
+    writer.flush()
+
+    # State is reset in the training loop

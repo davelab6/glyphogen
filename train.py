@@ -10,7 +10,14 @@ from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.tensorboard import SummaryWriter
 import random
 
-from glyphogen.callbacks import log_images, log_pretrain_rasters, log_svgs
+from glyphogen.callbacks import (
+    log_images,
+    log_pretrain_rasters,
+    log_svgs,
+    init_confusion_matrix_state,
+    collect_confusion_matrix_data,
+    log_confusion_matrix,
+)
 from glyphogen.dataset import collate_fn, get_full_model_data, get_pretrain_data
 from glyphogen.hyperparameters import (
     BATCH_SIZE,
@@ -175,7 +182,7 @@ def main(
         )
         for i, batch in enumerate(train_loader):
             optimizer.zero_grad()
-            losses = model_to_train.step(batch, step=global_step)
+            losses, _ = model_to_train.step(batch, step=global_step)
 
             if debug_grads:
                 write_gradient_norms(model_to_train, losses, writer, global_step)
@@ -205,14 +212,15 @@ def main(
         total_val_loss = 0
         loss_accumulators = defaultdict(lambda: 0.0)
         i = 0
+        cm_state = init_confusion_matrix_state()
 
         with torch.no_grad():
             for i, batch in enumerate(test_loader):
-                losses = model_to_train.step(batch, step=global_step, val=True)
+                losses, outputs = model_to_train.step(batch, step=global_step, val=True)
                 for loss_key, loss_value in losses.items():
                     loss_accumulators[loss_key] += loss_value
                 total_val_loss += losses["total_loss"].item()
-                # total_val_loss += losses["total_loss"].item()
+                collect_confusion_matrix_data(cm_state, outputs, batch[1])
 
         avg_val_loss = total_val_loss / (0.1 + i)
         avg_val_metric = loss_accumulators["raster_metric"] / (0.1 + i)
@@ -230,6 +238,7 @@ def main(
         # Callbacks
         if pre_train:
             log_pretrain_rasters(model_to_train, test_loader, writer, epoch)
+            log_confusion_matrix(cm_state, writer, epoch)
         else:
             log_images(model_to_train, test_loader, writer, epoch, pre_train)
         log_svgs(model_to_train, test_loader, writer, epoch, pre_train)
