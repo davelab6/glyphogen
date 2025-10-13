@@ -20,6 +20,7 @@ from glyphogen.hyperparameters import (
     HUBER_DELTA,
     LOSS_IMAGE_SIZE,
     RASTER_BLACK_PIXEL_WEIGHT,
+    CONTOUR_LOSS_TEMPERATURE,
 )
 from glyphogen.lstm import LSTMDecoder
 from glyphogen.rasterizer import rasterize_batch
