@@ -188,6 +188,7 @@ def main(
                 write_gradient_norms(model_to_train, losses, writer, global_step)
 
             losses["total_loss"].backward()
+            torch.nn.utils.clip_grad_norm_(model_to_train.parameters(), max_norm=1.0)
             optimizer.step()
             for loss_key, loss_value in losses.items():
                 loss_accumulators[loss_key] += loss_value.item()
