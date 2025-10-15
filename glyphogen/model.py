@@ -232,7 +232,7 @@ def point_placement_loss(
     return eos_loss, handle_loss, signed_area_loss
 
 
-def sequence_command_loss(y_true_command, y_pred_command, synonym_penalty=0.2):
+def sequence_command_loss(y_true_command, y_pred_command):
     """
     Calculates a synonym-aware command loss.
 
@@ -245,10 +245,20 @@ def sequence_command_loss(y_true_command, y_pred_command, synonym_penalty=0.2):
     command_keys = list(NODE_GLYPH_COMMANDS.keys())
     nh_set = {command_keys.index(cmd) for cmd in ["N", "NH"]}
     nv_set = {command_keys.index(cmd) for cmd in ["N", "NV"]}
-    nco_set = {command_keys.index(cmd) for cmd in ["NCO", "L"]}
     lh_set = {command_keys.index(cmd) for cmd in ["L", "LH"]}
     lv_set = {command_keys.index(cmd) for cmd in ["L", "LV"]}
-    synonym_sets = [nh_set, nv_set, nco_set, lh_set, lv_set]
+    nco_set = {command_keys.index(cmd) for cmd in ["NCO", "L"]}
+    nci_set = {command_keys.index(cmd) for cmd in ["NCI", "N"]}
+    synonym_sets = [
+        # Using unoptimized forms instead of optimized forms is kind of OK
+        (nh_set, 0.2),
+        (nv_set, 0.2),
+        (lh_set, 0.2),
+        (lv_set, 0.2),
+        # Confusions between line and node are more serious but still somewhat understandable
+        (nco_set, 0.5),
+        (nci_set, 0.5),
+    ]
 
     # Standard loss calculation setup
     true_eos_idx = find_eos(y_true_command)
@@ -276,7 +286,7 @@ def sequence_command_loss(y_true_command, y_pred_command, synonym_penalty=0.2):
     # Check for errors where both true and pred are in the same synonym set
     is_error = y_true_indices != y_pred_indices
 
-    for syn_set in synonym_sets:
+    for syn_set, penalty in synonym_sets:
         is_true_in_set = torch.zeros_like(is_error)
         is_pred_in_set = torch.zeros_like(is_error)
         for idx in syn_set:
@@ -284,7 +294,7 @@ def sequence_command_loss(y_true_command, y_pred_command, synonym_penalty=0.2):
             is_pred_in_set |= y_pred_indices == idx
 
         is_synonym_error = is_error & is_true_in_set & is_pred_in_set
-        scales[is_synonym_error] = synonym_penalty
+        scales[is_synonym_error] = penalty
 
     # Apply scaling and sequence mask
     scaled_loss = nll_loss * scales
