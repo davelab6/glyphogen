@@ -247,6 +247,8 @@ class Node:
 
     _contour: NodeContour
 
+    ALIGNMENT_EPSILON = 3
+
     def __init__(self, coordinates, contour, in_handle=None, out_handle=None):
         self.coordinates = np.array(coordinates)
         self.in_handle = np.array(in_handle) if in_handle is not None else None
@@ -270,8 +272,8 @@ class Node:
         return (
             self.in_handle is not None
             and self.out_handle is not None
-            and self.in_handle[1] == self.coordinates[1]
-            and self.coordinates[1] == self.out_handle[1]
+            and abs(self.in_handle[1] - self.coordinates[1]) <= self.ALIGNMENT_EPSILON
+            and abs(self.coordinates[1] - self.out_handle[1]) <= self.ALIGNMENT_EPSILON
         )
 
     @property
@@ -279,8 +281,8 @@ class Node:
         return (
             self.in_handle is not None
             and self.out_handle is not None
-            and self.in_handle[0] == self.coordinates[0]
-            and self.coordinates[0] == self.out_handle[0]
+            and abs(self.in_handle[0] - self.coordinates[0]) <= self.ALIGNMENT_EPSILON
+            and abs(self.coordinates[0] - self.out_handle[0]) <= self.ALIGNMENT_EPSILON
         )
 
     # Convert to optimal command representation
@@ -292,9 +294,9 @@ class Node:
         if self.in_handle is None and self.out_handle is None:
             # It's a line.
             if previous_node:  # Only check for LH/LV if coords are relative
-                if coords[1] == 0:  # Horizontal line
+                if abs(coords[1]) < self.ALIGNMENT_EPSILON:  # Horizontal line
                     return NodeCommand("LH", [coords[0].item(), 0])
-                if coords[0] == 0:  # Vertical line
+                if abs(coords[0]) < self.ALIGNMENT_EPSILON:  # Vertical line
                     return NodeCommand("LV", [coords[1].item(), 0])
             return NodeCommand("L", coords.tolist())
 
@@ -411,10 +413,11 @@ class NodeGlyph:
                 denorm_coords = (coords_slice * MAX_COORDINATE).round()
 
                 if command_str == "LH":
-                    coords = [int(denorm_coords[0])]  # Only x-delta
+                    coords = [int(denorm_coords[0]), 0]  # Only x-delta
                 elif command_str == "LV":
                     coords = [
-                        int(denorm_coords[0])
+                        int(denorm_coords[0]),
+                        0,
                     ]  # Only y-delta (coords_slice[0] is the y-delta)
                 else:
                     # Handle relative coordinates. The coordinates for push_command must be absolute.
