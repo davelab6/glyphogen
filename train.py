@@ -82,10 +82,11 @@ def main(
         device = torch.device("mps")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch._dynamo.config.capture_scalar_outputs = True
-    torch._dynamo.config.capture_dynamic_output_shape_ops = True
+    # torch._dynamo.config.capture_scalar_outputs = True
+    # torch._dynamo.config.capture_dynamic_output_shape_ops = True
     print(f"Using device: {device}")
     # torch.autograd.set_detect_anomaly(True)
+    torch.set_float32_matmul_precision("high")
 
     # Model
     if os.path.exists(model_name) and not vectorizer_model_name:
