@@ -412,10 +412,9 @@ class Decoder(nn.Module):
 
 @torch.compile(fullgraph=True)
 class VectorizationGenerator(nn.Module):
-    def __init__(self, d_model_cmd, d_model_coord, latent_dim=32, rate=0.1):
+    def __init__(self, d_model, latent_dim=32, rate=0.1):
         super().__init__()
-        self.d_model_cmd = d_model_cmd
-        self.d_model_coord = d_model_coord
+        self.d_model = d_model
         self.latent_dim = latent_dim
         self.rate = rate
 
@@ -442,12 +441,7 @@ class VectorizationGenerator(nn.Module):
         self.contour_head = nn.Linear(latent_dim, 1)
 
         self.decoder = torch.compile(
-            LSTMDecoder(
-                d_model_cmd=d_model_cmd,
-                d_model_coord=d_model_coord,
-                latent_dim=latent_dim,
-                rate=rate,
-            )
+            LSTMDecoder(d_model=d_model, latent_dim=latent_dim, rate=rate)
         )
         self.arg_counts = torch.tensor(
             list(NODE_GLYPH_COMMANDS.values()), dtype=torch.long
@@ -637,22 +631,18 @@ class VectorizationGenerator(nn.Module):
 class GlyphGenerator(nn.Module):
     """Generates a glyph raster image from a style reference and a glyph ID."""
 
-    def __init__(self, num_glyphs, d_model_cmd, d_model_coord, latent_dim=32, rate=0.1):
+    def __init__(self, num_glyphs, d_model, latent_dim=32, rate=0.1):
         super().__init__()
         self.num_glyphs = num_glyphs
         self.latent_dim = latent_dim
-        self.d_model_cmd = d_model_cmd
-        self.d_model_coord = d_model_coord
+        self.d_model = d_model
         self.rate = rate
 
         self.style_embedding = StyleEmbedding(latent_dim)
         self.glyph_id_embedding = nn.Linear(num_glyphs, latent_dim)
         self.raster_decoder = Decoder(latent_dim * 2)
         self.vectorizer = VectorizationGenerator(
-            d_model_cmd=d_model_cmd,
-            d_model_coord=d_model_coord,
-            latent_dim=latent_dim,
-            rate=rate,
+            d_model=d_model, latent_dim=latent_dim, rate=rate
         )
         self.arg_counts = torch.tensor(
             list(NODE_GLYPH_COMMANDS.values()), dtype=torch.long

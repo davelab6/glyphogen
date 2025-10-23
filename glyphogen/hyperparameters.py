@@ -1,7 +1,6 @@
 # Hyperparameters
 LATENT_DIM = 32
-D_MODEL_CMD = 64
-D_MODEL_COORD = 512
+D_MODEL = 512
 RATE = 0.3  # Specifically, the dropout rate
 EPOCHS = 100
 BATCH_SIZE = 256

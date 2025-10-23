@@ -21,8 +21,7 @@ from glyphogen.callbacks import (
 from glyphogen.dataset import collate_fn, get_full_model_data, get_pretrain_data
 from glyphogen.hyperparameters import (
     BATCH_SIZE,
-    D_MODEL_CMD,
-    D_MODEL_COORD,
+    D_MODEL,
     EPOCHS,
     LATENT_DIM,
     LEARNING_RATE,
@@ -99,8 +98,7 @@ def main(
     else:
         model = GlyphGenerator(
             num_glyphs=NUM_GLYPHS,
-            d_model_cmd=D_MODEL_CMD,
-            d_model_coord=D_MODEL_COORD,
+            d_model=D_MODEL,
             latent_dim=LATENT_DIM,
             rate=RATE,
         ).to(device)
@@ -164,7 +162,9 @@ def main(
     writer = SummaryWriter(
         f"logs/fit/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     )
-    writer.add_text("Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0)
+    writer.add_text(
+        "Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0
+    )
     best_val_metric = 0
     global_step = 0
     LOSSES = ["total_loss", "command_loss", "coord_loss"]
