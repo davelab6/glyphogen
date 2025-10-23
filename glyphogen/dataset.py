@@ -127,6 +127,7 @@ class PretrainGlyphDataset(IterableDataset):
         self.cache = {}
         self.augmentations = [{}]
         self.roll_augmentations = roll_augmentations if is_train else 0
+        random.seed(1234)
         if is_train:
             self.augmentations += [
                 {"XAUG": random.randint(0, 200), "YAUG": random.randint(-100, 100)}
@@ -175,7 +176,9 @@ class PretrainGlyphDataset(IterableDataset):
         )
         self.true_length = 0
         random.shuffle(choices)
+
         for font_file_path, char, augment in choices:
+            #print(font_file_path, char, augment)
             data = self._load_and_process_glyph(font_file_path, ord(char), augment)
             if data is not None:
                 yield data

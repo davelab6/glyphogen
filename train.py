@@ -79,6 +79,7 @@ def main(
     roll_augmentations=2,
 ):
     random.seed(1234)
+
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
@@ -88,6 +89,8 @@ def main(
     print(f"Using device: {device}")
     # torch.autograd.set_detect_anomaly(True)
     torch.set_float32_matmul_precision("high")
+
+    torch.manual_seed(1234)
 
     # Model
     if os.path.exists(model_name) and not vectorizer_model_name:
@@ -121,13 +124,18 @@ def main(
     else:
         train_dataset, test_dataset = get_full_model_data()
 
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        random.seed(worker_seed)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         collate_fn=collate_fn,
         drop_last=True,
         pin_memory=True,
-        num_workers=1,
+        worker_init_fn = seed_worker,
+        num_workers=2,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -135,7 +143,8 @@ def main(
         collate_fn=collate_fn,
         drop_last=True,
         pin_memory=True,
-        num_workers=1,
+        worker_init_fn = seed_worker,
+        num_workers=2,
     )
 
     if single_batch:
