@@ -18,7 +18,7 @@ class LSTMDecoder(nn.Module):
 
         self.command_embedding = nn.Linear(NODE_COMMAND_WIDTH, d_model)
         self.coord_embedding = nn.Linear(COORDINATE_WIDTH, d_model)
-        self.lstm = nn.LSTM(d_model + latent_dim, d_model, batch_first=True)
+        self.lstm = nn.LSTM(d_model + latent_dim, d_model, batch_first=True, dropout=rate)
         self.dropout = nn.Dropout(rate)
         self.output_command = nn.Linear(d_model, NODE_COMMAND_WIDTH)
         self.output_coords = nn.Linear(d_model + NODE_COMMAND_WIDTH, COORDINATE_WIDTH)
