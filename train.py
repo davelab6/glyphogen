@@ -31,16 +31,15 @@ from glyphogen.model import VectorizationGenerator, step
 from glyphogen.losses import SKIP_RASTERIZATION
 
 
-def dump_accumulators(accumulators, writer, epoch, batch_idx, val=False):
-    prefix = "Val" if val else "Train"
+def dump_accumulators(accumulators, writer, epoch, batch_idx):
     for key, value in accumulators.items():
         avg_value = value / (batch_idx + 1)
         if key.endswith("_loss"):
-            key = key.replace("_loss", "")
-            writer.add_scalar(f"{prefix}Loss/{key}", avg_value, epoch)
+            scalar_key = key.replace("_loss", "")
+            writer.add_scalar(f"Loss/{scalar_key}", avg_value, epoch)
         else:
-            key = key.replace("_metric", "")
-            writer.add_scalar(f"{prefix}Metric/{key}", avg_value, epoch)
+            scalar_key = key.replace("_metric", "")
+            writer.add_scalar(f"Metric/{scalar_key}", avg_value, epoch)
 
 
 def write_gradient_norms(model, losses, writer, step):
@@ -138,10 +137,13 @@ def main(
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     # Training Loop
-    writer = SummaryWriter(
-        f"logs/fit/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    train_writer = SummaryWriter(
+        f"logs/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}/train"
     )
-    writer.add_text("Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0)
+    val_writer = SummaryWriter(
+        f"logs/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}/val"
+    )
+    train_writer.add_text("Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0)
     best_val_metric = 0
     global_step = 0
     LOSSES = [
@@ -173,7 +175,7 @@ def main(
             losses, _ = step(model, batch, step=global_step)
 
             if debug_grads:
-                write_gradient_norms(model, losses, writer, global_step)
+                write_gradient_norms(model, losses, train_writer, global_step)
 
             losses["total_loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -189,13 +191,11 @@ def main(
                 ],
             )
 
-            if i % 10 == 0:
-                writer.flush()
-
             global_step += 1
         scheduler.step()
 
-        dump_accumulators(loss_accumulators, writer, epoch, i, val=False)
+        dump_accumulators(loss_accumulators, train_writer, epoch, i)
+        train_writer.flush()
         # Validation
         model.eval()
         total_val_loss = 0
@@ -205,7 +205,7 @@ def main(
 
         with torch.no_grad():
             for i, batch in enumerate(test_loader):
-                losses, outputs = model.step(batch, step=global_step, val=True)
+                losses, outputs = step(model, batch, step=global_step, val=True)
                 for loss_key, loss_value in losses.items():
                     loss_accumulators[loss_key] += loss_value
                 total_val_loss += losses["total_loss"].item()
@@ -213,7 +213,7 @@ def main(
 
         avg_val_loss = total_val_loss / (0.1 + i)
         avg_val_metric = loss_accumulators["raster_metric"] / (0.1 + i)
-        dump_accumulators(loss_accumulators, writer, epoch, i, val=True)
+        dump_accumulators(loss_accumulators, val_writer, epoch, i)
         print(
             f"Epoch {epoch}, Validation Loss: {avg_val_loss}; Metric: {avg_val_metric}"
         )
@@ -225,14 +225,19 @@ def main(
             print(f"Saved best model to {model_name}")
 
         # Callbacks
-        log_vectorizer_rasters(model, test_loader, writer, epoch)
-        log_confusion_matrix(cm_state, writer, epoch)
-        log_svgs(model, test_loader, writer, epoch)
+        log_vectorizer_rasters(model, test_loader, val_writer, epoch)
+        log_confusion_matrix(cm_state, val_writer, epoch)
+        log_svgs(model, test_loader, val_writer, epoch)
 
         # Log the learning rate
-        writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], epoch)
+        train_writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], epoch)
+        train_writer.flush()
+        val_writer.flush()
 
-    writer.close()
+    train_writer.close()
+    val_writer.close()
+
+
 
 
 if __name__ == "__main__":
