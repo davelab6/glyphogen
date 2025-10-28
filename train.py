@@ -11,26 +11,23 @@ from torch.utils.tensorboard import SummaryWriter
 import random
 
 from glyphogen.callbacks import (
-    log_images,
-    log_pretrain_rasters,
+    log_vectorizer_rasters,
     log_svgs,
     init_confusion_matrix_state,
     collect_confusion_matrix_data,
     log_confusion_matrix,
 )
-from glyphogen.dataset import collate_fn, get_full_model_data, get_pretrain_data
+from glyphogen.dataset import collate_fn, get_vectorizer_data
 from glyphogen.hyperparameters import (
     BATCH_SIZE,
     D_MODEL,
     EPOCHS,
     LATENT_DIM,
     LEARNING_RATE,
-    NUM_GLYPHS,
     RATE,
     FINAL_LEARNING_RATE,
 )
 from glyphogen.model import (
-    GlyphGenerator,
     VectorizationGenerator,
     SKIP_RASTERIZATION,
 )
@@ -68,14 +65,13 @@ def write_gradient_norms(model, losses, writer, step):
 
 
 def main(
-    model_name="glyphogen.pt",
-    pre_train=False,
+    model_name="glyphogen.vectorizer.pt",
     epochs=EPOCHS,
-    vectorizer_model_name=None,
     single_batch=False,
     debug_grads=False,
     augmentations=20,
     roll_augmentations=2,
+    load_model=False,
 ):
     random.seed(1234)
 
@@ -92,35 +88,20 @@ def main(
     torch.manual_seed(1234)
 
     # Model
-    if os.path.exists(model_name) and not vectorizer_model_name:
-        model: GlyphGenerator = torch.load(model_name, map_location=device)
+    model = VectorizationGenerator(
+        d_model=D_MODEL,
+        latent_dim=LATENT_DIM,
+        rate=RATE,
+    ).to(device)
+
+    if load_model and os.path.exists(model_name):
+        model.load_state_dict(torch.load(model_name, map_location=device))
         print(f"Loaded model from {model_name}")
-    else:
-        model = GlyphGenerator(
-            num_glyphs=NUM_GLYPHS,
-            d_model=D_MODEL,
-            latent_dim=LATENT_DIM,
-            rate=RATE,
-        ).to(device)
-
-    if vectorizer_model_name:
-        model.vectorizer.load_state_dict(
-            torch.load(vectorizer_model_name, map_location=device)
-        )
-        print(f"Loaded vectorizer from {vectorizer_model_name}")
-
-    model_to_train = model.vectorizer if pre_train else model
-    model_save_name = (
-        model_name.replace(".pt", ".vectorizer.pt") if pre_train else model_name
-    )
 
     # Data
-    if pre_train:
-        train_dataset, test_dataset = get_pretrain_data(
-            augmentations=augmentations, roll_augmentations=roll_augmentations
-        )
-    else:
-        train_dataset, test_dataset = get_full_model_data()
+    train_dataset, test_dataset = get_vectorizer_data(
+        augmentations=augmentations, roll_augmentations=roll_augmentations
+    )
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2**32
@@ -152,7 +133,7 @@ def main(
         test_loader = train_loader
 
     # Optimizer and Loss
-    optimizer = torch.optim.Adam(model_to_train.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     # Work out gamma from number of steps and start/end learning rate
     # final_learning_rate = LEARNING_RATE * (gamma ** epochs)
     gamma = (FINAL_LEARNING_RATE / LEARNING_RATE) ** (1 / epochs)
@@ -165,20 +146,21 @@ def main(
     writer.add_text("Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0)
     best_val_metric = 0
     global_step = 0
-    LOSSES = ["total_loss", "command_loss", "coord_loss"]
-    if pre_train:
-        LOSSES += [
-            "contour_count_loss",
-            "node_count_loss",
-            "handle_smoothness_loss",
-        ]
-        if not SKIP_RASTERIZATION:
-            LOSSES += ["raster_metric"]
+    LOSSES = [
+        "total_loss",
+        "command_loss",
+        "coord_loss",
+        "contour_count_loss",
+        "node_count_loss",
+        "handle_smoothness_loss",
+    ]
+    if not SKIP_RASTERIZATION:
+        LOSSES += ["raster_metric"]
     if debug_grads:
         torch._functorch.config.donated_buffer = False
     for epoch in range(epochs):
         print()
-        model_to_train.train()
+        model.train()
         loss_accumulators = defaultdict(lambda: 0.0)
         i = 0
         kbar = pkbar.Kbar(
@@ -190,13 +172,13 @@ def main(
         )
         for i, batch in enumerate(train_loader):
             optimizer.zero_grad()
-            losses, _ = model_to_train.step(batch, step=global_step)
+            losses, _ = model.step(batch, step=global_step)
 
             if debug_grads:
-                write_gradient_norms(model_to_train, losses, writer, global_step)
+                write_gradient_norms(model, losses, writer, global_step)
 
             losses["total_loss"].backward()
-            torch.nn.utils.clip_grad_norm_(model_to_train.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             for loss_key, loss_value in losses.items():
                 loss_accumulators[loss_key] += loss_value.item()
@@ -217,7 +199,7 @@ def main(
 
         dump_accumulators(loss_accumulators, writer, epoch, i, val=False)
         # Validation
-        model_to_train.eval()
+        model.eval()
         total_val_loss = 0
         loss_accumulators = defaultdict(lambda: 0.0)
         i = 0
@@ -225,7 +207,7 @@ def main(
 
         with torch.no_grad():
             for i, batch in enumerate(test_loader):
-                losses, outputs = model_to_train.step(batch, step=global_step, val=True)
+                losses, outputs = model.step(batch, step=global_step, val=True)
                 for loss_key, loss_value in losses.items():
                     loss_accumulators[loss_key] += loss_value
                 total_val_loss += losses["total_loss"].item()
@@ -241,16 +223,13 @@ def main(
         # Checkpoint
         if avg_val_metric > best_val_metric:
             best_val_metric = avg_val_metric
-            torch.save(model_to_train.state_dict(), model_save_name)
-            print(f"Saved best model to {model_save_name}")
+            torch.save(model.state_dict(), model_name)
+            print(f"Saved best model to {model_name}")
 
         # Callbacks
-        if pre_train:
-            log_pretrain_rasters(model_to_train, test_loader, writer, epoch)
-            log_confusion_matrix(cm_state, writer, epoch)
-        else:
-            log_images(model_to_train, test_loader, writer, epoch, pre_train)
-        log_svgs(model_to_train, test_loader, writer, epoch, pre_train)
+        log_vectorizer_rasters(model, test_loader, writer, epoch)
+        log_confusion_matrix(cm_state, writer, epoch)
+        log_svgs(model, test_loader, writer, epoch)
 
         # Log the learning rate
         writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], epoch)
@@ -262,24 +241,18 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Train the Glyph Generator model in PyTorch."
+        description="Train the VectorizationGenerator model in PyTorch."
     )
     parser.add_argument(
         "--model_name",
         type=str,
-        default="glyphogen.pt",
+        default="glyphogen.vectorizer.pt",
         help="Name of the model to save.",
     )
     parser.add_argument(
-        "--pre-train",
+        "--load_model",
         action="store_true",
-        help="Whether to pre-train the vectorizer.",
-    )
-    parser.add_argument(
-        "--vectorizer_model_name",
-        type=str,
-        default=None,
-        help="Name of the pre-trained vectorizer model to load.",
+        help="Whether to load a pre-existing model.",
     )
     parser.add_argument(
         "--epochs",
@@ -312,11 +285,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(
         model_name=args.model_name,
-        pre_train=args.pre_train,
         epochs=args.epochs,
         debug_grads=args.debug_grads,
         single_batch=args.single_batch,
-        vectorizer_model_name=args.vectorizer_model_name,
         augmentations=args.augmentations,
         roll_augmentations=args.roll_augmentations,
+        load_model=args.load_model,
     )

@@ -5,8 +5,8 @@ from torch.utils.data import DataLoader
 
 from glyphogen.glyph import NodeGlyph
 from glyphogen.command_defs import NODE_GLYPH_COMMANDS, NODE_COMMAND_WIDTH
-from glyphogen.dataset import GlyphDataset, collate_fn, font_files
-from glyphogen.hyperparameters import BATCH_SIZE, ALPHABET
+from glyphogen.dataset import VectorizerGlyphDataset, collate_fn, font_files
+from glyphogen.hyperparameters import ALPHABET
 
 # Get the index for the commands from the grammar
 command_keys = list(NODE_GLYPH_COMMANDS.keys())
@@ -15,11 +15,13 @@ EOS_INDEX = command_keys.index("EOS")
 NODE_COMMANDS = ["N", "NCI", "NCO", "L", "NH", "NV", "LH", "LV"]
 NODE_COMMAND_INDICES = [command_keys.index(cmd) for cmd in NODE_COMMANDS]
 
+# Set our own batch size
+BATCH_SIZE = 16
 
 @pytest.fixture(scope="module")
 def dataset():
     # It's important to load the dataset once and reuse it for all tests
-    test_dataset = GlyphDataset(font_files, ALPHABET, is_train=False)
+    test_dataset = VectorizerGlyphDataset(font_files, ALPHABET, is_train=False)
     return DataLoader(test_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
 

@@ -9,35 +9,10 @@ from .command_defs import MAX_COORDINATE, NODE_GLYPH_COMMANDS
 from .model import find_eos
 
 
-def log_images(model, test_loader, writer, epoch, pre_train=False, num_images=3):
-    if pre_train:
-        return
-
-    device = next(model.parameters()).device
-    model.eval()
-    with torch.no_grad():
-        for i, batch in enumerate(test_loader):
-            if i >= num_images:
-                break
-
-            (style_image, glyph_id, target_sequence), y = batch
-            style_image, glyph_id, target_sequence = (
-                style_image.to(device),
-                glyph_id.to(device),
-                target_sequence.to(device),
-            )
-            true_raster = y["raster"].to(device)
-
-            generated_raster = model((style_image, glyph_id, target_sequence))["raster"]
-
-            writer.add_image(f"Images/True_{i}", true_raster.squeeze(0), epoch)
-            writer.add_image(
-                f"Images/Generated_{i}", generated_raster.squeeze(0), epoch
-            )
-    writer.flush()
 
 
-def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=BATCH_SIZE):
+
+def log_vectorizer_rasters(model, test_loader, writer, epoch, num_images=BATCH_SIZE):
     device = next(model.parameters()).device
     model.eval()
     if isinstance(test_loader, list):
@@ -73,14 +48,14 @@ def log_pretrain_rasters(model, test_loader, writer, epoch, num_images=BATCH_SIZ
             overlay_image = torch.cat([red_channel, green_channel, blue_channel], dim=0)
 
             writer.add_image(
-                f"Pretrain_Images/Overlay_{i}",
+                f"Vectorizer_Images/Overlay_{i}",
                 overlay_image,
                 epoch,
             )
     writer.flush()
 
 
-def log_svgs(model, test_loader, writer, epoch, pre_train=False, num_samples=3):
+def log_svgs(model, test_loader, writer, epoch, num_samples=3):
     if epoch % 5 != 0:
         return
 
@@ -88,18 +63,9 @@ def log_svgs(model, test_loader, writer, epoch, pre_train=False, num_samples=3):
     model.eval()
     with torch.no_grad():
         batch = next(iter(test_loader))
-        if pre_train:
-            (inputs, y) = batch
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            output = model(inputs)
-        else:
-            (style_image, glyph_id, target_sequence_input), y = batch
-            style_image, glyph_id, target_sequence_input = (
-                style_image.to(device),
-                glyph_id.to(device),
-                target_sequence_input.to(device),
-            )
-            output = model((style_image, glyph_id, target_sequence_input))
+        (inputs, y) = batch
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        output = model(inputs)
 
         command_output = output["command"]
         coord_output = output["coord_absolute"]

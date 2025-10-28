@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from torch import nn
 from torchmetrics.classification import BinaryJaccardIndex
 
-from glyphogen.embedding import StyleEmbedding
 from glyphogen.command_defs import (
     NODE_GLYPH_COMMANDS,
     MAX_COORDINATE,
@@ -13,7 +12,6 @@ from glyphogen.hyperparameters import (
     CONTOUR_COUNT_WEIGHT,
     HANDLE_SMOOTHNESS_WEIGHT,
     NODE_COUNT_WEIGHT,
-    RASTER_LOSS_WEIGHT,
     SIGNED_AREA_WEIGHT,
     VECTOR_LOSS_WEIGHT_COMMAND,
     VECTOR_LOSS_WEIGHT_COORD,
@@ -309,74 +307,7 @@ def sequence_command_loss(y_true_command, y_pred_command):
     return torch.sum(masked_loss) / (torch.sum(mask) + 1e-8)
 
 
-class Decoder(nn.Module):
-    """Decodes a latent vector into a raster image."""
 
-    def __init__(self, latent_dim=32):
-        super().__init__()
-        self.latent_dim = latent_dim
-
-        self.dense = nn.Linear(latent_dim, 16 * 16 * 256)
-
-        self.deconv1 = nn.ConvTranspose2d(
-            256, 256, 3, stride=2, padding=1, output_padding=1
-        )
-        self.norm1 = nn.LayerNorm([256, 32, 32])
-        self.relu1 = nn.ReLU()
-
-        self.deconv2 = nn.ConvTranspose2d(
-            256, 128, 3, stride=2, padding=1, output_padding=1
-        )
-        self.norm2 = nn.LayerNorm([128, 64, 64])
-        self.relu2 = nn.ReLU()
-
-        self.deconv3 = nn.ConvTranspose2d(
-            128, 64, 5, stride=2, padding=2, output_padding=1
-        )
-        self.norm3 = nn.LayerNorm([64, 128, 128])
-        self.relu3 = nn.ReLU()
-
-        self.deconv4 = nn.ConvTranspose2d(
-            64, 32, 5, stride=2, padding=2, output_padding=1
-        )
-        self.norm4 = nn.LayerNorm([32, 256, 256])
-        self.relu4 = nn.ReLU()
-
-        self.deconv5 = nn.ConvTranspose2d(
-            32, 16, 7, stride=2, padding=3, output_padding=1
-        )
-        self.norm5 = nn.LayerNorm([16, 512, 512])
-        self.relu5 = nn.ReLU()
-
-        self.output_conv = nn.Conv2d(16, 1, 7, padding="same")
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, inputs):
-        x = self.dense(inputs)
-        x = x.view(-1, 256, 16, 16)
-
-        x = self.deconv1(x)
-        x = self.norm1(x)
-        x = self.relu1(x)
-
-        x = self.deconv2(x)
-        x = self.norm2(x)
-        x = self.relu2(x)
-
-        x = self.deconv3(x)
-        x = self.norm3(x)
-        x = self.relu3(x)
-
-        x = self.deconv4(x)
-        x = self.norm4(x)
-        x = self.relu4(x)
-
-        x = self.deconv5(x)
-        x = self.norm5(x)
-        x = self.relu5(x)
-
-        x = self.output_conv(x)
-        return self.sigmoid(x)
 
 
 @torch.compile(fullgraph=True)
@@ -597,133 +528,3 @@ class VectorizationGenerator(nn.Module):
         }
 
 
-class GlyphGenerator(nn.Module):
-    """Generates a glyph raster image from a style reference and a glyph ID."""
-
-    def __init__(self, num_glyphs, d_model, latent_dim=32, rate=0.1):
-        super().__init__()
-        self.num_glyphs = num_glyphs
-        self.latent_dim = latent_dim
-        self.d_model = d_model
-        self.rate = rate
-
-        self.style_embedding = StyleEmbedding(latent_dim)
-        self.glyph_id_embedding = nn.Linear(num_glyphs, latent_dim)
-        self.raster_decoder = Decoder(latent_dim * 2)
-        self.vectorizer = VectorizationGenerator(
-            d_model=d_model, latent_dim=latent_dim, rate=rate
-        )
-        self.arg_counts = torch.tensor(
-            list(NODE_GLYPH_COMMANDS.values()), dtype=torch.long
-        )
-
-    def training_step(self, batch, raster_loss_fn, command_loss_fn):
-        device = next(self.parameters()).device
-        inputs, y = batch
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        y = {k: v.to(device) for k, v in y.items()}
-
-        outputs = self(inputs)
-        raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
-        true_command, true_coord = y["command"], y["coord"]
-
-        command_loss = command_loss_fn(outputs["command"], true_command)
-        coord_loss = calculate_masked_coordinate_loss(
-            true_command, true_coord, outputs["coord"], self.arg_counts.to(device)
-        )
-
-        total_loss = (
-            RASTER_LOSS_WEIGHT * raster_loss
-            + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
-            + VECTOR_LOSS_WEIGHT_COORD * coord_loss
-        )
-        return {
-            "total_loss": total_loss,
-            "raster_loss": raster_loss,
-            "command_loss": command_loss,
-            "coord_loss": coord_loss,
-        }
-
-    def validation_step(self, batch, raster_loss_fn, command_loss_fn):
-        device = next(self.parameters()).device
-        inputs, y = batch
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        y = {k: v.to(device) for k, v in y.items()}
-
-        outputs = self(inputs)
-        raster_loss = raster_loss_fn(outputs["raster"], y["raster"])
-        true_command, true_coord = y["command"], y["coord"]
-
-        command_loss = command_loss_fn(outputs["command"], true_command)
-        coord_loss = calculate_masked_coordinate_loss(
-            true_command,
-            true_coord,
-            outputs["coord"],
-            self.arg_counts.to(device),
-        )
-
-        total_loss = (
-            RASTER_LOSS_WEIGHT * raster_loss
-            + VECTOR_LOSS_WEIGHT_COMMAND * command_loss
-            + VECTOR_LOSS_WEIGHT_COORD * coord_loss
-        )
-        return {
-            "total_loss": total_loss,
-            "raster_loss": raster_loss,
-            "command_loss": command_loss,
-            "coord_loss": coord_loss,
-        }
-
-    def forward(self, inputs):
-        style_image_input = inputs["style_image"]
-        glyph_id_input = inputs["glyph_id"]
-        target_sequence_input = inputs["target_sequence"]
-
-        _, _, z = self.style_embedding(style_image_input)
-
-        glyph_id_embedded = self.glyph_id_embedding(glyph_id_input)
-        combined = torch.cat([z, glyph_id_embedded], dim=-1)
-        generated_glyph_raster = self.raster_decoder(combined)
-
-        vectorizer_inputs = {
-            "raster_image": generated_glyph_raster,
-            "target_sequence": target_sequence_input,
-        }
-        vectorizer_output = self.vectorizer(vectorizer_inputs)
-        command_output = vectorizer_output["command"]
-        coord_output = vectorizer_output["coord_absolute"]
-
-        return {
-            "raster": generated_glyph_raster,
-            "command": command_output,
-            "coord": coord_output,
-        }
-
-
-def build_model(num_glyphs, d_model, latent_dim=32, rate=0.1):
-    return GlyphGenerator(
-        num_glyphs=num_glyphs,
-        d_model=d_model,
-        latent_dim=latent_dim,
-        rate=rate,
-    )
-
-
-if __name__ == "__main__":
-    # Example usage:
-    num_glyphs = 42
-    d_model = 512
-    model = build_model(num_glyphs, d_model)
-
-    # Create some dummy input tensors
-    style_image = torch.randn(1, 1, 40, 168)
-    glyph_id = torch.randn(1, num_glyphs)
-    target_sequence = torch.randn(1, 150, 12)
-
-    # Forward pass
-    output = model((style_image, glyph_id, target_sequence))
-
-    # Print output shapes
-    print("Raster output shape:", output["raster"].shape)
-    print("Command output shape:", output["command"].shape)
-    print("Coord output shape:", output["coord"].shape)

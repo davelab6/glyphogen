@@ -7,42 +7,33 @@ from glyphogen.hyperparameters import (
     GEN_IMAGE_SIZE,
     LATENT_DIM,
     MAX_COMMANDS,
-    NUM_GLYPHS,
     RATE,
 )
-from glyphogen.model import GlyphGenerator
+from glyphogen.model import VectorizationGenerator
 
 
 def test_output_shapes():
-    model = GlyphGenerator(
-        num_glyphs=NUM_GLYPHS,
+    model = VectorizationGenerator(
         d_model=D_MODEL,
         latent_dim=LATENT_DIM,
         rate=RATE,
     )
 
     # Dummy input data
-    style_image_input = torch.rand(BATCH_SIZE, 1, 40, 168)
-    glyph_id_input = torch.nn.functional.one_hot(
-        torch.randint(0, NUM_GLYPHS, (BATCH_SIZE,)),
-        NUM_GLYPHS,
-    ).float()
+    raster_image_input = torch.rand(BATCH_SIZE, 1, *GEN_IMAGE_SIZE)
     target_sequence_input = torch.rand(
         BATCH_SIZE, MAX_COMMANDS, NODE_COMMAND_WIDTH + COORDINATE_WIDTH
     )
 
     # Get model output
     inputs = {
-        "style_image": style_image_input,
-        "glyph_id": glyph_id_input,
+        "raster_image": raster_image_input,
         "target_sequence": target_sequence_input,
     }
     outputs = model(inputs)
-    generated_glyph_raster = outputs["raster"]
     command_output = outputs["command"]
-    coord_output = outputs["coord"]
+    coord_output = outputs["coord_absolute"]
 
     # Check output shapes
-    assert generated_glyph_raster.shape == (BATCH_SIZE, 1, *GEN_IMAGE_SIZE)
     assert command_output.shape == (BATCH_SIZE, MAX_COMMANDS, NODE_COMMAND_WIDTH)
     assert coord_output.shape == (BATCH_SIZE, MAX_COMMANDS, COORDINATE_WIDTH)

@@ -41,75 +41,7 @@ if not font_files:
     raise ValueError(f"No suitable font files found in {BASE_DIR}")
 
 
-class GlyphDataset(Dataset):
-    def __init__(self, font_files, alphabet, is_train=True):
-        self.alphabet = alphabet
-        self.font_files_train, self.font_files_test = train_test_split(
-            font_files, test_size=0.2, random_state=42, shuffle=False
-        )
-        self.font_files = self.font_files_train if is_train else self.font_files_test
-        self.data = []
-        for font_file_path in tqdm.tqdm(self.font_files, desc="Loading dataset"):
-            for i, char in enumerate(self.alphabet):
-                self.data.append((font_file_path, i, char))
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        font_file_path, glyph_index, char = self.data[idx]
-        font_file = Path(font_file_path)
-
-        try:
-            style_image = get_style_image(font_file, variation={})
-            glyph = Glyph(font_file, ord(char), location={})
-            raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
-            svg_glyph = glyph.vectorize()
-            node_glyph = svg_glyph.to_node_glyph()
-            if not node_glyph.commands:
-                print(f"No commands for {font_file_path} for char {char}")
-                return None
-            if len(node_glyph.commands) > MAX_COMMANDS:
-                print(
-                    f"Too many commands ({len(node_glyph.commands)}) for {font_file_path} for char {char}"
-                )
-                return None
-            encoded_svg = node_glyph.encode()
-            if encoded_svg is None:
-                print(f"Failed to encode SVG for {font_file_path} for char {char}")
-                return None
-
-            glyph_id_one_hot = torch.nn.functional.one_hot(
-                torch.tensor(glyph_index), NUM_GLYPHS
-            ).float()
-
-            # Ensure correct channel dimension for PyTorch
-            style_image = np.transpose(style_image, (2, 0, 1))
-            raster = np.transpose(raster, (2, 0, 1))
-
-            target_sequence = encoded_svg[:-1]
-            ground_truth = encoded_svg[1:]
-            true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
-            true_coord = ground_truth[:, NODE_COMMAND_WIDTH:]
-
-            return (
-                {
-                    "style_image": torch.from_numpy(style_image).float(),
-                    "glyph_id": glyph_id_one_hot,
-                    "target_sequence": torch.from_numpy(target_sequence).long(),
-                },
-                {
-                    "raster": torch.from_numpy(raster).float(),
-                    "command": torch.from_numpy(true_command).float(),
-                    "coord": torch.from_numpy(true_coord).float(),
-                },
-            )
-        except Exception as e:
-            print(f"Error processing {font_file_path} for char {char}: {e}")
-            return None
-
-
-class PretrainGlyphDataset(IterableDataset):
+class VectorizerGlyphDataset(IterableDataset):
     def __init__(
         self,
         font_files,
@@ -224,10 +156,10 @@ class PretrainGlyphDataset(IterableDataset):
                     "target_sequence": torch.from_numpy(target_sequence).long(),
                     "contour_count": torch.tensor(true_contour_count).float(),
                 },
-                (
-                    torch.from_numpy(true_command).float(),
-                    torch.from_numpy(true_coord).float(),
-                ),
+                {
+                    "command": torch.from_numpy(true_command).float(),
+                    "coord": torch.from_numpy(true_coord).float(),
+                },
             )
         except Exception as e:
             # print(f"Couldn't process glyph {char_ord} from {font_file_path}: {e}")
@@ -242,25 +174,19 @@ def collate_fn(batch):
         return torch.utils.data.dataloader.default_collate(batch)
 
 
-def get_full_model_data():
-    train_dataset = GlyphDataset(font_files, ALPHABET, is_train=True)
-    test_dataset = GlyphDataset(font_files, ALPHABET, is_train=False)
-    return train_dataset, test_dataset
-
-
-def get_pretrain_data(augmentations=20, roll_augmentations=2):
+def get_vectorizer_data(augmentations=20, roll_augmentations=2):
     font_files_train, font_files_test = train_test_split(
         font_files, test_size=0.2, random_state=42, shuffle=False
     )
 
-    train_dataset = PretrainGlyphDataset(
+    train_dataset = VectorizerGlyphDataset(
         font_files_train,
         ALPHABET,
         is_train=True,
         augmentations=augmentations,
         roll_augmentations=roll_augmentations,
     )
-    test_dataset = PretrainGlyphDataset(
+    test_dataset = VectorizerGlyphDataset(
         font_files_test,
         ALPHABET,
         is_train=False,
