@@ -122,21 +122,41 @@ def find_eos(command_batch):
 
 
 @torch.compile(dynamic=True)
-def signed_area(points):
+def abs_signed_area_loss(true_points, pred_points):
     """
     Calculates the signed area of a polygon using the Shoelace formula.
     The input should be a tensor of shape (N, 2) where N is the number of vertices.
+
+    We do this inefficiently in two steps because the pred points will have
+    gradients and the true points will not, which confuses the compiler
     """
-    if points.shape[0] < 3:
-        return torch.tensor(0.0, device=points.device, dtype=points.dtype)
-    x = points[:, 0]
-    y = points[:, 1]
-    return 0.5 * (
-        torch.sum(x[:-1] * y[1:])
-        + x[-1] * y[0]
-        - torch.sum(y[:-1] * x[1:])
-        - y[-1] * x[0]
-    )
+    # Compute true signed area
+    if true_points.shape[0] < 3:
+        true_signed_area = torch.tensor(0.0, device=true_points.device, dtype=true_points.dtype)
+    else:
+        x = true_points[:, 0]
+        y = true_points[:, 1]
+        true_signed_area = 0.5 * (
+            torch.sum(x[:-1] * y[1:])
+            + x[-1] * y[0]
+            - torch.sum(y[:-1] * x[1:])
+            - y[-1] * x[0]
+        )
+    
+    # Compute predicted signed area
+    if pred_points.shape[0] < 3:
+        pred_signed_area = torch.tensor(0.0, device=pred_points.device, dtype=pred_points.dtype)
+    else:
+        x = pred_points[:, 0]
+        y = pred_points[:, 1]
+        pred_signed_area = 0.5 * (
+            torch.sum(x[:-1] * y[1:])
+            + x[-1] * y[0]
+            - torch.sum(y[:-1] * x[1:])
+            - y[-1] * x[0]
+        )
+    
+    return torch.abs(true_signed_area - pred_signed_area)
 
 
 @torch.compiler.disable
@@ -212,10 +232,8 @@ def point_placement_loss(
             true_points = y_true_coord[i, start:end, :2]
             pred_points = y_pred_coord[i, start:end, :2]
 
-            true_area = signed_area(true_points)
-            pred_area = signed_area(pred_points)
-
-            signed_area_loss_total += torch.abs(true_area - pred_area)
+            area_diff = abs_signed_area_loss(true_points, pred_points)
+            signed_area_loss_total += area_diff
             num_contours_in_batch += 1
 
     if num_contours_in_batch > 0:
@@ -228,32 +246,8 @@ def point_placement_loss(
 
 def sequence_command_loss(y_true_command, y_pred_command):
     """
-    Calculates a synonym-aware command loss.
-
-    This loss function understands that some commands are functionally similar
-    (e.g., a generic Node 'N' vs. a specialized horizontal Node 'NH'). It applies
-    a smaller penalty when the model predicts a valid synonym, and the full
-    penalty for more significant errors.
+    Calculates the command loss and accuracy.
     """
-    # Define synonym sets based on the confusion matrix analysis
-    command_keys = list(NODE_GLYPH_COMMANDS.keys())
-    nh_set = {command_keys.index(cmd) for cmd in ["N", "NH"]}
-    nv_set = {command_keys.index(cmd) for cmd in ["N", "NV"]}
-    lh_set = {command_keys.index(cmd) for cmd in ["L", "LH"]}
-    lv_set = {command_keys.index(cmd) for cmd in ["L", "LV"]}
-    nco_set = {command_keys.index(cmd) for cmd in ["NCO", "L"]}
-    nci_set = {command_keys.index(cmd) for cmd in ["NCI", "N"]}
-    synonym_sets = [
-        # Using unoptimized forms instead of optimized forms is kind of OK
-        (nh_set, 0.5),
-        (nv_set, 0.5),
-        (lh_set, 0.5),
-        (lv_set, 0.5),
-        # Confusions between line and node are more serious but still somewhat understandable
-        (nco_set, 0.75),
-        (nci_set, 0.75),
-    ]
-
     # Standard loss calculation setup
     true_eos_idx = find_eos(y_true_command)
     pred_eos_idx = find_eos(y_pred_command)
@@ -277,35 +271,23 @@ def sequence_command_loss(y_true_command, y_pred_command):
         label_smoothing=0.15,
     )
 
-    # --- Synonym-aware scaling ---
-    # Start with full penalty for all tokens
-    scales = torch.ones_like(nll_loss)
-
-    # Check for errors where both true and pred are in the same synonym set
-    is_error = y_true_indices != y_pred_indices
-
-    for syn_set, penalty in synonym_sets:
-        is_true_in_set = torch.zeros_like(is_error)
-        is_pred_in_set = torch.zeros_like(is_error)
-        for idx in syn_set:
-            is_true_in_set |= y_true_indices == idx
-            is_pred_in_set |= y_pred_indices == idx
-
-        is_synonym_error = is_error & is_true_in_set & is_pred_in_set
-        scales[is_synonym_error] = penalty
-
-    # Apply scaling and sequence mask
-    scaled_loss = nll_loss * scales
-    masked_loss = scaled_loss * mask
+    # Apply sequence mask
+    masked_loss = nll_loss * mask
 
     # Normalize by the number of unmasked elements
-    return torch.sum(masked_loss) / (torch.sum(mask) + 1e-8)
+    loss = torch.sum(masked_loss) / (torch.sum(mask) + 1e-8)
 
+    # --- Accuracy Calculation ---
+    correct_predictions = (y_true_indices == y_pred_indices).float()
+    masked_correct = correct_predictions * mask
+    accuracy = torch.sum(masked_correct) / (torch.sum(mask) + 1e-8)
 
-jaccard = BinaryJaccardIndex()
+    return loss, accuracy
+
 
 
 def losses(y, inputs, outputs, step, device, arg_counts, val=False):
+    jaccard = BinaryJaccardIndex().to(device)
     (true_command, true_coord_relative) = (y["command"], y["coord"])
     raster_image_input = inputs["raster_image"]
     true_contour_count = inputs["contour_count"]
@@ -324,8 +306,11 @@ def losses(y, inputs, outputs, step, device, arg_counts, val=False):
 
     metrics = {}
 
-    command_loss = sequence_command_loss(true_command, outputs["command"])
+    command_loss, command_accuracy = sequence_command_loss(
+        true_command, outputs["command"]
+    )
     metrics["command_raw"] = command_loss.detach()
+    metrics["command_accuracy"] = command_accuracy.detach()
 
     coord_loss = calculate_masked_coordinate_loss(
         true_command,
