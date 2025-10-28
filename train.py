@@ -132,8 +132,8 @@ def main(
         collate_fn=collate_fn,
         drop_last=True,
         pin_memory=True,
-        worker_init_fn = seed_worker,
-        num_workers=2,
+        worker_init_fn=seed_worker,
+        num_workers=0,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -141,8 +141,8 @@ def main(
         collate_fn=collate_fn,
         drop_last=True,
         pin_memory=True,
-        worker_init_fn = seed_worker,
-        num_workers=2,
+        worker_init_fn=seed_worker,
+        num_workers=0,
     )
 
     if single_batch:
@@ -162,9 +162,7 @@ def main(
     writer = SummaryWriter(
         f"logs/fit/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     )
-    writer.add_text(
-        "Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0
-    )
+    writer.add_text("Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0)
     best_val_metric = 0
     global_step = 0
     LOSSES = ["total_loss", "command_loss", "coord_loss"]
