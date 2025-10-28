@@ -350,6 +350,13 @@ class NodeGlyph:
         max_coordinates = max(NodeCommand.grammar.values())
         output: List[np.ndarray] = []
 
+        # Add SOS token
+        sos_command_vector = np.zeros(command_width, dtype=np.float32)
+        sos_command_vector[NodeCommand.encode_command("SOS")] = 1.0
+        sos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
+        output.append(np.concatenate((sos_command_vector, sos_coordinates)))
+
+
         for command in self.commands:
             # One-hot encode the command
             command_vector = np.zeros(command_width, dtype=np.float32)
@@ -395,6 +402,9 @@ class NodeGlyph:
 
             if command_str == "EOS":
                 break
+
+            if command_str == "SOS":
+                continue
 
             if command_str == "SOC":
                 if cur_contour.nodes:

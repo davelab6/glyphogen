@@ -111,7 +111,7 @@ def collect_confusion_matrix_data(state, outputs, y):
     batch_size, seq_len, _ = true_command.shape
     device = true_command.device
     indices = torch.arange(seq_len, device=device).expand(batch_size, -1)
-    sequence_mask = indices < true_eos_idx.unsqueeze(1)
+    sequence_mask = indices <= true_eos_idx.unsqueeze(1)
 
     true_indices = torch.argmax(true_command, dim=-1)
     pred_indices = torch.argmax(pred_command, dim=-1)

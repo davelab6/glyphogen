@@ -10,6 +10,7 @@ BASIC_SVG_COMMANDS = {
 }
 
 NODE_GLYPH_COMMANDS = {
+    "SOS": 0,  # Start of Sequence
     "SOC": 0,  # Start of Contour
     "N": 6,  # Node with two handles (x, y, delta_hin_x, delta_hin_y, delta_hout_x, delta_hout_y)
     "NH": 4,  # Node with horizontal handles (x, y, delta_hin_x, delta_hout_x)
