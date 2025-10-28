@@ -3,3 +3,6 @@ imgcache
 *.tfds
 logs
 *.zip
+debug_gradients
+.pytest_cache
+__pycache__
