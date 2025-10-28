@@ -513,7 +513,9 @@ class Glyph:
         key = "-".join(
             [
                 str(self.unicode_id),
-                ",".join({f"{k}:{self.location[k]}" for k in sorted(self.location.keys())}),
+                ",".join(
+                    {f"{k}:{self.location[k]}" for k in sorted(self.location.keys())}
+                ),
                 str(size),
             ]
         )

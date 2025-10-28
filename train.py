@@ -27,10 +27,8 @@ from glyphogen.hyperparameters import (
     RATE,
     FINAL_LEARNING_RATE,
 )
-from glyphogen.model import (
-    VectorizationGenerator,
-    SKIP_RASTERIZATION,
-)
+from glyphogen.model import VectorizationGenerator, step
+from glyphogen.losses import SKIP_RASTERIZATION
 
 
 def dump_accumulators(accumulators, writer, epoch, batch_idx, val=False):
@@ -172,7 +170,7 @@ def main(
         )
         for i, batch in enumerate(train_loader):
             optimizer.zero_grad()
-            losses, _ = model.step(batch, step=global_step)
+            losses, _ = step(model, batch, step=global_step)
 
             if debug_grads:
                 write_gradient_norms(model, losses, writer, global_step)

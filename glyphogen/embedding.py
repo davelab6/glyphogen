@@ -2,6 +2,7 @@
 import torch
 from torch import nn
 
+
 class Sampling(nn.Module):
     """Uses (z_mean, z_log_var) to sample z, the vector encoding a font."""
 

@@ -6,10 +6,7 @@ from .glyph import NodeGlyph, NodeCommand
 import numpy as np
 from .rasterizer import rasterize_batch
 from .command_defs import MAX_COORDINATE, NODE_GLYPH_COMMANDS
-from .model import find_eos
-
-
-
+from .losses import find_eos
 
 
 def log_vectorizer_rasters(model, test_loader, writer, epoch, num_images=BATCH_SIZE):
@@ -103,6 +100,7 @@ def init_confusion_matrix_state():
         "all_masks": [],
     }
 
+
 def collect_confusion_matrix_data(state, outputs, y):
     """Collects prediction and ground truth data from a validation batch."""
     true_command, _ = y
@@ -121,6 +119,7 @@ def collect_confusion_matrix_data(state, outputs, y):
     state["all_true_indices"].append(true_indices.detach().cpu())
     state["all_pred_indices"].append(pred_indices.detach().cpu())
     state["all_masks"].append(sequence_mask.detach().cpu())
+
 
 def log_confusion_matrix(state, writer, epoch):
     """Computes and logs the confusion matrix at the end of an epoch."""
@@ -146,7 +145,7 @@ def log_confusion_matrix(state, writer, epoch):
 
     # Format as Markdown table
     command_names = list(NODE_GLYPH_COMMANDS.keys())
-    header = "| True \ Pred | " + " | ".join(command_names) + " |\n"
+    header = "| True \\ Pred | " + " | ".join(command_names) + " |\n"
     separator = "|--- " * (num_classes + 1) + "|\n"
     body = ""
     for i, name in enumerate(command_names):

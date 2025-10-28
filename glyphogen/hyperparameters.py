@@ -14,7 +14,6 @@ CONTOUR_COUNT_WEIGHT = 5.0
 NODE_COUNT_WEIGHT = 0.08
 HANDLE_SMOOTHNESS_WEIGHT = 0.0
 SIGNED_AREA_WEIGHT = 1e-6
-RASTER_BLACK_PIXEL_WEIGHT = 10.0
 RASTER_LOSS_CUTOFF = 0.05  # Only apply raster loss if raster loss less than this value
 
 # Turn stuff off again
@@ -24,7 +23,6 @@ CONTOUR_COUNT_WEIGHT = 0
 NODE_COUNT_WEIGHT = 0
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
-CONTOUR_LOSS_TEMPERATURE = 2.0
 HUBER_DELTA = 3.0
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
