@@ -513,7 +513,7 @@ class Glyph:
         key = "-".join(
             [
                 str(self.unicode_id),
-                ",".join({f"{k}:{v}" for k, v in sorted(self.location.items())}),
+                ",".join({f"{k}:{self.location[k]}" for k in sorted(self.location.keys())}),
                 str(size),
             ]
         )
@@ -528,7 +528,7 @@ class Glyph:
                 (img.squeeze(-1) * 255).astype(np.uint8), mode="L"
             )
             (cache_dir / font_base).mkdir(exist_ok=True)
-            # print("Saving", cache_dir / font_base / (key + ".png"))
+            print("Saving", font_base, key)
             pil_img.save(cache_dir / font_base / (key + ".png"))
         return img
 

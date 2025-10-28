@@ -45,7 +45,7 @@ class GlyphDataset(Dataset):
     def __init__(self, font_files, alphabet, is_train=True):
         self.alphabet = alphabet
         self.font_files_train, self.font_files_test = train_test_split(
-            font_files, test_size=0.2, random_state=42
+            font_files, test_size=0.2, random_state=42, shuffle=False
         )
         self.font_files = self.font_files_train if is_train else self.font_files_test
         self.data = []
@@ -119,19 +119,16 @@ class PretrainGlyphDataset(IterableDataset):
         roll_augmentations=0,
     ):
         self.alphabet = alphabet
-        self.font_files_train, self.font_files_test = train_test_split(
-            font_files, test_size=0.2, random_state=42
-        )
-        self.font_files = self.font_files_train if is_train else self.font_files_test
+        self.font_files = font_files
         self.is_train = is_train
         self.cache = {}
         self.augmentations = [{}]
         self.roll_augmentations = roll_augmentations if is_train else 0
         random.seed(1234)
+        augs = [(199, 12), (23, 49), (29, -99)]
         if is_train:
             self.augmentations += [
-                {"XAUG": random.randint(0, 200), "YAUG": random.randint(-100, 100)}
-                for _ in range(augmentations)
+                {"XAUG": augs[i][0], "YAUG": augs[i][1]} for i in range(augmentations)
             ]
         new_augs = []
         for roll in range(0, self.roll_augmentations + 1):
@@ -141,6 +138,7 @@ class PretrainGlyphDataset(IterableDataset):
                 new_augs.append(new_aug)
         self.augmentations = new_augs
         self.true_length = None
+        self.choices = None
 
     def __len__(self):
         if self.true_length is not None:
@@ -171,14 +169,14 @@ class PretrainGlyphDataset(IterableDataset):
             worker_total_num = 1
             worker_id = 1
 
-        choices = list(
+        self.choices = list(
             itertools.product(self.font_files, self.alphabet, self.augmentations)
         )
         self.true_length = 0
-        random.shuffle(choices)
+        random.shuffle(self.choices)
 
-        for font_file_path, char, augment in choices:
-            #print(font_file_path, char, augment)
+        for font_file_path, char, augment in self.choices:
+            # print(font_file_path, char, augment)
             data = self._load_and_process_glyph(font_file_path, ord(char), augment)
             if data is not None:
                 yield data
@@ -251,15 +249,19 @@ def get_full_model_data():
 
 
 def get_pretrain_data(augmentations=20, roll_augmentations=2):
+    font_files_train, font_files_test = train_test_split(
+        font_files, test_size=0.2, random_state=42, shuffle=False
+    )
+
     train_dataset = PretrainGlyphDataset(
-        font_files,
+        font_files_train,
         ALPHABET,
         is_train=True,
         augmentations=augmentations,
         roll_augmentations=roll_augmentations,
     )
     test_dataset = PretrainGlyphDataset(
-        font_files,
+        font_files_test,
         ALPHABET,
         is_train=False,
         augmentations=augmentations,
