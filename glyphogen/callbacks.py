@@ -103,7 +103,7 @@ def init_confusion_matrix_state():
 
 def collect_confusion_matrix_data(state, outputs, y):
     """Collects prediction and ground truth data from a validation batch."""
-    true_command, _ = y
+    true_command = y["command"]
     pred_command = outputs["command"]
 
     # Create sequence mask to ignore padding
