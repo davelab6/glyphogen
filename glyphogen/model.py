@@ -2,6 +2,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchmetrics.classification import BinaryJaccardIndex
 
 from glyphogen.embedding import StyleEmbedding
 from glyphogen.command_defs import (
@@ -251,13 +252,13 @@ def sequence_command_loss(y_true_command, y_pred_command):
     nci_set = {command_keys.index(cmd) for cmd in ["NCI", "N"]}
     synonym_sets = [
         # Using unoptimized forms instead of optimized forms is kind of OK
-        (nh_set, 0.2),
-        (nv_set, 0.2),
-        (lh_set, 0.2),
-        (lv_set, 0.2),
+        (nh_set, 0.5),
+        (nv_set, 0.5),
+        (lh_set, 0.5),
+        (lv_set, 0.5),
         # Confusions between line and node are more serious but still somewhat understandable
-        (nco_set, 0.5),
-        (nci_set, 0.5),
+        (nco_set, 0.75),
+        (nci_set, 0.75),
     ]
 
     # Standard loss calculation setup
@@ -275,8 +276,12 @@ def sequence_command_loss(y_true_command, y_pred_command):
     y_pred_indices = torch.argmax(y_pred_command, dim=-1)
 
     # Calculate per-token cross-entropy loss
+    TEMP = 1
     nll_loss = F.cross_entropy(
-        y_pred_command.permute(0, 2, 1), y_true_indices, reduction="none"
+        y_pred_command.permute(0, 2, 1) / TEMP,
+        y_true_indices,
+        reduction="none",
+        label_smoothing=0.15,
     )
 
     # --- Synonym-aware scaling ---
@@ -302,42 +307,6 @@ def sequence_command_loss(y_true_command, y_pred_command):
 
     # Normalize by the number of unmasked elements
     return torch.sum(masked_loss) / (torch.sum(mask) + 1e-8)
-
-
-def weighted_raster_loss(y_true, y_pred, black_pixel_weight=10.0):
-    """
-    Calculates a weighted Mean Squared Error (MSE) loss for raster images.
-
-    This loss function addresses the "imbalanced class" problem inherent in
-    glyph raster images, where the vast majority of pixels are white (background).
-    A standard MSE would allow the model to achieve a deceptively low loss by
-    simply outputting a blank image, as the error from the few black (foreground)
-    pixels would be averaged out over the entire image.
-
-    To counteract this, we apply a higher weight to the errors on pixels that
-    should be black. This forces the model to pay significantly more attention to
-    correctly forming the glyph's shape, rather than just getting the background
-    right.
-
-    Args:
-        y_true: The ground truth raster image (tensor).
-        y_pred: The predicted raster image (tensor).
-        black_pixel_weight: The factor by which to multiply the loss for black pixels.
-
-    Returns:
-        A single scalar tensor representing the weighted loss.
-    """
-    # Element-wise squared error
-    error = F.mse_loss(y_pred, y_true, reduction="none")
-
-    # Create a weight map. Black pixels (value closer to 1) get higher weight.
-    # We use y_true to determine where the black pixels *should* be.
-    weight_map = torch.ones_like(y_true)
-    weight_map[y_true >= 0.5] = black_pixel_weight
-
-    # Apply weights and calculate the mean
-    weighted_error = error * weight_map
-    return torch.mean(weighted_error)
 
 
 class Decoder(nn.Module):
@@ -440,6 +409,7 @@ class VectorizationGenerator(nn.Module):
         self.output_dense = nn.Linear(latent_dim, latent_dim)
         self.contour_head = nn.Linear(latent_dim, 1)
 
+        self.jaccard = BinaryJaccardIndex()
         self.decoder = torch.compile(
             LSTMDecoder(d_model=d_model, latent_dim=latent_dim, rate=rate)
         )
@@ -558,10 +528,9 @@ class VectorizationGenerator(nn.Module):
                     mode="bilinear",
                     align_corners=False,
                 )
-            raster_loss = weighted_raster_loss(
-                raster_image_input,
-                vector_rendered_images,
-                black_pixel_weight=RASTER_BLACK_PIXEL_WEIGHT,
+            raster_loss = self.jaccard(
+                vector_rendered_images < 0.2,  # Match black pixels
+                raster_image_input < 0.2,
             )
             if val:
                 metrics["raster_metric"] = (

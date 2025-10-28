@@ -19,6 +19,7 @@ dependencies = [
     "scikit-image",
     "tensorboard",
     "skia-pathops",
+    "torchmetrics",
 ]
 # Also pydiffvg but that's not on pypi!
 
