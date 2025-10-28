@@ -18,7 +18,10 @@ class LSTMDecoder(nn.Module):
 
         self.command_embedding = nn.Linear(NODE_COMMAND_WIDTH, d_model)
         self.coord_embedding = nn.Linear(COORDINATE_WIDTH, d_model)
-        self.lstm = nn.LSTM(d_model + latent_dim, d_model, batch_first=True, dropout=rate)
+        self.lstm = nn.LSTM(
+            d_model + latent_dim, d_model, batch_first=True, dropout=rate
+        )
+        self.layer_norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(rate)
         self.output_command = nn.Linear(d_model, NODE_COMMAND_WIDTH)
         self.output_coords = nn.Linear(d_model + NODE_COMMAND_WIDTH, COORDINATE_WIDTH)
@@ -46,6 +49,7 @@ class LSTMDecoder(nn.Module):
         # LSTM expects input of shape (batch, seq_len, input_size)
         # which is what we have.
         x, _ = self.lstm(x)
+        x = self.layer_norm(x)
 
         command_output = self.output_command(x)
 
