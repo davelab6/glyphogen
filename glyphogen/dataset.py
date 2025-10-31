@@ -35,8 +35,6 @@ for file in sorted(list(glob.glob(BASE_DIR + "/*/*.ttf"))):
     if ttfont["head"].unitsPerEm != 1000:
         continue
     font_files.append(file)
-    if LIMIT > 0 and len(font_files) >= LIMIT:
-        break
 if not font_files:
     raise ValueError(f"No suitable font files found in {BASE_DIR}")
 
@@ -53,6 +51,8 @@ class VectorizerGlyphDataset(IterableDataset):
         self.alphabet = alphabet
         self.font_files = font_files
         self.is_train = is_train
+        if is_train and LIMIT > 0:
+            self.font_files = self.font_files[:LIMIT]
         self.cache = {}
         self.augmentations = [{}]
         self.roll_augmentations = roll_augmentations if is_train else 0
