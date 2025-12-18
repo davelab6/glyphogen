@@ -74,7 +74,6 @@ def unroll_relative_coords(command_tensor, coord_tensor_relative):
     return coord_tensor_absolute
 
 
-@torch.compile(backend="aot_eager")
 def calculate_masked_coordinate_loss(
     y_true_command,
     y_true_coord,

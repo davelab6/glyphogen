@@ -3,6 +3,11 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from glyphogen.hyperparameters import (
+    PROJ_SIZE,
+    COMMAND_BOTTLENECK_DIM
+    )
+
 from glyphogen.command_defs import (
     NODE_COMMAND_WIDTH,
     COORDINATE_WIDTH,
@@ -14,17 +19,21 @@ class LSTMDecoder(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.latent_dim = latent_dim
+        self.proj_size = PROJ_SIZE
+        self.bottleneck_dim = COMMAND_BOTTLENECK_DIM
         self.rate = rate
 
         self.command_embedding = nn.Linear(NODE_COMMAND_WIDTH, d_model)
         self.coord_embedding = nn.Linear(COORDINATE_WIDTH, d_model)
         self.lstm = nn.LSTM(
-            d_model + latent_dim, d_model, batch_first=True, dropout=rate
+            d_model + latent_dim, d_model, batch_first=True, proj_size=self.proj_size
         )
-        self.layer_norm = nn.LayerNorm(d_model)
+        self.layer_norm = nn.LayerNorm(self.proj_size)
         self.dropout = nn.Dropout(rate)
-        self.output_command = nn.Linear(d_model, NODE_COMMAND_WIDTH)
-        self.output_coords = nn.Linear(d_model + NODE_COMMAND_WIDTH, COORDINATE_WIDTH)
+        self.output_command_bottleneck = nn.Linear(self.proj_size, self.bottleneck_dim)
+        self.output_command_activation = nn.ReLU()
+        self.output_command = nn.Linear(self.bottleneck_dim, NODE_COMMAND_WIDTH)
+        self.output_coords = nn.Linear(self.proj_size + NODE_COMMAND_WIDTH, COORDINATE_WIDTH)
         # Initialize bias to zeros to encourage zero-centered output for untrained model
         nn.init.zeros_(self.output_coords.bias)
         self.coord_output_scale = nn.Parameter(torch.tensor(0.1))
@@ -51,7 +60,9 @@ class LSTMDecoder(nn.Module):
         x, _ = self.lstm(x)
         x = self.layer_norm(x)
 
-        command_output = self.output_command(x)
+        command_head_x = self.output_command_bottleneck(x)
+        command_head_x = self.output_command_activation(command_head_x)
+        command_output = self.output_command(command_head_x)
 
         # Condition coordinate output on the command output
         coord_head_input = torch.cat([x, command_output], dim=-1)

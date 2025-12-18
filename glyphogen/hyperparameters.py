@@ -1,8 +1,10 @@
 # Hyperparameters
 LATENT_DIM = 32
-D_MODEL = 512
-RATE = 0.2  # Specifically, the dropout rate
-EPOCHS = 100
+D_MODEL = 128
+PROJ_SIZE = 64
+COMMAND_BOTTLENECK_DIM = 24
+RATE = 0.2 # Specifically, the dropout rate
+EPOCHS = 2000
 BATCH_SIZE = 256
 RASTER_LOSS_WEIGHT = 15000.0
 
@@ -33,7 +35,7 @@ GEN_IMAGE_SIZE = (512, 512)
 RASTER_IMG_SIZE = GEN_IMAGE_SIZE[0]
 STYLE_IMAGE_SIZE = (168, 40)
 MAX_COMMANDS = 50
-LIMIT = 100  # Limit the number of fonts to process for testing
+LIMIT = 0  # Limit the number of fonts to process for testing
 
 # New tokenization hyperparameters
 QUANTIZATION_BIN_SIZE = 10

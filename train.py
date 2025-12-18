@@ -30,6 +30,7 @@ from glyphogen.hyperparameters import (
 from glyphogen.model import VectorizationGenerator, step
 from glyphogen.losses import SKIP_RASTERIZATION
 
+do_validation = True
 
 def dump_accumulators(accumulators, writer, epoch, batch_idx):
     for key, value in accumulators.items():
@@ -130,6 +131,7 @@ def main(
         test_loader = train_loader
 
     # Optimizer and Loss
+    #optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay = 0.005)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     # Work out gamma from number of steps and start/end learning rate
     # final_learning_rate = LEARNING_RATE * (gamma ** epochs)
@@ -196,38 +198,39 @@ def main(
 
         dump_accumulators(loss_accumulators, train_writer, epoch, i)
         train_writer.flush()
-        # Validation
-        model.eval()
-        total_val_loss = 0
-        loss_accumulators = defaultdict(lambda: 0.0)
-        i = 0
-        cm_state = init_confusion_matrix_state()
+        if do_validation:
+            # Validation
+            model.eval()
+            total_val_loss = 0
+            loss_accumulators = defaultdict(lambda: 0.0)
+            i = 0
+            cm_state = init_confusion_matrix_state()
 
-        with torch.no_grad():
-            for i, batch in enumerate(test_loader):
-                losses, outputs = step(model, batch, step=global_step, val=True)
-                for loss_key, loss_value in losses.items():
-                    loss_accumulators[loss_key] += loss_value
-                total_val_loss += losses["total_loss"].item()
-                collect_confusion_matrix_data(cm_state, outputs, batch[1])
+            with torch.no_grad():
+                for i, batch in enumerate(test_loader):
+                    losses, outputs = step(model, batch, step=global_step, val=True)
+                    for loss_key, loss_value in losses.items():
+                        loss_accumulators[loss_key] += loss_value
+                    total_val_loss += losses["total_loss"].item()
+                    collect_confusion_matrix_data(cm_state, outputs, batch[1])
 
-        avg_val_loss = total_val_loss / (0.1 + i)
-        avg_val_metric = loss_accumulators["raster_metric"] / (0.1 + i)
-        dump_accumulators(loss_accumulators, val_writer, epoch, i)
-        print(
-            f"Epoch {epoch}, Validation Loss: {avg_val_loss}; Metric: {avg_val_metric}"
-        )
+            avg_val_loss = total_val_loss / (0.1 + i)
+            avg_val_metric = loss_accumulators["raster_metric"] / (0.1 + i)
+            dump_accumulators(loss_accumulators, val_writer, epoch, i)
+            print(
+                f"Epoch {epoch}, Validation Loss: {avg_val_loss}; Metric: {avg_val_metric}"
+            )
 
-        # Checkpoint
-        if avg_val_metric > best_val_metric:
-            best_val_metric = avg_val_metric
+            # Checkpoint
+            if avg_val_metric > best_val_metric:
+                best_val_metric = avg_val_metric
             torch.save(model.state_dict(), model_name)
             print(f"Saved best model to {model_name}")
 
-        # Callbacks
-        log_vectorizer_rasters(model, test_loader, val_writer, epoch)
-        log_confusion_matrix(cm_state, val_writer, epoch)
-        log_svgs(model, test_loader, val_writer, epoch)
+            # Callbacks
+            log_vectorizer_rasters(model, test_loader, val_writer, epoch)
+            log_confusion_matrix(cm_state, val_writer, epoch)
+            log_svgs(model, test_loader, val_writer, epoch)
 
         # Log the learning rate
         train_writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], epoch)
@@ -282,7 +285,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--roll-augmentations",
         type=int,
-        default=2,
+        default=0,
         help="Number of roll augmentations to apply.",
     )
     args = parser.parse_args()

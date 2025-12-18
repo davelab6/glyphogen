@@ -34,12 +34,14 @@ class VectorizationGenerator(nn.Module):
         self.conv5 = nn.Conv2d(128, 256, 3, padding=1, stride=2)
         self.norm5 = nn.LayerNorm([256, 16, 16])
         self.relu5 = nn.ReLU()
+        self.dropout = nn.Dropout(rate)
         self.flatten = nn.Flatten()
         self.dense = nn.Linear(256 * 16 * 16, latent_dim)
         self.norm_dense = nn.LayerNorm(latent_dim)
         self.sigmoid = nn.Sigmoid()
         self.output_dense = nn.Linear(latent_dim, latent_dim)
         self.contour_head = nn.Linear(latent_dim, 1)
+        torch.nn.init.ones_(self.contour_head.bias)
 
         self.decoder = torch.compile(
             LSTMDecoder(d_model=d_model, latent_dim=latent_dim, rate=rate)
@@ -50,31 +52,37 @@ class VectorizationGenerator(nn.Module):
 
         self.use_raster = False
 
-    @torch.compile(backend="aot_eager")
+    @torch.compile
     def encode(self, inputs):
         x = self.conv1(inputs)
         x = self.norm1(x)
         x = self.relu1(x)
+        x = self.dropout(x)
         x = self.conv2(x)
         x = self.norm2(x)
         x = self.relu2(x)
+        x = self.dropout(x)
         x = self.conv3(x)
         x = self.norm3(x)
         x = self.relu3(x)
+        x = self.dropout(x)
         x = self.conv4(x)
         x = self.norm4(x)
         x = self.relu4(x)
+        x = self.dropout(x)
         x = self.conv5(x)
         x = self.norm5(x)
         x = self.relu5(x)
+        x = self.dropout(x)
         x = self.flatten(x)
         x = self.dense(x)
+        x = self.dropout(x)
         x = self.norm_dense(x)
         x = self.sigmoid(x)
         z = self.output_dense(x)
         return z
 
-    @torch.compile(backend="aot_eager")
+    @torch.compile
     def forward(self, inputs):
         raster_image_input = inputs["raster_image"]
         target_sequence_input = inputs["target_sequence"]
