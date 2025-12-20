@@ -38,28 +38,13 @@ def unroll_relative_coords(command_tensor, coord_tensor_relative):
     current_pos = torch.zeros(
         batch_size, 2, device=device, dtype=coord_tensor_relative.dtype
     )
-    coord_tensor_absolute = torch.zeros_like(coord_tensor_relative)
+    # Initialize with relative coordinates; we'll update the first two columns.
+    coord_tensor_absolute = coord_tensor_relative.clone()
 
     for i in range(seq_len):
         is_first = is_first_node_in_contour[:, i]
 
-        current_command_indices = command_indices[:, i]
-        is_lh = current_command_indices == command_keys.index("LH")
-        is_lv = current_command_indices == command_keys.index("LV")
-
-        # For relative line commands (LH, LV), one of the deltas is zero.
-        # For normal commands, both deltas are used.
-        # The value for LH/LV is always taken from the first coordinate.
-        dx = coord_tensor_relative[:, i, 0]
-        dy = coord_tensor_relative[:, i, 1]
-
-        step_dx = torch.where(is_lv, torch.zeros_like(dx), dx)
-        step_dy = torch.where(
-            is_lh,
-            torch.zeros_like(dy),
-            torch.where(is_lv, dx, dy),  # For LV, dy is taken from the first coord
-        )
-        relative_coords_step = torch.stack([step_dx, step_dy], dim=-1)
+        relative_coords_step = coord_tensor_relative[:, i, 0:2]
 
         current_pos = torch.where(
             is_first.unsqueeze(-1).expand_as(current_pos),
@@ -67,9 +52,7 @@ def unroll_relative_coords(command_tensor, coord_tensor_relative):
             current_pos + relative_coords_step,
         )
 
-        absolute_coords_step = coord_tensor_relative[:, i, :].clone()
-        absolute_coords_step[:, 0:2] = current_pos
-        coord_tensor_absolute[:, i, :] = absolute_coords_step
+        coord_tensor_absolute[:, i, 0:2] = current_pos
 
     return coord_tensor_absolute
 
@@ -96,7 +79,10 @@ def calculate_masked_coordinate_loss(
     huber_loss = F.huber_loss(y_pred_coord, y_true_coord, reduction="none", delta=delta)
 
     # Combine the argument mask with the sequence length mask
-    combined_mask = coord_mask * sequence_mask.unsqueeze(-1)
+    pred_coord_width = y_pred_coord.shape[-1]
+    combined_mask = (
+        coord_mask[:, :, :pred_coord_width] * sequence_mask.unsqueeze(-1)
+    )
     masked_loss = huber_loss * combined_mask
 
     return torch.sum(masked_loss) / torch.sum(combined_mask)
@@ -174,13 +160,9 @@ def point_placement_loss(
     """
     command_keys = list(NODE_GLYPH_COMMANDS.keys())
     soc_index = command_keys.index("SOC")
-    n_index = command_keys.index("N")
-    nh_index = command_keys.index("NH")
-    nv_index = command_keys.index("NV")
     eos_index = command_keys.index("EOS")
     batch_size, seq_len, _ = y_true_command.shape
     y_true_command_indices = torch.argmax(y_true_command, axis=-1)
-    indices = torch.arange(seq_len, device=y_true_command.device).expand(batch_size, -1)
 
     # --- Predicted Probabilities ---
     pred_probs = F.softmax(y_pred_command, dim=-1)
@@ -193,10 +175,7 @@ def point_placement_loss(
     eos_loss = F.l1_loss(soft_len, true_eos_idx.float())
 
     # --- Handle Orientation Loss ---
-    pred_n_prob = torch.mean(pred_probs[:, :, n_index])
-    pred_nh_prob = torch.mean(pred_probs[:, :, nh_index])
-    pred_nv_prob = torch.mean(pred_probs[:, :, nv_index])
-    handle_loss = pred_n_prob - pred_nh_prob - pred_nv_prob
+    handle_loss = torch.tensor(0.0, device=y_true_command.device)
 
     # --- Signed Area Loss ---
     signed_area_loss_total = torch.tensor(0.0, device=y_true_command.device)

@@ -12,7 +12,11 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, IterableDataset
 from more_itertools import random_product
 
-from glyphogen.command_defs import COORDINATE_WIDTH, NODE_COMMAND_WIDTH
+from glyphogen.command_defs import (
+    COORDINATE_WIDTH,
+    NODE_COMMAND_WIDTH,
+    PREDICTED_COORDINATE_WIDTH,
+)
 from glyphogen.glyph import Glyph
 from glyphogen.hyperparameters import (
     ALPHABET,
@@ -47,6 +51,7 @@ class VectorizerGlyphDataset(IterableDataset):
         is_train=True,
         augmentations=0,
         roll_augmentations=0,
+        mode="vectorizer",
     ):
         self.alphabet = alphabet
         self.font_files = font_files
@@ -56,6 +61,7 @@ class VectorizerGlyphDataset(IterableDataset):
         self.cache = {}
         self.augmentations = [{}]
         self.roll_augmentations = roll_augmentations if is_train else 0
+        self.mode = mode
         random.seed(1234)
         augs = [(199, 12), (23, 49), (29, -99)]
         if is_train:
@@ -80,12 +86,6 @@ class VectorizerGlyphDataset(IterableDataset):
             f"Generating dataset with {len(self.font_files)} fonts, {len(self.alphabet)} chars, {len(self.augmentations)} augmentations"
         )
         return len(self.font_files) * len(self.alphabet) * len(self.augmentations)
-        # print("Calculating length of dataset...")
-        # with warnings.catch_warnings():
-        #     warnings.simplefilter("ignore")
-        #     for font_file_path in tqdm.tqdm(iter(self), desc="Loading dataset"):
-        #         pass
-        # return self.true_length
 
     def __iter__(self):
         if torch.utils.data.get_worker_info():
@@ -107,14 +107,15 @@ class VectorizerGlyphDataset(IterableDataset):
         self.true_length = 0
         random.shuffle(self.choices)
 
-        for font_file_path, char, augment in self.choices:
-            # print(font_file_path, char, augment)
-            data = self._load_and_process_glyph(font_file_path, ord(char), augment)
+        for i, (font_file_path, char, augment) in enumerate(self.choices):
+            # Use a unique ID across all workers if applicable
+            image_id = (worker_id -1) * len(self.choices) + i
+            data = self._load_and_process_glyph(font_file_path, ord(char), augment, image_id)
             if data is not None:
                 yield data
                 self.true_length += 1
 
-    def _load_and_process_glyph(self, font_file_path, char_ord, augment):
+    def _load_and_process_glyph(self, font_file_path, char_ord, augment, image_id):
         try:
             roll = augment.get("ROLL", 0)
             if "ROLL" in augment:
@@ -122,48 +123,81 @@ class VectorizerGlyphDataset(IterableDataset):
 
             glyph = Glyph(Path(font_file_path), int(char_ord), location=augment)
             svg_glyph = glyph.vectorize()
-            node_glyph = svg_glyph.to_node_glyph()
 
-            if not node_glyph.commands or len(node_glyph.commands) <= 1:
-                return None
-
-            true_contour_count = len(node_glyph.contours)
-
-            # Augmentation: Randomly roll the starting point of closed contours
-            if roll:
-                for contour in node_glyph.contours:
-                    if contour.nodes:
-                        contour.roll(roll)
-
-            if len(node_glyph.commands) > MAX_COMMANDS:
-                return None
-
-            encoded_svg = node_glyph.encode()
-            if encoded_svg is None or len(encoded_svg) <= 1:
-                return None
-
+            # Common part: rasterization
             raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
             raster = np.transpose(raster, (2, 0, 1))
+            raster_tensor = torch.from_numpy(raster).float()
 
-            target_sequence = encoded_svg[:-1]
-            ground_truth = encoded_svg[1:]
-            true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
-            true_coord = ground_truth[:, NODE_COMMAND_WIDTH:].astype(np.float32)
+            # Mode-specific processing
+            if self.mode == "segmentation":
+                segmentation_data = svg_glyph.get_segmentation_data()
+                if not segmentation_data:
+                    return None
 
-            return (
-                {
-                    "raster_image": torch.from_numpy(raster).float(),
-                    "target_sequence": torch.from_numpy(target_sequence).long(),
-                    "contour_count": torch.tensor(true_contour_count).float(),
-                },
-                {
-                    "command": torch.from_numpy(true_command).float(),
-                    "coord": torch.from_numpy(true_coord).float(),
-                },
-            )
+                boxes = [item["bbox"] for item in segmentation_data]
+                labels = [item["label"] + 1 for item in segmentation_data]
+                masks = [item["mask"] for item in segmentation_data]
+                
+                boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
+                areas = (boxes_tensor[:, 2] - boxes_tensor[:, 0]) * (boxes_tensor[:, 3] - boxes_tensor[:, 1])
+
+                target = {
+                    "boxes": boxes_tensor,
+                    "labels": torch.tensor(labels, dtype=torch.int64),
+                    "masks": torch.from_numpy(np.array(masks, dtype=np.uint8)),
+                    "image_id": torch.tensor([image_id]),
+                    "area": areas,
+                    "iscrowd": torch.zeros((len(boxes),), dtype=torch.int64),
+                }
+                return raster_tensor, target
+
+            elif self.mode == "vectorizer":
+                node_glyph = svg_glyph.to_node_glyph()
+
+                if not node_glyph.commands or len(node_glyph.commands) <= 1:
+                    return None
+
+                true_contour_count = len(node_glyph.contours)
+
+                # Augmentation: Randomly roll the starting point of closed contours
+                if roll:
+                    for contour in node_glyph.contours:
+                        if contour.nodes:
+                            contour.roll(roll)
+
+                if len(node_glyph.commands) > MAX_COMMANDS:
+                    return None
+
+                encoded_svg = node_glyph.encode()
+                if encoded_svg is None or len(encoded_svg) <= 1:
+                    return None
+
+                target_sequence = encoded_svg[:-1]
+                ground_truth = encoded_svg[1:]
+                true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
+                true_coord = ground_truth[
+                    :,
+                    NODE_COMMAND_WIDTH : NODE_COMMAND_WIDTH
+                    + PREDICTED_COORDINATE_WIDTH,
+                ].astype(np.float32)
+
+                return (
+                    {
+                        "raster_image": raster_tensor,
+                        "target_sequence": torch.from_numpy(target_sequence).long(),
+                        "contour_count": torch.tensor(true_contour_count).float(),
+                    },
+                    {
+                        "command": torch.from_numpy(true_command).float(),
+                        "coord": torch.from_numpy(true_coord).float(),
+                    },
+                )
+            else:
+                raise ValueError(f"Unknown dataset mode: {self.mode}")
         except Exception as e:
-            # print(f"Couldn't process glyph {char_ord} from {font_file_path}: {e}")
-            return None
+            print(f"Couldn't process glyph {char_ord} from {font_file_path}: {e}")
+            raise e
 
 
 def collate_fn(batch):
@@ -171,12 +205,18 @@ def collate_fn(batch):
         batch = [b for b in batch if b is not None]
         if not batch:
             return None, None
+        # Custom collate for segmentation data
+        if isinstance(batch[0], tuple) and isinstance(batch[0][1], dict):
+            images = [item[0] for item in batch]
+            targets = [item[1] for item in batch]
+            images = torch.stack(images, 0)
+            return images, targets
         return torch.utils.data.dataloader.default_collate(batch)
 
 
 def get_vectorizer_data(augmentations=20, roll_augmentations=2):
     font_files_train, font_files_test = train_test_split(
-        font_files, test_size=0.2, random_state=42, shuffle=False
+        font_files, test_size=0.2, random_state=42, shuffle=True
     )
 
     train_dataset = VectorizerGlyphDataset(
@@ -192,5 +232,29 @@ def get_vectorizer_data(augmentations=20, roll_augmentations=2):
         is_train=False,
         augmentations=augmentations,
         roll_augmentations=0,
+    )
+    return train_dataset, test_dataset
+
+
+def get_segmentation_data(augmentations=0):
+    font_files_train, font_files_test = train_test_split(
+        font_files, test_size=0.2, random_state=42, shuffle=True
+    )
+
+    train_dataset = VectorizerGlyphDataset(
+        font_files_train,
+        ALPHABET,
+        is_train=True,
+        augmentations=augmentations,
+        roll_augmentations=0,
+        mode="segmentation",
+    )
+    test_dataset = VectorizerGlyphDataset(
+        font_files_test,
+        ALPHABET,
+        is_train=False,
+        augmentations=augmentations,
+        roll_augmentations=0,
+        mode="segmentation",
     )
     return train_dataset, test_dataset

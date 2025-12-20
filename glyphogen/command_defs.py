@@ -13,13 +13,6 @@ NODE_GLYPH_COMMANDS = {
     "SOS": 0,  # Start of Sequence
     "SOC": 0,  # Start of Contour
     "N": 6,  # Node with two handles (x, y, delta_hin_x, delta_hin_y, delta_hout_x, delta_hout_y)
-    "NH": 4,  # Node with horizontal handles (x, y, delta_hin_x, delta_hout_x)
-    "NV": 4,  # Node with vertical handles (x, y, delta_hin_y, delta_hout_y)
-    "NCI": 4,  # Node with curve in, line out (x, y, delta_hin_x, delta_hin_y)
-    "NCO": 4,  # Node with line in, curve out (x, y, delta_hout_x, delta_hout_y)
-    "L": 2,  # Line node (x, y)
-    "LH": 2,  # Horizontal line (1 relative arg, but 2 absolute coords checked in loss)
-    "LV": 2,  # Vertical line (1 relative arg, but 2 absolute coords checked in loss)
     "EOS": 0,
 }
 
@@ -52,3 +45,5 @@ class NodeCommand(SVGCommand):
 
 NODE_COMMAND_WIDTH = len(NODE_GLYPH_COMMANDS.keys())
 COORDINATE_WIDTH = max(NODE_GLYPH_COMMANDS.values())
+PREDICTED_COORDINATE_WIDTH = 2
+

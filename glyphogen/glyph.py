@@ -13,10 +13,14 @@ from fontTools.pens.svgPathPen import SVGPathPen, pointToString
 import pathops
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.removeOverlaps import _simplify
+from kurbopy import BezPath, Point
 
+
+from PIL import Image, ImageDraw
 
 from .hyperparameters import (
     BASE_DIR,
+    GEN_IMAGE_SIZE,
     MAX_COMMANDS,
     MAX_SEQUENCE_LENGTH,
     RASTER_IMG_SIZE,
@@ -173,49 +177,15 @@ class NodeContour:
         in_handle: Optional[np.ndarray] = None
         out_handle: Optional[np.ndarray] = None
 
-        if command.command == "L":
-            position = np.array(command.coordinates)
-        elif command.command == "LH":
-            if prev_node is not None:
-                position = np.array(
-                    [
-                        prev_node.coordinates[0] + command.coordinates[0],
-                        prev_node.coordinates[1],
-                    ]
-                )
-            else:
-                # We are lenient here because we are coming from the model and want to make as many
-                # sequences as possible work
-                return  # raise ValueError("Invalid LH command: no previous node")
-        elif command.command == "LV":
-            if prev_node is not None:
-                position = np.array(
-                    [
-                        prev_node.coordinates[0],
-                        prev_node.coordinates[1] + command.coordinates[0],
-                    ]
-                )
-            else:
-                # See above
-                return  # raise ValueError("Invalid LV command: no previous node")
-        elif command.command == "NH":
+        if command.command == "N":
             position = np.array(command.coordinates[0:2])
-            in_handle = position + np.array([command.coordinates[2], 0])
-            out_handle = position + np.array([command.coordinates[3], 0])
-        elif command.command == "NV":
-            position = np.array(command.coordinates[0:2])
-            in_handle = position + np.array([0, command.coordinates[2]])
-            out_handle = position + np.array([0, command.coordinates[3]])
-        elif command.command == "NCI":
-            position = np.array(command.coordinates[0:2])
-            in_handle = position + np.array(command.coordinates[2:4])
-        elif command.command == "NCO":
-            position = np.array(command.coordinates[0:2])
-            out_handle = position + np.array(command.coordinates[2:4])
-        elif command.command == "N":
-            position = np.array(command.coordinates[0:2])
-            in_handle = position + np.array(command.coordinates[2:4])
-            out_handle = position + np.array(command.coordinates[4:6])
+            in_handle_delta = np.array(command.coordinates[2:4])
+            if not np.array_equal(in_handle_delta, np.array([0, 0])):
+                in_handle = position + in_handle_delta
+
+            out_handle_delta = np.array(command.coordinates[4:6])
+            if not np.array_equal(out_handle_delta, np.array([0, 0])):
+                out_handle = position + out_handle_delta
         else:
             # Shouldn't really be here
             return
@@ -231,9 +201,11 @@ class NodeContour:
         self.nodes = self.nodes[shift:] + self.nodes[:shift]
 
     def normalize(self) -> None:
+        if not self.nodes:
+            return
         index_of_bottom_left = min(
             range(len(self.nodes)),
-            key=lambda i: (self.nodes[i].coordinates[0], self.nodes[i].coordinates[1]),
+            key=lambda i: (self.nodes[i].coordinates[1], self.nodes[i].coordinates[0]),
         )
         self.nodes = (
             self.nodes[index_of_bottom_left:] + self.nodes[:index_of_bottom_left]
@@ -291,42 +263,17 @@ class Node:
         if previous_node:
             coords = self.coordinates - previous_node.coordinates
 
-        if self.in_handle is None and self.out_handle is None:
-            # It's a line.
-            if previous_node:  # Only check for LH/LV if coords are relative
-                if abs(coords[1]) < self.ALIGNMENT_EPSILON:  # Horizontal line
-                    return NodeCommand("LH", [coords[0].item(), 0])
-                if abs(coords[0]) < self.ALIGNMENT_EPSILON:  # Vertical line
-                    return NodeCommand("LV", [coords[1].item(), 0])
-            return NodeCommand("L", coords.tolist())
-
-        # Deal with line-to-curve and curve-to-line
-        if self.in_handle is None and self.out_handle is not None:
-            delta_hout = self.out_handle - self.coordinates
-            return NodeCommand("NCO", np.concatenate((coords, delta_hout)).tolist())
-        elif self.out_handle is None and self.in_handle is not None:
+        delta_hin = np.array([0, 0])
+        if self.in_handle is not None:
             delta_hin = self.in_handle - self.coordinates
-            return NodeCommand("NCI", np.concatenate((coords, delta_hin)).tolist())
 
-        # It's a curve. Can we do better?
-        assert self.in_handle is not None and self.out_handle is not None
-        delta_hin = self.in_handle - self.coordinates
-        delta_hout = self.out_handle - self.coordinates
+        delta_hout = np.array([0, 0])
+        if self.out_handle is not None:
+            delta_hout = self.out_handle - self.coordinates
 
-        if self.handles_horizontal:
-            return NodeCommand(
-                "NH",
-                [coords[0], coords[1], delta_hin[0], delta_hout[0]],
-            )
-        elif self.handles_vertical:
-            return NodeCommand(
-                "NV",
-                [coords[0], coords[1], delta_hin[1], delta_hout[1]],
-            )
-        else:
-            return NodeCommand(
-                "N", np.concatenate((coords, delta_hin, delta_hout)).tolist()
-            )
+        return NodeCommand(
+            "N", np.concatenate((coords, delta_hin, delta_hout)).tolist()
+        )
 
 
 class NodeGlyph:
@@ -355,7 +302,6 @@ class NodeGlyph:
         sos_command_vector[NodeCommand.encode_command("SOS")] = 1.0
         sos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
         output.append(np.concatenate((sos_command_vector, sos_coordinates)))
-
 
         for command in self.commands:
             # One-hot encode the command
@@ -396,6 +342,19 @@ class NodeGlyph:
         current_pos = np.array([0, 0])
         is_first_node_in_contour = True
 
+        if coord_tensor.shape[1] == 2:
+            if torch.is_tensor(coord_tensor):
+                padding = torch.zeros(
+                    coord_tensor.shape[0],
+                    4,
+                    device=coord_tensor.device,
+                    dtype=coord_tensor.dtype,
+                )
+                coord_tensor = torch.cat([coord_tensor, padding], dim=1)
+            else:
+                padding = np.zeros((coord_tensor.shape[0], 4), dtype=coord_tensor.dtype)
+                coord_tensor = np.concatenate([coord_tensor, padding], axis=1)
+
         for i in range(command_tensor.shape[0]):
             command_index = np.argmax(command_tensor[i])
             command_str = command_keys[command_index]
@@ -411,8 +370,11 @@ class NodeGlyph:
                     contours.append(cur_contour)
                 cur_contour = NodeContour([])
                 is_first_node_in_contour = True
+                current_pos = np.array([0, 0])
                 continue
 
+            # From here on, we assume it's a NODE command
+            command_str = "N"
             num_coords = NodeCommand.grammar[command_str]
             # Denormalize and convert to int
             coords_slice = coord_tensor[i, :num_coords]
@@ -421,24 +383,15 @@ class NodeGlyph:
 
             if relative:
                 denorm_coords = (coords_slice * MAX_COORDINATE).round()
-
-                if command_str == "LH":
-                    coords = [int(denorm_coords[0]), 0]  # Only x-delta
-                elif command_str == "LV":
-                    coords = [
-                        int(denorm_coords[0]),
-                        0,
-                    ]  # Only y-delta (coords_slice[0] is the y-delta)
+                # Handle relative coordinates. The coordinates for push_command must be absolute.
+                absolute_coords = np.copy(denorm_coords)
+                if is_first_node_in_contour:
+                    current_pos = denorm_coords[0:2]
+                    is_first_node_in_contour = False
                 else:
-                    # Handle relative coordinates. The coordinates for push_command must be absolute.
-                    absolute_coords = np.copy(denorm_coords)
-                    if is_first_node_in_contour:
-                        current_pos = denorm_coords[0:2]
-                        is_first_node_in_contour = False
-                    else:
-                        current_pos = current_pos + denorm_coords[0:2]
-                    absolute_coords[0:2] = current_pos
-                    coords = absolute_coords.astype(int).tolist()
+                    current_pos = current_pos + denorm_coords[0:2]
+                absolute_coords[0:2] = current_pos
+                coords = absolute_coords.astype(int).tolist()
             else:
                 coords = coords_slice.round().astype(int).tolist()
 
@@ -463,6 +416,13 @@ class NodeGlyph:
     def normalize(self):
         for contour in self.contours:
             contour.normalize()
+        self.contours.sort(
+            key=lambda c: (
+                (c.nodes[0].coordinates[1], c.nodes[0].coordinates[0])
+                if c.nodes
+                else (float("inf"), float("inf"))
+            )
+        )
         return self
 
 
@@ -500,6 +460,80 @@ class SVGGlyph:
             path_data.append(cmd.command)
             path_data.extend(map(lambda x: str(int(x)), cmd.coordinates))
         return " ".join(path_data)
+
+    def get_segmentation_data(self):
+        if not self.commands:
+            return []
+
+        # 1. Split into contours
+        svg_contours: List[List[SVGCommand]] = []
+        current_contour: List[SVGCommand] = []
+        for command in self.commands:
+            current_contour.append(command)
+            if command.command == "Z":
+                svg_contours.append(current_contour)
+                current_contour = []
+        if current_contour:
+            svg_contours.append(current_contour)
+
+        # 2. Convert to kurbopy.BezPath objects
+        kurbopy_contours = []
+
+        for contour_cmds in svg_contours:
+            path = BezPath()
+            for cmd in contour_cmds:
+                if cmd.command == "M":
+                    path.move_to(Point(*cmd.coordinates))
+                elif cmd.command == "L":
+                    path.line_to(Point(*cmd.coordinates))
+                elif cmd.command == "C":
+                    path.curve_to(
+                        Point(cmd.coordinates[0], cmd.coordinates[1]),
+                        Point(cmd.coordinates[2], cmd.coordinates[3]),
+                        Point(cmd.coordinates[4], cmd.coordinates[5]),
+                    )
+                elif cmd.command == "Z":
+                    path.close_path()
+            kurbopy_contours.append(path)
+        segmentation_data = []
+        for i, path_i in enumerate(kurbopy_contours):
+            if not path_i.segments()[0]:
+                continue
+
+            # 3. Get Bounding Box
+            bounds = path_i.control_box()  # (left, top, right, bottom)
+            bbox = [bounds.min_x(), bounds.min_y(), bounds.max_x(), bounds.max_y()]
+
+            # 4. Determine Contour Type
+            containment_count = 0
+            test_point = path_i.segments()[0].start()
+            for j, path_j in enumerate(kurbopy_contours):
+                if i == j:
+                    continue
+                if path_j.contains(test_point):
+                    containment_count += 1
+
+            is_hole = containment_count % 2 == 1
+
+            # 5. Generate Mask
+            points = [(pt.x, pt.y) for pt in path_i.flatten(1.0)]
+
+            img = Image.new("L", (GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1]), 0)
+            draw = ImageDraw.Draw(img)
+            if points:
+                draw.polygon(points, fill=1)
+
+            mask = np.array(img, dtype=np.uint8)
+
+            segmentation_data.append(
+                {
+                    "bbox": bbox,
+                    "label": 1 if is_hole else 0,  # 0 for outer, 1 for hole
+                    "mask": mask,
+                }
+            )
+
+        return segmentation_data
 
 
 cache_dir = Path("imgcache")

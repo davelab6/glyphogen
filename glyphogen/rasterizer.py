@@ -12,87 +12,8 @@ cmd_eos_val = command_keys.index("EOS")
 
 @torch.compiler.disable()
 def simplify_nodes(cmd, coord):
-    """Converts optimized node commands into simpler L and N commands."""
-    command_tensor = torch.argmax(cmd, dim=-1)
-
-    def get_cmd_code(c):
-        return NodeCommand.encode_command(c)
-
-    is_nh = (command_tensor == get_cmd_code("NH")).unsqueeze(-1)
-    is_nv = (command_tensor == get_cmd_code("NV")).unsqueeze(-1)
-    is_nci = (command_tensor == get_cmd_code("NCI")).unsqueeze(-1)
-    is_nco = (command_tensor == get_cmd_code("NCO")).unsqueeze(-1)
-
-    is_simplified_to_n = is_nh | is_nv | is_nci | is_nco
-    is_simplified_to_l = (command_tensor == get_cmd_code("LH")).unsqueeze(-1) | (
-        command_tensor == get_cmd_code("LV")
-    ).unsqueeze(-1)
-
-    n_cmd_code = get_cmd_code("N")
-    n_cmd_one_hot = torch.nn.functional.one_hot(
-        torch.tensor(n_cmd_code, device=cmd.device), num_classes=cmd.shape[-1]
-    ).to(cmd.dtype)
-
-    l_cmd_code = get_cmd_code("L")
-    l_cmd_one_hot = torch.nn.functional.one_hot(
-        torch.tensor(l_cmd_code, device=cmd.device), num_classes=cmd.shape[-1]
-    ).to(cmd.dtype)
-
-    new_cmd = torch.where(is_simplified_to_n, n_cmd_one_hot, cmd)
-    coord_for_nh = torch.stack(
-        [
-            coord[..., 0],
-            coord[..., 1],
-            coord[..., 2],
-            torch.zeros_like(coord[..., 3]),
-            coord[..., 3],
-            torch.zeros_like(coord[..., 5]),
-        ],
-        dim=-1,
-    )
-    coord_for_nv = torch.stack(
-        [
-            coord[..., 0],
-            coord[..., 1],
-            torch.zeros_like(coord[..., 2]),
-            coord[..., 2],
-            torch.zeros_like(coord[..., 4]),
-            coord[..., 3],
-        ],
-        dim=-1,
-    )
-    coord_for_nci = torch.stack(
-        [
-            coord[..., 0],
-            coord[..., 1],
-            coord[..., 2],
-            coord[..., 3],
-            torch.zeros_like(coord[..., 4]),
-            torch.zeros_like(coord[..., 5]),
-        ],
-        dim=-1,
-    )
-    coord_for_nco = torch.stack(
-        [
-            coord[..., 0],
-            coord[..., 1],
-            torch.zeros_like(coord[..., 2]),
-            torch.zeros_like(coord[..., 3]),
-            coord[..., 2],
-            coord[..., 3],
-        ],
-        dim=-1,
-    )
-
-    new_cmd = torch.where(is_simplified_to_l, l_cmd_one_hot, new_cmd)
-
-    new_coord = coord.clone()  # Start with original coordinates
-    new_coord = torch.where(is_nh, coord_for_nh, new_coord)
-    new_coord = torch.where(is_nv, coord_for_nv, new_coord)
-    new_coord = torch.where(is_nci, coord_for_nci, new_coord)
-    new_coord = torch.where(is_nco, coord_for_nco, new_coord)
-
-    return new_cmd, new_coord
+    """No longer needed with simplified command set."""
+    return cmd, coord
 
 
 @torch.compiler.disable()
@@ -172,6 +93,12 @@ def rasterize_batch(
     else:
         pydiffvg.set_device(cmds.device)
     coords.requires_grad_(requires_grad)
+    if coords.shape[-1] == 2:
+        padding = torch.zeros(
+            *coords.shape[:-1], 4, device=coords.device, dtype=coords.dtype
+        )
+        coords = torch.cat([coords, padding], dim=-1)
+
     dead_image = torch.ones(1, img_size, img_size, dtype=torch.float32).to(cmds.device)
     images = []
     for i in range(cmds.shape[0]):
