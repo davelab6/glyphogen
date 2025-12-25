@@ -1,12 +1,13 @@
+from glyphogen.coordinate import to_image_space
 import torch
-from .command_defs import NodeCommand, MAX_COORDINATE
+from .command_defs import NodeCommand
 from .hyperparameters import GEN_IMAGE_SIZE
 import pydiffvg
 import numpy as np
 
 command_keys = list(NodeCommand.grammar.keys())
 cmd_n_val = command_keys.index("N")
-cmd_soc_val = command_keys.index("SOC")
+cmd_sos_val = command_keys.index("SOS")
 cmd_eos_val = command_keys.index("EOS")
 
 
@@ -30,10 +31,13 @@ def nodes_to_segments(cmd, coord):
 
     for i in range(len(command_tensor)):
         command = command_tensor[i]
-        is_soc = command == cmd_soc_val
+        is_sos = command == cmd_sos_val
         is_eos = command == cmd_eos_val
 
-        if is_soc or is_eos:
+        if is_sos:
+            # Skip SOS token, it just marks the start
+            continue
+        elif is_eos:
             if len(contour_nodes) > 0:
                 # Process the collected contour
                 # First point is the start point
@@ -59,8 +63,7 @@ def nodes_to_segments(cmd, coord):
                 point_splits.append(len(all_points))
 
             contour_nodes = []
-            if is_eos:
-                break
+            break
         else:
             # It's a node, add it to the current contour
             contour_nodes.append((command, coord[i]))
@@ -83,82 +86,101 @@ def nodes_to_segments(cmd, coord):
 
 @torch.compiler.disable(recursive=False)
 def rasterize_batch(
-    cmds, coords, seed=42, img_size=None, requires_grad=True, device=None
+    contour_sequences, seed=42, img_size=None, requires_grad=True, device=None
 ):
-    """Render a batch of glyphs from their node representation."""
+    """Render a batch of glyphs from their per-contour node representation.
+
+    Args:
+        contour_sequences: List of contour sequences for each glyph in the batch.
+                          Each element is a list of (cmd_tensor, coord_tensor) tuples.
+        seed: Random seed for rendering
+        img_size: Image size for rendering
+        requires_grad: Whether gradients are needed
+        device: Device to render on
+
+    Returns:
+        Tensor of rendered images (batch_size, 1, img_size, img_size)
+    """
     if img_size is None:
         img_size = GEN_IMAGE_SIZE[0]
-    if device is not None:
-        pydiffvg.set_device(device)
-    else:
-        pydiffvg.set_device(cmds.device)
-    coords.requires_grad_(requires_grad)
-    if coords.shape[-1] == 2:
-        padding = torch.zeros(
-            *coords.shape[:-1], 4, device=coords.device, dtype=coords.dtype
-        )
-        coords = torch.cat([coords, padding], dim=-1)
 
-    dead_image = torch.ones(1, img_size, img_size, dtype=torch.float32).to(cmds.device)
+    # Determine device from first contour's commands
+    if device is None:
+        if contour_sequences and contour_sequences[0]:
+            device = contour_sequences[0][0][0].device
+        else:
+            device = torch.device("cpu")
+
+    pydiffvg.set_device(device)
+
+    dead_image = torch.ones(1, img_size, img_size, dtype=torch.float32).to(device)
     images = []
-    for i in range(cmds.shape[0]):
-        # If there's no EOS token or no SOC token, don't bother
-        found_eos = cmd_eos_val in torch.argmax(cmds[i], axis=-1)
-        found_soc = cmd_soc_val in torch.argmax(cmds[i], axis=-1)
-        if not found_eos or not found_soc:
-            # print(
-            #     f"Never found SOC {found_soc} or EOS {found_eos} token, returning blank image"
-            # )
+
+    for glyph_contours in contour_sequences:
+        if not glyph_contours:
             images.append(dead_image)
             continue
-        points, num_control_points, num_cp_splits, point_splits = nodes_to_segments(
-            cmds[i].clone(), coords[i].clone()
-        )
 
-        shapes = []
-        num_cp_start = 0
-        point_start = 0
-        baseline = 0.33 * img_size
-        # Points in the model are normalized to -1 to 1, scale them back up
-        # and shift them so the baseline is 1/3 of the way up the image
-        for num_cp_end, point_end in zip(num_cp_splits, point_splits):
-            num_cp = num_control_points[num_cp_start:num_cp_end]
-            path_points = points[
-                point_start:point_end
-            ] * img_size * 2.0 / 3.0 + torch.tensor([0, baseline], device=points.device)
-            # For my sanity we also flip them vertically
-            path_points[:, 1] = img_size - path_points[:, 1]
+        all_shapes = []
 
-            path = pydiffvg.Path(
-                num_control_points=num_cp.to(torch.int32).cpu(),
-                points=path_points.cpu(),
-                is_closed=True,
+        # Process each contour
+        for cmd_tensor, coord_tensor in glyph_contours:
+            # Ensure gradients if needed
+            if requires_grad:
+                coord_tensor = coord_tensor.clone()
+                coord_tensor.requires_grad_(True)
+
+            # Pad coordinates if needed
+            if coord_tensor.shape[-1] == 2:
+                padding = torch.zeros(
+                    *coord_tensor.shape[:-1], 4, device=device, dtype=coord_tensor.dtype
+                )
+                coord_tensor = torch.cat([coord_tensor, padding], dim=-1)
+
+            # Check for EOS token
+            found_eos = cmd_eos_val in torch.argmax(cmd_tensor, axis=-1)
+            if not found_eos:
+                continue
+
+            points, num_control_points, num_cp_splits, point_splits = nodes_to_segments(
+                cmd_tensor.clone(), coord_tensor.clone()
             )
-            shapes.append(path)
-            num_cp_start = num_cp_end
-            point_start = point_end
+
+            # Convert segments to paths
+            num_cp_start = 0
+            point_start = 0
+            for num_cp_end, point_end in zip(num_cp_splits, point_splits):
+                num_cp = num_control_points[num_cp_start:num_cp_end]
+                raw_path_points = points[point_start:point_end]
+
+                path_points = to_image_space(raw_path_points)
+
+                path = pydiffvg.Path(
+                    num_control_points=num_cp.to(torch.int32).cpu(),
+                    points=path_points.cpu(),
+                    is_closed=True,
+                )
+                all_shapes.append(path)
+                num_cp_start = num_cp_end
+                point_start = point_end
 
         # If there are no shapes, return a blank image
-        if len(shapes) == 0:
-            # print("No shapes, returning blank image")
+        if len(all_shapes) == 0:
             images.append(dead_image)
             continue
 
         path_group = pydiffvg.ShapeGroup(
-            shape_ids=torch.arange(len(shapes)),
+            shape_ids=torch.arange(len(all_shapes)),
             fill_color=torch.tensor([0.0, 0.0, 0.0, 1.0]),
-            # use_even_odd_rule=True,
         )
         shape_groups = [path_group]
         scene_args = pydiffvg.RenderFunction.serialize_scene(
-            img_size, img_size, shapes, shape_groups
+            img_size, img_size, all_shapes, shape_groups
         )
 
         render = pydiffvg.RenderFunction.apply
         try:
-            img = render(img_size, img_size, 2, 2, seed, None, *scene_args).to(
-                cmds.device
-            )
+            img = render(img_size, img_size, 2, 2, seed, None, *scene_args).to(device)
         except Exception as e:
             print(f"Failed to rasterize: {e}")
             images.append(dead_image)
@@ -172,10 +194,14 @@ def rasterize_batch(
     return torch.stack(images)
 
 
-def rasterize_and_save(cmds, coords, filename="produced.png"):
-    """Render a single glyph and save it to a file."""
-    cmds = cmds.unsqueeze(0)
-    coords = coords.unsqueeze(0)
-    images = rasterize_batch(cmds, coords)
+def rasterize_and_save(contour_sequences, filename="produced.png"):
+    """Render a single glyph and save it to a file.
+
+    Args:
+        contour_sequences: List of (cmd_tensor, coord_tensor) tuples for one glyph
+        filename: Output filename
+    """
+    # Wrap in a batch of size 1
+    images = rasterize_batch([contour_sequences])
     # imwrite expects H, W, C
     pydiffvg.imwrite(images[0].permute(1, 2, 0).cpu(), filename, gamma=1.0)

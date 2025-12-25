@@ -9,15 +9,20 @@ from torch.utils.data import DataLoader
 from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.tensorboard import SummaryWriter
 import random
+import sys
+from pathlib import Path
+
+# Add the torchvision references to the path
+sys.path.append("vision/references/detection/")
 
 from glyphogen.callbacks import (
-    log_vectorizer_rasters,
-    log_svgs,
+    log_vectorizer_outputs,
     init_confusion_matrix_state,
     collect_confusion_matrix_data,
     log_confusion_matrix,
+    log_bounding_boxes,
 )
-from glyphogen.dataset import collate_fn, get_vectorizer_data
+from glyphogen.dataset import collate_fn, get_hierarchical_data
 from glyphogen.hyperparameters import (
     BATCH_SIZE,
     D_MODEL,
@@ -28,9 +33,9 @@ from glyphogen.hyperparameters import (
     FINAL_LEARNING_RATE,
 )
 from glyphogen.model import VectorizationGenerator, step
-from glyphogen.losses import SKIP_RASTERIZATION
 
 do_validation = True
+
 
 def dump_accumulators(accumulators, writer, epoch, batch_idx):
     for key, value in accumulators.items():
@@ -67,9 +72,8 @@ def main(
     epochs=EPOCHS,
     single_batch=False,
     debug_grads=False,
-    augmentations=20,
-    roll_augmentations=2,
     load_model=False,
+    segmentation_model="glyphogen.segmenter.pt",
 ):
     random.seed(1234)
 
@@ -77,16 +81,15 @@ def main(
         device = torch.device("mps")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # torch._dynamo.config.capture_scalar_outputs = True
-    # torch._dynamo.config.capture_dynamic_output_shape_ops = True
     print(f"Using device: {device}")
-    # torch.autograd.set_detect_anomaly(True)
     torch.set_float32_matmul_precision("high")
 
     torch.manual_seed(1234)
 
     # Model
+    segmenter_state = torch.load(segmentation_model, map_location=device)
     model = VectorizationGenerator(
+        segmenter_state=segmenter_state,
         d_model=D_MODEL,
         latent_dim=LATENT_DIM,
         rate=RATE,
@@ -97,9 +100,7 @@ def main(
         print(f"Loaded model from {model_name}")
 
     # Data
-    train_dataset, test_dataset = get_vectorizer_data(
-        augmentations=augmentations, roll_augmentations=roll_augmentations
-    )
+    train_dataset, test_dataset = get_hierarchical_data()
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2**32
@@ -127,11 +128,11 @@ def main(
     if single_batch:
         print("Reducing dataset for overfitting test")
         loader_iter = iter(train_loader)
-        train_loader = [next(loader_iter)] * 32  # for _ in range(32)]
-        test_loader = train_loader
+        train_loader = [next(loader_iter) for _ in range(16)]
+        test_loader = train_loader  # Use the same batches for validation
 
     # Optimizer and Loss
-    #optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay = 0.005)
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay = 0.005)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     # Work out gamma from number of steps and start/end learning rate
     # final_learning_rate = LEARNING_RATE * (gamma ** epochs)
@@ -145,19 +146,11 @@ def main(
     val_writer = SummaryWriter(
         f"logs/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}/val"
     )
-    train_writer.add_text("Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0)
+    train_writer.add_text(
+        "Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0
+    )
     best_val_metric = 0
     global_step = 0
-    LOSSES = [
-        "total_loss",
-        "command_loss",
-        "coord_loss",
-        "contour_count_loss",
-        "node_count_loss",
-        "handle_smoothness_loss",
-    ]
-    if not SKIP_RASTERIZATION:
-        LOSSES += ["raster_metric"]
     if debug_grads:
         torch._functorch.config.donated_buffer = False
     for epoch in range(epochs):
@@ -174,7 +167,7 @@ def main(
         )
         for i, batch in enumerate(train_loader):
             optimizer.zero_grad()
-            losses, _ = step(model, batch, step=global_step)
+            losses, _ = step(model, batch)
 
             if debug_grads:
                 write_gradient_norms(model, losses, train_writer, global_step)
@@ -188,7 +181,7 @@ def main(
             kbar.update(
                 i,
                 values=[
-                    (label.replace("_loss", ""), losses[label])
+                    (label.replace("_loss", ""), losses[label].item())
                     for label in losses.keys()
                 ],
             )
@@ -206,13 +199,27 @@ def main(
             i = 0
             cm_state = init_confusion_matrix_state()
 
+            kbar = pkbar.Kbar(
+                target=len(test_loader),
+                epoch=epoch,
+                num_epochs=epochs,
+                width=8,
+                always_stateful=False,
+            )
             with torch.no_grad():
                 for i, batch in enumerate(test_loader):
-                    losses, outputs = step(model, batch, step=global_step, val=True)
+                    losses, outputs = step(model, batch)
                     for loss_key, loss_value in losses.items():
                         loss_accumulators[loss_key] += loss_value
                     total_val_loss += losses["total_loss"].item()
                     collect_confusion_matrix_data(cm_state, outputs, batch[1])
+                    kbar.update(
+                        i,
+                        values=[
+                            (label.replace("_loss", ""), losses[label])
+                            for label in losses.keys()
+                        ],
+                    )
 
             avg_val_loss = total_val_loss / (0.1 + i)
             avg_val_metric = loss_accumulators["raster_metric"] / (0.1 + i)
@@ -228,9 +235,9 @@ def main(
             print(f"Saved best model to {model_name}")
 
             # Callbacks
-            log_vectorizer_rasters(model, test_loader, val_writer, epoch)
+            log_bounding_boxes(model, test_loader, val_writer, epoch)
+            log_vectorizer_outputs(model, test_loader, val_writer, epoch)
             log_confusion_matrix(cm_state, val_writer, epoch)
-            log_svgs(model, test_loader, val_writer, epoch)
 
         # Log the learning rate
         train_writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], epoch)
@@ -239,8 +246,6 @@ def main(
 
     train_writer.close()
     val_writer.close()
-
-
 
 
 if __name__ == "__main__":
@@ -254,6 +259,12 @@ if __name__ == "__main__":
         type=str,
         default="glyphogen.vectorizer.pt",
         help="Name of the model to save.",
+    )
+    parser.add_argument(
+        "--segmentation-model",
+        type=str,
+        default="glyphogen.segmenter.pt",
+        help="Name of the segmentation model to load.",
     )
     parser.add_argument(
         "--load_model",
@@ -276,25 +287,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to log gradient norms for debugging.",
     )
-    parser.add_argument(
-        "--augmentations",
-        type=int,
-        default=0,
-        help="Number of augmentations to apply.",
-    )
-    parser.add_argument(
-        "--roll-augmentations",
-        type=int,
-        default=0,
-        help="Number of roll augmentations to apply.",
-    )
     args = parser.parse_args()
     main(
         model_name=args.model_name,
         epochs=args.epochs,
         debug_grads=args.debug_grads,
         single_batch=args.single_batch,
-        augmentations=args.augmentations,
-        roll_augmentations=args.roll_augmentations,
         load_model=args.load_model,
+        segmentation_model=args.segmentation_model,
     )

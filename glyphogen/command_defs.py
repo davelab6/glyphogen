@@ -11,9 +11,8 @@ BASIC_SVG_COMMANDS = {
 
 NODE_GLYPH_COMMANDS = {
     "SOS": 0,  # Start of Sequence
-    "SOC": 0,  # Start of Contour
     "N": 6,  # Node with two handles (x, y, delta_hin_x, delta_hin_y, delta_hout_x, delta_hout_y)
-    "EOS": 0,
+    "EOS": 0,  # End of Sequence
 }
 
 MAX_COORDINATE = 1000
@@ -46,4 +45,3 @@ class NodeCommand(SVGCommand):
 NODE_COMMAND_WIDTH = len(NODE_GLYPH_COMMANDS.keys())
 COORDINATE_WIDTH = max(NODE_GLYPH_COMMANDS.values())
 PREDICTED_COORDINATE_WIDTH = 2
-

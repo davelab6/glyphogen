@@ -3,6 +3,7 @@ from time import sleep
 from typing import Dict, List, Optional
 
 import diskcache
+from glyphogen.coordinate import to_image_space
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
@@ -21,20 +22,11 @@ from PIL import Image, ImageDraw
 from .hyperparameters import (
     BASE_DIR,
     GEN_IMAGE_SIZE,
-    MAX_COMMANDS,
     MAX_SEQUENCE_LENGTH,
     RASTER_IMG_SIZE,
 )
 from .rasterizer import rasterize_batch
-from .rendering import render
-from .command_defs import (
-    BASIC_SVG_COMMANDS,
-    NODE_GLYPH_COMMANDS,
-    SVGCommand,
-    NodeCommand,
-    MAX_COORDINATE,
-)
-from .model import unroll_relative_coords
+from .command_defs import SVGCommand, NodeCommand
 
 
 class AbsoluteSVGPathPen(SVGPathPen):
@@ -64,7 +56,7 @@ class NodeContour:
 
         node_commands = [self.nodes[0].command()]
         for i in range(1, len(self.nodes)):
-            node_commands.append(self.nodes[i].command(previous_node=self.nodes[i - 1]))
+            node_commands.append(self.nodes[i].command())
         return node_commands
 
     @property
@@ -258,10 +250,8 @@ class Node:
         )
 
     # Convert to optimal command representation
-    def command(self, previous_node: Optional["Node"] = None) -> NodeCommand:
+    def command(self) -> NodeCommand:
         coords = self.coordinates
-        if previous_node:
-            coords = self.coordinates - previous_node.coordinates
 
         delta_hin = np.array([0, 0])
         if self.in_handle is not None:
@@ -278,133 +268,135 @@ class Node:
 
 class NodeGlyph:
     contours: List[NodeContour]
+    origin: str
 
-    def __init__(self, contours: List[NodeContour]):
+    def __init__(self, contours: List[NodeContour], origin="unknown"):
         self.contours = contours
+        self.origin = origin
 
     @property
     def commands(self) -> List[NodeCommand]:
+        """
+        Returns all commands for the entire glyph as a single stream.
+        Deprecated: Use encode() which returns per-contour sequences.
+        """
         cmds = []
         for contour in self.contours:
-            cmds.append(NodeCommand("SOC", []))
             cmds.extend(contour.commands)
         return cmds
 
-    def encode(self) -> Optional[npt.NDArray[np.float32]]:
-        # We one-hot encode the commands
+    def encode(self) -> Optional[List[npt.NDArray[np.float32]]]:
+        """
+        Encodes the glyph as a list of sequences, one per contour.
+        Each sequence contains: [SOS, N, N, ..., EOS]
+
+        Returns:
+            A list of numpy arrays, one per contour. Each array has shape (seq_len, command_width + coord_width).
+            Returns None if any contour is too long.
+        """
         command_width = len(NodeCommand.grammar.keys())
-        # And we pad the coordinates to a fixed length
         max_coordinates = max(NodeCommand.grammar.values())
-        output: List[np.ndarray] = []
 
-        # Add SOS token
-        sos_command_vector = np.zeros(command_width, dtype=np.float32)
-        sos_command_vector[NodeCommand.encode_command("SOS")] = 1.0
-        sos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
-        output.append(np.concatenate((sos_command_vector, sos_coordinates)))
+        contour_sequences = []
 
-        for command in self.commands:
-            # One-hot encode the command
-            command_vector = np.zeros(command_width, dtype=np.float32)
-            command_vector[NodeCommand.encode_command(command.command)] = 1.0
-            # Normalize and pad the coordinates
-            norm_coords = (
-                np.array(command.coordinates, dtype=np.float32) / MAX_COORDINATE
-            )
-            padded_coords = np.pad(
-                norm_coords, (0, max_coordinates - len(command.coordinates))
-            )
-            output.append(np.concatenate((command_vector, padded_coords)))
+        for contour in self.contours:
+            output: List[np.ndarray] = []
 
-        # Add EOS token
-        eos_command_vector = np.zeros(command_width, dtype=np.float32)
-        eos_command_vector[NodeCommand.encode_command("EOS")] = 1.0
-        eos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
-        output.append(np.concatenate((eos_command_vector, eos_coordinates)))
-        encoded_glyph = np.array(output, dtype=np.float32)
+            # Add SOS token at the start of this contour
+            sos_command_vector = np.zeros(command_width, dtype=np.float32)
+            sos_command_vector[NodeCommand.encode_command("SOS")] = 1.0
+            sos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
+            output.append(np.concatenate((sos_command_vector, sos_coordinates)))
 
-        # Pad vector representation or skip
-        if encoded_glyph.shape[0] > MAX_SEQUENCE_LENGTH:
-            return
-        elif encoded_glyph.shape[0] < MAX_SEQUENCE_LENGTH:
-            padding = np.zeros(
-                (MAX_SEQUENCE_LENGTH - encoded_glyph.shape[0], encoded_glyph.shape[1]),
-                dtype=np.float32,
-            )
-            encoded_glyph = np.vstack((encoded_glyph, padding))
-        return encoded_glyph
+            # Add all node commands for this contour
+            for command in contour.commands:
+                # One-hot encode the command
+                command_vector = np.zeros(command_width, dtype=np.float32)
+                command_vector[NodeCommand.encode_command(command.command)] = 1.0
+                # Pad the coordinates
+                norm_coords = np.array(command.coordinates, dtype=np.float32)
+                padded_coords = np.pad(
+                    norm_coords, (0, max_coordinates - len(command.coordinates))
+                )
+                output.append(np.concatenate((command_vector, padded_coords)))
+
+            # Add EOS token at the end of this contour
+            eos_command_vector = np.zeros(command_width, dtype=np.float32)
+            eos_command_vector[NodeCommand.encode_command("EOS")] = 1.0
+            eos_coordinates = np.zeros(max_coordinates, dtype=np.float32)
+            output.append(np.concatenate((eos_command_vector, eos_coordinates)))
+
+            encoded_contour = np.array(output, dtype=np.float32)
+
+            # Check if contour is too long
+            if encoded_contour.shape[0] > MAX_SEQUENCE_LENGTH:
+                return None
+
+            contour_sequences.append(encoded_contour)
+
+        return contour_sequences if contour_sequences else None
 
     @classmethod
-    def from_numpy(cls, command_tensor, coord_tensor, relative: bool = True):
+    def from_numpy(cls, contour_sequences: List):
+        """
+        Decode a list of command/coordinate sequences into a NodeGlyph.
+        Coordinates are assumed to be absolute.
+
+        Args:
+            contour_sequences: List of (command_tensor, coord_tensor) tuples, one per contour
+
+        Returns:
+            NodeGlyph instance
+        """
         contours: List[NodeContour] = []
         command_keys = list(NodeCommand.grammar.keys())
-        cur_contour = NodeContour([])
-        current_pos = np.array([0, 0])
-        is_first_node_in_contour = True
 
-        if coord_tensor.shape[1] == 2:
-            if torch.is_tensor(coord_tensor):
-                padding = torch.zeros(
-                    coord_tensor.shape[0],
-                    4,
-                    device=coord_tensor.device,
-                    dtype=coord_tensor.dtype,
-                )
-                coord_tensor = torch.cat([coord_tensor, padding], dim=1)
-            else:
-                padding = np.zeros((coord_tensor.shape[0], 4), dtype=coord_tensor.dtype)
-                coord_tensor = np.concatenate([coord_tensor, padding], axis=1)
+        for command_tensor, coord_tensor in contour_sequences:
+            cur_contour = NodeContour([])
 
-        for i in range(command_tensor.shape[0]):
-            command_index = np.argmax(command_tensor[i])
-            command_str = command_keys[command_index]
-
-            if command_str == "EOS":
-                break
-
-            if command_str == "SOS":
-                continue
-
-            if command_str == "SOC":
-                if cur_contour.nodes:
-                    contours.append(cur_contour)
-                cur_contour = NodeContour([])
-                is_first_node_in_contour = True
-                current_pos = np.array([0, 0])
-                continue
-
-            # From here on, we assume it's a NODE command
-            command_str = "N"
-            num_coords = NodeCommand.grammar[command_str]
-            # Denormalize and convert to int
-            coords_slice = coord_tensor[i, :num_coords]
-            if torch.is_tensor(coords_slice):
-                coords_slice = coords_slice.cpu().numpy()
-
-            if relative:
-                denorm_coords = (coords_slice * MAX_COORDINATE).round()
-                # Handle relative coordinates. The coordinates for push_command must be absolute.
-                absolute_coords = np.copy(denorm_coords)
-                if is_first_node_in_contour:
-                    current_pos = denorm_coords[0:2]
-                    is_first_node_in_contour = False
+            # Pad coordinates to 6 dimensions if needed
+            if coord_tensor.shape[1] == 2:
+                if torch.is_tensor(coord_tensor):
+                    padding = torch.zeros(
+                        coord_tensor.shape[0],
+                        4,
+                        device=coord_tensor.device,
+                        dtype=coord_tensor.dtype,
+                    )
+                    coord_tensor = torch.cat([coord_tensor, padding], dim=1)
                 else:
-                    current_pos = current_pos + denorm_coords[0:2]
-                absolute_coords[0:2] = current_pos
-                coords = absolute_coords.astype(int).tolist()
-            else:
-                coords = coords_slice.round().astype(int).tolist()
+                    padding = np.zeros(
+                        (coord_tensor.shape[0], 4), dtype=coord_tensor.dtype
+                    )
+                    coord_tensor = np.concatenate([coord_tensor, padding], axis=1)
 
-            cur_contour.push_command(NodeCommand(command_str, coords))
-        if cur_contour.nodes:
-            contours.append(cur_contour)
+            for i in range(command_tensor.shape[0]):
+                command_index = np.argmax(command_tensor[i].cpu().numpy())
+                command_str = command_keys[command_index]
+
+                if command_str in ["EOS", "SOS"]:
+                    continue
+
+                # From here on, we assume it's a NODE command
+                command_str = "N"
+                num_coords = NodeCommand.grammar[command_str]
+                coords_slice = coord_tensor[i, :num_coords]
+                if torch.is_tensor(coords_slice):
+                    coords_slice = coords_slice.cpu().numpy()
+
+                coords = coords_slice.round().astype(int).tolist()
+                cur_contour.push_command(NodeCommand(command_str, coords))
+
+            if cur_contour.nodes:
+                contours.append(cur_contour)
+
         return cls(contours)
 
     def to_svg_glyph(self) -> "SVGGlyph":
         svg_commands: List[SVGCommand] = []
         for contour in self.contours:
             svg_commands.extend(contour.svg_commands)
-        return SVGGlyph(svg_commands)
+        return SVGGlyph(svg_commands, self.origin)
 
     def to_debug_string(self):
         path_data: List[str] = []
@@ -428,15 +420,17 @@ class NodeGlyph:
 
 class SVGGlyph:
     commands: List[SVGCommand]
+    origin: str
 
-    def __init__(self, commands):
+    def __init__(self, commands, origin="unknown"):
         if commands and commands[0].command != "M":
             raise ValueError("SVG path must start with a 'M' command")
         self.commands = commands
+        self.origin = origin
 
     def to_node_glyph(self) -> "NodeGlyph":
         if not self.commands:
-            return NodeGlyph([])
+            return NodeGlyph([], self.origin)
 
         svg_contours: List[List[SVGCommand]] = []
         current_contour = []
@@ -449,7 +443,8 @@ class SVGGlyph:
             svg_contours.append(current_contour)
 
         node_glyph = NodeGlyph(
-            [NodeContour.from_svg_contour(contour) for contour in svg_contours]
+            [NodeContour.from_svg_contour(contour) for contour in svg_contours],
+            self.origin,
         )
         node_glyph.normalize()
         return node_glyph
@@ -461,7 +456,7 @@ class SVGGlyph:
             path_data.extend(map(lambda x: str(int(x)), cmd.coordinates))
         return " ".join(path_data)
 
-    def get_segmentation_data(self):
+    def to_bezpaths(self) -> List[BezPath]:
         if not self.commands:
             return []
 
@@ -495,16 +490,38 @@ class SVGGlyph:
                 elif cmd.command == "Z":
                     path.close_path()
             kurbopy_contours.append(path)
+        return kurbopy_contours
+
+    def get_segmentation_data(self):
         segmentation_data = []
+        kurbopy_contours = self.to_bezpaths()
         for i, path_i in enumerate(kurbopy_contours):
-            if not path_i.segments()[0]:
+            segs = path_i.segments()
+            if not segs or not segs[0]:
                 continue
 
-            # 3. Get Bounding Box
-            bounds = path_i.control_box()  # (left, top, right, bottom)
-            bbox = [bounds.min_x(), bounds.min_y(), bounds.max_x(), bounds.max_y()]
+            # 3. Flatten path and transform to image space
+            font_space_points = [(pt.x, pt.y) for pt in path_i.flatten(1.0)]
+            if not font_space_points:
+                continue
 
-            # 4. Determine Contour Type
+            points_tensor = torch.tensor(font_space_points)
+            image_space_points_tensor = to_image_space(points_tensor)
+            image_space_points = image_space_points_tensor.tolist()
+
+            # 4. Get Bounding Box in image space
+            bbox = image_space_points_tensor.get_bounds()
+
+            # Check for zero-width or zero-height bounding boxes
+            width = bbox[2] - bbox[0]
+            height = bbox[3] - bbox[1]
+            if width <= 0 or height <= 0:
+                print(
+                    f"Warning: Skipping contour with zero width/height in {self.origin}. Bbox: {bbox}"
+                )
+                continue
+
+            # 5. Determine Contour Type (can be done in font space)
             containment_count = 0
             test_point = path_i.segments()[0].start()
             for j, path_j in enumerate(kurbopy_contours):
@@ -512,17 +529,12 @@ class SVGGlyph:
                     continue
                 if path_j.contains(test_point):
                     containment_count += 1
-
             is_hole = containment_count % 2 == 1
 
-            # 5. Generate Mask
-            points = [(pt.x, pt.y) for pt in path_i.flatten(1.0)]
-
+            # 6. Generate Mask in image space
             img = Image.new("L", (GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1]), 0)
             draw = ImageDraw.Draw(img)
-            if points:
-                draw.polygon(points, fill=1)
-
+            draw.polygon(image_space_points, fill=1)
             mask = np.array(img, dtype=np.uint8)
 
             segmentation_data.append(
@@ -580,29 +592,27 @@ class Glyph:
 
     def _rasterize(self, size: int) -> npt.NDArray[np.float64]:
         node_glyph = self.vectorize().to_node_glyph()
-        encoded_glyph = node_glyph.encode()
+        contour_sequences = node_glyph.encode()
 
-        if encoded_glyph is None:
+        if contour_sequences is None:
             # Handle glyphs that are too complex
             return np.zeros((size, size, 1), dtype=np.float64)
 
-        encoded_tensor = torch.from_numpy(encoded_glyph).float()
-
         command_width = len(NodeCommand.grammar.keys())
 
-        cmds_tensor = encoded_tensor[:, :command_width]
-        coords_tensor = encoded_tensor[:, command_width:]
+        # Convert each contour sequence to tensors and split into commands/coords
+        contour_tensors = []
+        for encoded_contour in contour_sequences:
+            encoded_tensor = torch.from_numpy(encoded_contour).float()
+            cmds_tensor = encoded_tensor[:, :command_width]
+            coords_tensor = encoded_tensor[:, command_width:]
 
-        # Add batch dimension
-        cmds_tensor = cmds_tensor.unsqueeze(0)
-        coords_tensor = coords_tensor.unsqueeze(0)
+            # The coords_tensor now contains absolute coordinates.
+            contour_tensors.append((cmds_tensor, coords_tensor))
 
-        coord_tensor_absolute = unroll_relative_coords(cmds_tensor, coords_tensor)
-
-        # Rasterize
+        # Rasterize all contours as a single glyph
         image_tensor = rasterize_batch(
-            cmds_tensor,
-            coord_tensor_absolute,
+            [contour_tensors],
             img_size=size,
             requires_grad=False,
             device=torch.device("cpu"),
@@ -651,9 +661,4 @@ class Glyph:
                 for i in range(1, len(coords), 2):
                     coords[i] += int(self.location["YAUG"])
             path.append(SVGCommand(cmd, coords))
-        return SVGGlyph(path)
-
-
-def simplify(glyph):
-    glyph.draw(pathPen)
-    path = _simplify(path)
+        return SVGGlyph(path, "%s, %s" % (self.font_file, chr(self.unicode_id)))

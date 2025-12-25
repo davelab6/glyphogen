@@ -1,35 +1,17 @@
-import glob
-import itertools
-from pathlib import Path
-import random
-import os
-
-import numpy as np
+from PIL import Image
 import torch
-import tqdm
+from torchvision.datasets import CocoDetection
+import glob
 from fontTools.ttLib import TTFont
-from sklearn.model_selection import train_test_split
-from torch.utils.data import Dataset, IterableDataset
-from more_itertools import random_product
+import torchvision.transforms.v2 as T
 
-from glyphogen.command_defs import (
-    COORDINATE_WIDTH,
-    NODE_COMMAND_WIDTH,
-    PREDICTED_COORDINATE_WIDTH,
-)
-from glyphogen.glyph import Glyph
-from glyphogen.hyperparameters import (
-    ALPHABET,
-    BASE_DIR,
-    GEN_IMAGE_SIZE,
-    LIMIT,
-    NUM_GLYPHS,
-    MAX_COMMANDS,
-)
-from glyphogen.rendering import get_style_image
+from glyphogen.hyperparameters import BASE_DIR
+
+# This file is now much simpler as it's only used by the hierarchical model.
+# The original dataset logic is preserved in the history.
 
 font_files = []
-BANNED = ["noto", "bitcount", "nabla", "jersey", "rubik", "winky", "bungee"]
+BANNED = ["noto", "bitcount", "nabla", "jersey", "rubik", "winky", "bungee", "adobe"]
 for file in sorted(list(glob.glob(BASE_DIR + "/*/*.ttf"))):
     if any(ban in file.lower() for ban in BANNED):
         continue
@@ -43,218 +25,97 @@ if not font_files:
     raise ValueError(f"No suitable font files found in {BASE_DIR}")
 
 
-class VectorizerGlyphDataset(IterableDataset):
-    def __init__(
-        self,
-        font_files,
-        alphabet: list[str],
-        is_train=True,
-        augmentations=0,
-        roll_augmentations=0,
-        mode="vectorizer",
-    ):
-        self.alphabet = alphabet
-        self.font_files = font_files
-        self.is_train = is_train
-        if is_train and LIMIT > 0:
-            self.font_files = self.font_files[:LIMIT]
-        self.cache = {}
-        self.augmentations = [{}]
-        self.roll_augmentations = roll_augmentations if is_train else 0
-        self.mode = mode
-        random.seed(1234)
-        augs = [(199, 12), (23, 49), (29, -99)]
-        if is_train:
-            self.augmentations += [
-                {"XAUG": augs[i][0], "YAUG": augs[i][1]} for i in range(augmentations)
-            ]
-        new_augs = []
-        for roll in range(0, self.roll_augmentations + 1):
-            for aug in self.augmentations:
-                new_aug = aug.copy()
-                new_aug["ROLL"] = roll
-                new_augs.append(new_aug)
-        self.augmentations = new_augs
-        self.true_length = None
-        self.choices = None
+class GlyphCocoDataset(CocoDetection):
+    """
+    A map-style dataset for the hierarchical vectorization model.
+    It loads data from a COCO-style JSON file and provides ground truth
+    for each contour (box, mask, and vector sequence).
+    """
 
-    def __len__(self):
-        if self.true_length is not None:
-            return self.true_length
-        # Guess
-        print(
-            f"Generating dataset with {len(self.font_files)} fonts, {len(self.alphabet)} chars, {len(self.augmentations)} augmentations"
-        )
-        return len(self.font_files) * len(self.alphabet) * len(self.augmentations)
+    def __init__(self, root, annFile, transforms=None):
+        super().__init__(root, annFile)
+        self.transforms = transforms
 
-    def __iter__(self):
-        if torch.utils.data.get_worker_info():
-            worker_total_num = torch.utils.data.get_worker_info().num_workers
-            worker_id = torch.utils.data.get_worker_info().id
-            # Split the font files between workers
-            if worker_total_num > 1:
-                font_files_per_worker = np.array_split(
-                    self.font_files, worker_total_num
-                )[worker_id]
-                self.font_files = font_files_per_worker.tolist()
+    def __getitem__(self, index):
+        img, target_anns = super().__getitem__(index)
+        img_id = self.ids[index]
+
+        # For the hierarchical model, we want a list of targets, one per contour.
+        targets = []
+        if not target_anns:
+            # Return the image and an empty list if there are no annotations
+            pass
         else:
-            worker_total_num = 1
-            worker_id = 1
+            for ann in target_anns:
+                box = torch.as_tensor(ann["bbox"], dtype=torch.float32)
+                # convert from [x, y, w, h] to [x1, y1, x2, y2]
+                box[2:] += box[:2]
 
-        self.choices = list(
-            itertools.product(self.font_files, self.alphabet, self.augmentations)
-        )
-        self.true_length = 0
-        random.shuffle(self.choices)
+                # The sequence was saved as a list of lists, convert back to tensor
+                sequence = torch.tensor(ann["sequence"], dtype=torch.float32)
 
-        for i, (font_file_path, char, augment) in enumerate(self.choices):
-            # Use a unique ID across all workers if applicable
-            image_id = (worker_id -1) * len(self.choices) + i
-            data = self._load_and_process_glyph(font_file_path, ord(char), augment, image_id)
-            if data is not None:
-                yield data
-                self.true_length += 1
-
-    def _load_and_process_glyph(self, font_file_path, char_ord, augment, image_id):
-        try:
-            roll = augment.get("ROLL", 0)
-            if "ROLL" in augment:
-                del augment["ROLL"]
-
-            glyph = Glyph(Path(font_file_path), int(char_ord), location=augment)
-            svg_glyph = glyph.vectorize()
-
-            # Common part: rasterization
-            raster = glyph.rasterize(GEN_IMAGE_SIZE[0])
-            raster = np.transpose(raster, (2, 0, 1))
-            raster_tensor = torch.from_numpy(raster).float()
-
-            # Mode-specific processing
-            if self.mode == "segmentation":
-                segmentation_data = svg_glyph.get_segmentation_data()
-                if not segmentation_data:
-                    return None
-
-                boxes = [item["bbox"] for item in segmentation_data]
-                labels = [item["label"] + 1 for item in segmentation_data]
-                masks = [item["mask"] for item in segmentation_data]
-                
-                boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
-                areas = (boxes_tensor[:, 2] - boxes_tensor[:, 0]) * (boxes_tensor[:, 3] - boxes_tensor[:, 1])
-
-                target = {
-                    "boxes": boxes_tensor,
-                    "labels": torch.tensor(labels, dtype=torch.int64),
-                    "masks": torch.from_numpy(np.array(masks, dtype=np.uint8)),
-                    "image_id": torch.tensor([image_id]),
-                    "area": areas,
-                    "iscrowd": torch.zeros((len(boxes),), dtype=torch.int64),
-                }
-                return raster_tensor, target
-
-            elif self.mode == "vectorizer":
-                node_glyph = svg_glyph.to_node_glyph()
-
-                if not node_glyph.commands or len(node_glyph.commands) <= 1:
-                    return None
-
-                true_contour_count = len(node_glyph.contours)
-
-                # Augmentation: Randomly roll the starting point of closed contours
-                if roll:
-                    for contour in node_glyph.contours:
-                        if contour.nodes:
-                            contour.roll(roll)
-
-                if len(node_glyph.commands) > MAX_COMMANDS:
-                    return None
-
-                encoded_svg = node_glyph.encode()
-                if encoded_svg is None or len(encoded_svg) <= 1:
-                    return None
-
-                target_sequence = encoded_svg[:-1]
-                ground_truth = encoded_svg[1:]
-                true_command = ground_truth[:, :NODE_COMMAND_WIDTH]
-                true_coord = ground_truth[
-                    :,
-                    NODE_COMMAND_WIDTH : NODE_COMMAND_WIDTH
-                    + PREDICTED_COORDINATE_WIDTH,
-                ].astype(np.float32)
-
-                return (
+                targets.append(
                     {
-                        "raster_image": raster_tensor,
-                        "target_sequence": torch.from_numpy(target_sequence).long(),
-                        "contour_count": torch.tensor(true_contour_count).float(),
-                    },
-                    {
-                        "command": torch.from_numpy(true_command).float(),
-                        "coord": torch.from_numpy(true_coord).float(),
-                    },
+                        "box": box,
+                        "label": torch.tensor(ann["category_id"], dtype=torch.int64),
+                        "mask": torch.as_tensor(
+                            self.coco.annToMask(ann), dtype=torch.uint8
+                        ),
+                        "sequence": sequence,
+                    }
                 )
-            else:
-                raise ValueError(f"Unknown dataset mode: {self.mode}")
-        except Exception as e:
-            print(f"Couldn't process glyph {char_ord} from {font_file_path}: {e}")
-            raise e
+
+        # Sort targets by bounding box position (top-to-bottom, left-to-right)
+        # This ensures a canonical order that matches our model's normalization.
+        targets.sort(key=lambda t: (t["box"][1], t["box"][0]))
+
+        if self.transforms is not None:
+            # Note: transforms will need to handle a list of targets
+            img, targets = self.transforms(img, targets)
+
+        # The training loop's `step` function expects a tuple of (image, target_dict)
+        return img, {"image_id": img_id, "gt_contours": targets}
 
 
 def collate_fn(batch):
-    with torch.profiler.record_function("collate"):
-        batch = [b for b in batch if b is not None]
-        if not batch:
-            return None, None
-        # Custom collate for segmentation data
-        if isinstance(batch[0], tuple) and isinstance(batch[0][1], dict):
-            images = [item[0] for item in batch]
-            targets = [item[1] for item in batch]
-            images = torch.stack(images, 0)
-            return images, targets
-        return torch.utils.data.dataloader.default_collate(batch)
+    """
+    Standard collate_fn for object detection tasks.
+    It does not try to stack the targets, but returns them as a list of dicts.
+    """
+    return tuple(zip(*batch))
 
 
-def get_vectorizer_data(augmentations=20, roll_augmentations=2):
-    font_files_train, font_files_test = train_test_split(
-        font_files, test_size=0.2, random_state=42, shuffle=True
-    )
-
-    train_dataset = VectorizerGlyphDataset(
-        font_files_train,
-        ALPHABET,
-        is_train=True,
-        augmentations=augmentations,
-        roll_augmentations=roll_augmentations,
-    )
-    test_dataset = VectorizerGlyphDataset(
-        font_files_test,
-        ALPHABET,
-        is_train=False,
-        augmentations=augmentations,
-        roll_augmentations=0,
-    )
-    return train_dataset, test_dataset
+def get_transform(train):
+    """
+    Defines the transformations to be applied to the dataset.
+    """
+    transforms = []
+    # The ToTensor transform is now applied inside the dataset __getitem__
+    if train:
+        # We can add more augmentations here later
+        # transforms.append(T.RandomHorizontalFlip(0.5))
+        pass
+    transforms.append(T.ToTensor())
+    return T.Compose(transforms)
 
 
-def get_segmentation_data(augmentations=0):
-    font_files_train, font_files_test = train_test_split(
-        font_files, test_size=0.2, random_state=42, shuffle=True
+def get_hierarchical_data():
+    """
+    Creates and returns DataLoaders for the hierarchical training task.
+    """
+    from pathlib import Path
+
+    DATA_DIR = Path("data")
+    TRAIN_IMG_DIR = DATA_DIR / "images_hierarchical" / "train"
+    TEST_IMG_DIR = DATA_DIR / "images_hierarchical" / "test"
+    TRAIN_JSON = DATA_DIR / "train_hierarchical.json"
+    TEST_JSON = DATA_DIR / "test_hierarchical.json"
+
+    train_dataset = GlyphCocoDataset(
+        root=TRAIN_IMG_DIR, annFile=TRAIN_JSON, transforms=get_transform(train=True)
+    )
+    test_dataset = GlyphCocoDataset(
+        root=TEST_IMG_DIR, annFile=TEST_JSON, transforms=get_transform(train=False)
     )
 
-    train_dataset = VectorizerGlyphDataset(
-        font_files_train,
-        ALPHABET,
-        is_train=True,
-        augmentations=augmentations,
-        roll_augmentations=0,
-        mode="segmentation",
-    )
-    test_dataset = VectorizerGlyphDataset(
-        font_files_test,
-        ALPHABET,
-        is_train=False,
-        augmentations=augmentations,
-        roll_augmentations=0,
-        mode="segmentation",
-    )
     return train_dataset, test_dataset
