@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 import random
-from glyphogen.coordinate import FontSpaceCoordinates, ImageSpaceCoordinates
+from glyphogen.coordinate import (
+    to_image_space,
+)
 import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -80,21 +82,11 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                 # Transform sequence coordinates from font units to image space
                 encoded_contour = torch.from_numpy(contour_sequences[i]).float()
                 commands = encoded_contour[:, :NODE_COMMAND_WIDTH]
-                coords_font_space = FontSpaceCoordinates(
-                    encoded_contour[:, NODE_COMMAND_WIDTH:]
-                )
-
-                # Reshape to (N, 2) for transformation
-                num_points = coords_font_space.shape[0]
-                coords_reshaped: FontSpaceCoordinates = coords_font_space.reshape(-1, 2)
-
+                coords_font_space = encoded_contour[:, NODE_COMMAND_WIDTH:]
                 # Normalize and transform
-                coords_img_space_reshaped: ImageSpaceCoordinates = (
-                    coords_reshaped.to_image_space()
-                )
+                coords_img_space = to_image_space(coords_font_space)
 
                 # Reshape back and recombine
-                coords_img_space = coords_img_space_reshaped.reshape(num_points, -1)
                 sequence_img_space = torch.cat([commands, coords_img_space], dim=-1)
                 sequence_as_list = sequence_img_space.tolist()
 
@@ -133,7 +125,7 @@ def main():
     for font in font_files:
         for char in ALPHABET:
             all_glyphs.append((font, char))
-            if len(all_glyphs) >= 3000:
+            if len(all_glyphs) >= 5000:
                 break
 
     random.seed(42)

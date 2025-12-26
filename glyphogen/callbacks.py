@@ -1,5 +1,7 @@
 import random
 from glyphogen.coordinate import to_image_space
+from glyphogen.losses import align_sequences
+from glyphogen.rasterizer import rasterize_batch
 import torch
 from torchvision.utils import draw_bounding_boxes
 
@@ -53,46 +55,9 @@ def log_vectorizer_outputs(
                 ]
 
                 # Decode to NodeGlyph
-                decoded_glyph = NodeGlyph.from_numpy(contour_sequences)
-
-                # Convert to SVG and rasterize
-                svg_glyph = decoded_glyph.to_svg_glyph()
-                kurbopy_contours = svg_glyph.to_bezpaths()
-
-                # Flatten and transform points for rasterization
-                all_points = []
-                for path in kurbopy_contours:
-                    font_space_points = [(pt.x, pt.y) for pt in path.flatten(1.0)]
-                    all_points.extend(font_space_points)
-
-                if all_points:
-                    points_tensor = torch.tensor(all_points)
-                    image_space_points = to_image_space(points_tensor)
-                    # Create PIL image for rasterization
-                    from PIL import Image, ImageDraw
-
-                    pil_img = Image.new("L", (img.shape[-1], img.shape[-2]), 0)
-                    draw = ImageDraw.Draw(pil_img)
-
-                    # Draw each contour
-                    start_idx = 0
-                    for path in kurbopy_contours:
-                        path_points = [(pt.x, pt.y) for pt in path.flatten(1.0)]
-                        num_points = len(path_points)
-                        contour_points = image_space_points[
-                            start_idx : start_idx + num_points
-                        ].tolist()
-                        if len(contour_points) >= 2:
-                            draw.polygon(contour_points, fill=1)
-                        start_idx += num_points
-
-                    predicted_raster = (
-                        torch.from_numpy(np.array(pil_img, dtype=np.float32) / 255.0)
-                        .unsqueeze(0)
-                        .to(device)
-                    )
-                else:
-                    predicted_raster = torch.ones_like(img[0:1])
+                predicted_raster = rasterize_batch([contour_sequences], device=device)[
+                    0
+                ]
             else:
                 # If model predicts no contours, show a blank image
                 predicted_raster = torch.ones_like(img[0:1])
@@ -103,8 +68,9 @@ def log_vectorizer_outputs(
             true_inv = 1.0 - img[0:1, :, :]  # Take first channel and keep dims
             zeros = torch.zeros_like(predicted_inv)
 
-            overlay_image = torch.cat([predicted_inv, true_inv, zeros], dim=0)
-            writer.add_image(f"Vectorizer_Images/Overlay_{i}", overlay_image, epoch)
+            # overlay_image = torch.cat([predicted_inv, true_inv, zeros], dim=0)
+            # writer.add_image(f"Vectorizer_Images/Overlay_{i}", overlay_image, epoch)
+            writer.add_image(f"Vectorizer_Images/Overlay_{i}", predicted_raster, epoch)
 
             # --- Log SVG Outputs (if enabled and epoch matches) ---
             if log_svgs and not skip_svgs:
@@ -161,33 +127,28 @@ def collect_confusion_matrix_data(state, outputs_list, targets_tuple):
 
         gt_contours = y["gt_contours"]
         pred_commands_list = outputs.get("pred_commands", [])
+        pred_coords_img_space_list = outputs["pred_coords_img_space"]
 
         num_contours_to_compare = min(len(gt_contours), len(pred_commands_list))
 
         for j in range(num_contours_to_compare):
             pred_command = pred_commands_list[j]
+            pred_coords_img_space = pred_coords_img_space_list[j]
             gt_sequence = gt_contours[j]["sequence"]
+            (
+                gt_command_for_loss,
+                _,
+                pred_command_for_loss,
+                _,
+            ) = align_sequences(
+                gt_sequence.device,
+                gt_sequence,
+                pred_command,
+                pred_coords_img_space,
+            )
 
-            command_width = len(NODE_GLYPH_COMMANDS)
-            gt_command = gt_sequence[:, :command_width]
-
-            # Align sequence lengths for comparison
-            gt_len = gt_command.shape[0]
-            pred_len = pred_command.shape[0]
-
-            if pred_len > gt_len:
-                pred_command = pred_command[:gt_len]
-            elif gt_len > pred_len:
-                pad_len = gt_len - pred_len
-                pad_command = torch.zeros(
-                    pad_len, pred_command.shape[1], device=pred_command.device
-                )
-                pad_command[:, -1] = 1  # Pad with EOS token
-                pred_command = torch.cat([pred_command, pad_command], dim=0)
-
-            true_indices = torch.argmax(gt_command, dim=-1)
-            pred_indices = torch.argmax(pred_command, dim=-1)
-
+            true_indices = torch.argmax(gt_command_for_loss, dim=-1)
+            pred_indices = torch.argmax(pred_command_for_loss, dim=-1)
             state["all_true_indices"].append(true_indices.detach().cpu())
             state["all_pred_indices"].append(pred_indices.detach().cpu())
 

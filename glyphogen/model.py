@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from glyphogen.glyph import NodeGlyph
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -123,6 +124,11 @@ class VectorizationGenerator(nn.Module):
         if coords_norm.shape[1] > 2:
             denormalized[:, 2::2] = coords_0_1[:, 2::2] * width
             denormalized[:, 3::2] = coords_0_1[:, 3::2] * height
+            # Handles are currently absolute coordinates, so we have to adjust them too.
+            # One day we'll turn them back into relate coordinates and this will have to
+            # change but for now:
+            denormalized[:, 2::2] = denormalized[:, 2::2] + x1
+            denormalized[:, 3::2] = denormalized[:, 3::2] + y1
 
         return denormalized
 
@@ -245,7 +251,7 @@ class VectorizationGenerator(nn.Module):
         }
 
 
-def step(model, batch):
+def step(model, batch, writer, global_step):
     device = next(model.parameters()).device
     images, targets = batch
 
@@ -269,15 +275,41 @@ def step(model, batch):
                     contour[key] = value.to(device)
 
         # Run the model for a single item
+        # For debugging, we use teacher forcing for validation as well.
         if model.training:
             outputs = model(img.unsqueeze(0), gt_targets=y)
         else:  # Validation/Inference
-            outputs = model(img.unsqueeze(0), gt_targets=None)
+            outputs = model(img.unsqueeze(0), gt_targets=y)
         all_outputs.append(outputs)
 
         # Calculate loss for the single item
         loss_values = losses(y, outputs, device, validation=not model.training)
 
+        # For debugging, dump ground truth and predicted sequences
+        if writer is not None:
+            pred_commands_and_coords = [
+                (
+                    outputs["pred_commands"][idx].detach(),
+                    outputs["pred_coords_img_space"][idx].detach(),
+                )
+                for idx in range(len(outputs["pred_commands"]))
+            ]
+            gt_commands_and_coords = []
+            for contour_idx in range(len(gt_contours)):
+                gt_sequence = gt_contours[contour_idx]["sequence"]
+                command_width = len(NODE_GLYPH_COMMANDS)
+                gt_command = gt_sequence[:, :command_width].detach()
+                gt_coords_img_space = gt_sequence[:, command_width:].detach()
+                gt_commands_and_coords.append((gt_command, gt_coords_img_space))
+            pred_glyph = NodeGlyph.from_numpy(pred_commands_and_coords)
+            debug_string = pred_glyph.to_svg_glyph().to_svg_string()
+            gt_glyph = NodeGlyph.from_numpy(gt_commands_and_coords)
+            gt_debug_string = gt_glyph.to_svg_glyph().to_svg_string()
+            writer.add_text(
+                f"SVG/Debug_{i}",
+                f"GT: {gt_debug_string}\nPred: {debug_string}",
+                global_step,
+            )
         # Append loss tensors to lists for later averaging
         if "total_loss" in loss_values:
             batch_total_losses.append(loss_values["total_loss"])

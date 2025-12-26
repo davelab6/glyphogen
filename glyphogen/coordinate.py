@@ -19,10 +19,20 @@ def to_image_space(self):
     # Apply scaling and baseline translation
     # This seems to scale the glyph to fit roughly in the top 2/3 of the image
     transformed_points = points * img_size * 2.0 / 3.0
-    # Add the baseline to every odd column (Y coordinate). There may be more than one pair.
-    transformed_points[:, 1::2] += baseline
+    # Add the baseline to the Y coordinate.
+    transformed_points[:, 1] += baseline
     # Apply vertical flip for image coordinates (Y-down)
-    transformed_points[:, 1::2] = img_size - transformed_points[:, 1::2]
+    transformed_points[:, 1] = img_size - transformed_points[:, 1]
+    # Currently handles are absolute coordinates, so they also need adjustment
+    # One day we'll turn them back into relative coordinates and this will have to
+    # change but for now:
+    if transformed_points.shape[1] > 2:
+        transformed_points[:, 3::2] = transformed_points[:, 3::2] + baseline
+        transformed_points[:, 3::2] = img_size - transformed_points[:, 3::2]
+
+    # In the future:
+    # # Apply vertical flip for handles
+    # transformed_points[:, 3::2] *= -1
 
     return transformed_points
 

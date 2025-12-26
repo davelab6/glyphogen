@@ -1,11 +1,11 @@
 # Hyperparameters
 LATENT_DIM = 32
-D_MODEL = 128
-PROJ_SIZE = 64
+D_MODEL = 1024
+PROJ_SIZE = 128
 COMMAND_BOTTLENECK_DIM = 24
 RATE = 0.0  # Specifically, the dropout rate
 EPOCHS = 2000
-BATCH_SIZE = 16
+BATCH_SIZE = 4
 RASTER_LOSS_WEIGHT = 15000.0
 
 # Vectorization sub-model weights
@@ -32,7 +32,7 @@ EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = 3.0
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
-LEARNING_RATE = 1e-2 * (256 / BATCH_SIZE)
+LEARNING_RATE = 1e-5 * (256 / BATCH_SIZE)
 FINAL_LEARNING_RATE = 1e-5 * (256 / BATCH_SIZE)
 
 GEN_IMAGE_SIZE = (512, 512)

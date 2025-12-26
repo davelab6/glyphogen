@@ -3,7 +3,7 @@ from time import sleep
 from typing import Dict, List, Optional
 
 import diskcache
-from glyphogen.coordinate import to_image_space
+from glyphogen.coordinate import get_bounds, to_image_space
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
@@ -165,19 +165,20 @@ class NodeContour:
 
     def push_command(self, command: NodeCommand):
         prev_node = self.nodes[-1] if len(self.nodes) > 0 else None
-        position = np.array([0, 0])
         in_handle: Optional[np.ndarray] = None
         out_handle: Optional[np.ndarray] = None
 
-        if command.command == "N":
+        if command.command == "L":
+            position = np.array(command.coordinates)
+        elif command.command == "N":
             position = np.array(command.coordinates[0:2])
             in_handle_delta = np.array(command.coordinates[2:4])
-            if not np.array_equal(in_handle_delta, np.array([0, 0])):
-                in_handle = position + in_handle_delta
+            # in_handle = position + in_handle_delta
+            in_handle = in_handle_delta
 
             out_handle_delta = np.array(command.coordinates[4:6])
-            if not np.array_equal(out_handle_delta, np.array([0, 0])):
-                out_handle = position + out_handle_delta
+            # out_handle = position + out_handle_delta
+            out_handle = out_handle_delta
         else:
             # Shouldn't really be here
             return
@@ -253,17 +254,21 @@ class Node:
     def command(self) -> NodeCommand:
         coords = self.coordinates
 
-        delta_hin = np.array([0, 0])
+        if self.in_handle is None and self.out_handle is None:
+            # It's a line.
+            return NodeCommand("L", coords.tolist())
+
         if self.in_handle is not None:
-            delta_hin = self.in_handle - self.coordinates
+            hin = self.in_handle  # - self.coordinates
+        else:
+            hin = self.coordinates
 
-        delta_hout = np.array([0, 0])
         if self.out_handle is not None:
-            delta_hout = self.out_handle - self.coordinates
+            hout = self.out_handle  # - self.coordinates
+        else:
+            hout = self.coordinates
 
-        return NodeCommand(
-            "N", np.concatenate((coords, delta_hin, delta_hout)).tolist()
-        )
+        return NodeCommand("N", np.concatenate((coords, hin, hout)).tolist())
 
 
 class NodeGlyph:
@@ -377,8 +382,6 @@ class NodeGlyph:
                 if command_str in ["EOS", "SOS"]:
                     continue
 
-                # From here on, we assume it's a NODE command
-                command_str = "N"
                 num_coords = NodeCommand.grammar[command_str]
                 coords_slice = coord_tensor[i, :num_coords]
                 if torch.is_tensor(coords_slice):
@@ -510,7 +513,7 @@ class SVGGlyph:
             image_space_points = image_space_points_tensor.tolist()
 
             # 4. Get Bounding Box in image space
-            bbox = image_space_points_tensor.get_bounds()
+            bbox = get_bounds(image_space_points_tensor)
 
             # Check for zero-width or zero-height bounding boxes
             width = bbox[2] - bbox[0]

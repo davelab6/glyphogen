@@ -128,8 +128,8 @@ def main(
     if single_batch:
         print("Reducing dataset for overfitting test")
         loader_iter = iter(train_loader)
-        train_loader = [next(loader_iter) for _ in range(16)]
-        test_loader = train_loader  # Use the same batches for validation
+        train_loader = [next(loader_iter)] * 16
+        test_loader = [train_loader[0]] * 2  # Use the same batches for validation
 
     # Optimizer and Loss
     # optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay = 0.005)
@@ -167,7 +167,7 @@ def main(
         )
         for i, batch in enumerate(train_loader):
             optimizer.zero_grad()
-            losses, _ = step(model, batch)
+            losses, _ = step(model, batch, writer=train_writer, global_step=global_step)
 
             if debug_grads:
                 write_gradient_norms(model, losses, train_writer, global_step)
@@ -208,7 +208,9 @@ def main(
             )
             with torch.no_grad():
                 for i, batch in enumerate(test_loader):
-                    losses, outputs = step(model, batch)
+                    losses, outputs = step(
+                        model, batch, writer=val_writer, global_step=global_step
+                    )
                     for loss_key, loss_value in losses.items():
                         loss_accumulators[loss_key] += loss_value
                     total_val_loss += losses["total_loss"].item()
