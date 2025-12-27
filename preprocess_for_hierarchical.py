@@ -125,8 +125,6 @@ def main():
     for font in font_files:
         for char in ALPHABET:
             all_glyphs.append((font, char))
-            if len(all_glyphs) >= 5000:
-                break
 
     random.seed(42)
     random.shuffle(all_glyphs)

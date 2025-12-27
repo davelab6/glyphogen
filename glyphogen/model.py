@@ -17,6 +17,8 @@ from glyphogen.losses import losses
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
+DEBUG = False
+
 
 def get_model_instance_segmentation(num_classes, load_pretrained=True):
     if load_pretrained:
@@ -86,6 +88,7 @@ class VectorizationGenerator(nn.Module):
 
         self.use_raster = False
 
+    @torch.compile
     def _normalize_to_model_space(self, coords_img_space, box):
         """
         Normalizes image-space coordinates to the model's internal [-1, 1] range
@@ -102,11 +105,15 @@ class VectorizationGenerator(nn.Module):
         normalized[:, 0] = (coords_img_space[:, 0] - x1) / width
         normalized[:, 1] = (coords_img_space[:, 1] - y1) / height
         if coords_img_space.shape[1] > 2:
-            normalized[:, 2::2] = coords_img_space[:, 2::2] / width
-            normalized[:, 3::2] = coords_img_space[:, 3::2] / height
+            # Handles are currently absolute coordinates, so we have to adjust them too.
+            # One day we'll turn them back into relative coordinates and this will have to
+            # change but for now:
+            normalized[:, 2::2] = (coords_img_space[:, 2::2] - x1) / width
+            normalized[:, 3::2] = (coords_img_space[:, 3::2] - y1) / height
 
         return (normalized * 2) - 1
 
+    @torch.compile
     def _denormalize_from_model_space(self, coords_norm, box):
         """
         Denormalizes coordinates from the model's internal [-1, 1] range back
@@ -125,7 +132,7 @@ class VectorizationGenerator(nn.Module):
             denormalized[:, 2::2] = coords_0_1[:, 2::2] * width
             denormalized[:, 3::2] = coords_0_1[:, 3::2] * height
             # Handles are currently absolute coordinates, so we have to adjust them too.
-            # One day we'll turn them back into relate coordinates and this will have to
+            # One day we'll turn them back into relative coordinates and this will have to
             # change but for now:
             denormalized[:, 2::2] = denormalized[:, 2::2] + x1
             denormalized[:, 3::2] = denormalized[:, 3::2] + y1
@@ -162,7 +169,8 @@ class VectorizationGenerator(nn.Module):
         z = self.output_dense(x)
         return z
 
-    def forward(self, raster_image, gt_targets=None):
+    @torch.compile
+    def forward(self, raster_image, gt_targets=None, teacher_forcing_ratio=1.0):
         # This model implements the canonical mask normalization strategy.
         # It processes one image at a time (batch size should be 1).
         if raster_image.shape[0] > 1:
@@ -230,7 +238,11 @@ class VectorizationGenerator(nn.Module):
                 decoder_input_norm = torch.cat([gt_commands, gt_coords_norm], dim=-1)
                 decoder_input = decoder_input_norm[:, :-1, :]
 
-                pred_commands, pred_coords_norm = self.decoder(decoder_input, context=z)
+                pred_commands, pred_coords_norm = self.decoder(
+                    decoder_input,
+                    context=z,
+                    teacher_forcing_ratio=teacher_forcing_ratio,
+                )
             else:  # Inference
                 pred_commands, pred_coords_norm = self.decoder.generate_sequence(
                     context=z, max_length=50
@@ -251,7 +263,7 @@ class VectorizationGenerator(nn.Module):
         }
 
 
-def step(model, batch, writer, global_step):
+def step(model, batch, writer, global_step, teacher_forcing_ratio=1.0):
     device = next(model.parameters()).device
     images, targets = batch
 
@@ -277,16 +289,22 @@ def step(model, batch, writer, global_step):
         # Run the model for a single item
         # For debugging, we use teacher forcing for validation as well.
         if model.training:
-            outputs = model(img.unsqueeze(0), gt_targets=y)
+            outputs = model(
+                img.unsqueeze(0),
+                gt_targets=y,
+                teacher_forcing_ratio=teacher_forcing_ratio,
+            )
         else:  # Validation/Inference
-            outputs = model(img.unsqueeze(0), gt_targets=y)
+            outputs = model(
+                img.unsqueeze(0), gt_targets=y, teacher_forcing_ratio=1.0
+            )  # Always teacher force for validation
         all_outputs.append(outputs)
 
         # Calculate loss for the single item
         loss_values = losses(y, outputs, device, validation=not model.training)
 
         # For debugging, dump ground truth and predicted sequences
-        if writer is not None:
+        if DEBUG and writer is not None:
             pred_commands_and_coords = [
                 (
                     outputs["pred_commands"][idx].detach(),

@@ -1,11 +1,11 @@
 # Hyperparameters
 LATENT_DIM = 32
-D_MODEL = 1024
-PROJ_SIZE = 128
+D_MODEL = 512
+PROJ_SIZE = 256
 COMMAND_BOTTLENECK_DIM = 24
-RATE = 0.0  # Specifically, the dropout rate
+RATE = 0.2  # Specifically, the dropout rate
 EPOCHS = 2000
-BATCH_SIZE = 4
+BATCH_SIZE = 16
 RASTER_LOSS_WEIGHT = 15000.0
 
 # Vectorization sub-model weights
@@ -32,14 +32,23 @@ EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = 3.0
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
-LEARNING_RATE = 1e-5 * (256 / BATCH_SIZE)
-FINAL_LEARNING_RATE = 1e-5 * (256 / BATCH_SIZE)
+LEARNING_RATE = 1e-5 * (BATCH_SIZE)
+FINAL_LEARNING_RATE = 1e-6 * (BATCH_SIZE)
 
 GEN_IMAGE_SIZE = (512, 512)
 RASTER_IMG_SIZE = GEN_IMAGE_SIZE[0]
 STYLE_IMAGE_SIZE = (168, 40)
 MAX_COMMANDS = 50
 LIMIT = 0  # Limit the number of fonts to process for testing
+
+# Scheduled Sampling
+# Start decaying the teacher forcing ratio at this epoch
+SCHEDULED_SAMPLING_START_EPOCH = 5
+# Fully decayed by this epoch
+SCHEDULED_SAMPLING_END_EPOCH = 100
+# The minimum teacher forcing ratio (1.0 = 100% teacher forcing)
+SCHEDULED_SAMPLING_MIN_RATIO = 0.75
+
 
 # New tokenization hyperparameters
 QUANTIZATION_BIN_SIZE = 10

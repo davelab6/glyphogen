@@ -31,6 +31,9 @@ from glyphogen.hyperparameters import (
     LEARNING_RATE,
     RATE,
     FINAL_LEARNING_RATE,
+    SCHEDULED_SAMPLING_START_EPOCH,
+    SCHEDULED_SAMPLING_END_EPOCH,
+    SCHEDULED_SAMPLING_MIN_RATIO,
 )
 from glyphogen.model import VectorizationGenerator, step
 
@@ -70,7 +73,7 @@ def write_gradient_norms(model, losses, writer, step):
 def main(
     model_name="glyphogen.vectorizer.pt",
     epochs=EPOCHS,
-    single_batch=False,
+    canary=None,
     debug_grads=False,
     load_model=False,
     segmentation_model="glyphogen.segmenter.pt",
@@ -113,7 +116,7 @@ def main(
         drop_last=True,
         pin_memory=True,
         worker_init_fn=seed_worker,
-        num_workers=0,
+        num_workers=8,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -122,18 +125,17 @@ def main(
         drop_last=True,
         pin_memory=True,
         worker_init_fn=seed_worker,
-        num_workers=0,
+        num_workers=8,
     )
 
-    if single_batch:
-        print("Reducing dataset for overfitting test")
-        loader_iter = iter(train_loader)
-        train_loader = [next(loader_iter)] * 16
-        test_loader = [train_loader[0]] * 2  # Use the same batches for validation
+    if canary is not None:
+        print("Reducing dataset for canary testing")
 
     # Optimizer and Loss
-    # optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay = 0.005)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=LEARNING_RATE, weight_decay=0.005
+    )
+    # optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     # Work out gamma from number of steps and start/end learning rate
     # final_learning_rate = LEARNING_RATE * (gamma ** epochs)
     gamma = (FINAL_LEARNING_RATE / LEARNING_RATE) ** (1 / epochs)
@@ -154,20 +156,46 @@ def main(
     if debug_grads:
         torch._functorch.config.donated_buffer = False
     for epoch in range(epochs):
+        # Calculate teacher forcing ratio for this epoch
+        if epoch < SCHEDULED_SAMPLING_START_EPOCH:
+            teacher_forcing_ratio = 1.0
+        elif epoch > SCHEDULED_SAMPLING_END_EPOCH:
+            teacher_forcing_ratio = SCHEDULED_SAMPLING_MIN_RATIO
+        else:
+            # Linear decay
+            progress = (epoch - SCHEDULED_SAMPLING_START_EPOCH) / (
+                SCHEDULED_SAMPLING_END_EPOCH - SCHEDULED_SAMPLING_START_EPOCH
+            )
+            teacher_forcing_ratio = 1.0 - progress * (
+                1.0 - SCHEDULED_SAMPLING_MIN_RATIO
+            )
+        train_writer.add_scalar("Teacher Forcing Ratio", teacher_forcing_ratio, epoch)
+        print(f"\nTeacher forcing ratio for this epoch: {teacher_forcing_ratio:.2f}")
+
         print()
         model.train()
         loss_accumulators = defaultdict(lambda: 0.0)
         i = 0
         kbar = pkbar.Kbar(
-            target=len(train_loader),
+            target=(
+                len(train_loader) if canary is None else min(len(train_loader), canary)
+            ),
             epoch=epoch,
             num_epochs=epochs,
             width=8,
             always_stateful=False,
         )
         for i, batch in enumerate(train_loader):
+            if canary is not None and i >= canary:
+                break
             optimizer.zero_grad()
-            losses, _ = step(model, batch, writer=train_writer, global_step=global_step)
+            losses, _ = step(
+                model,
+                batch,
+                teacher_forcing_ratio=teacher_forcing_ratio,
+                writer=train_writer,
+                global_step=global_step,
+            )
 
             if debug_grads:
                 write_gradient_norms(model, losses, train_writer, global_step)
@@ -200,7 +228,11 @@ def main(
             cm_state = init_confusion_matrix_state()
 
             kbar = pkbar.Kbar(
-                target=len(test_loader),
+                target=(
+                    len(test_loader)
+                    if canary is None
+                    else min(len(test_loader), canary)
+                ),
                 epoch=epoch,
                 num_epochs=epochs,
                 width=8,
@@ -208,8 +240,14 @@ def main(
             )
             with torch.no_grad():
                 for i, batch in enumerate(test_loader):
+                    if canary is not None and i >= canary:
+                        break
                     losses, outputs = step(
-                        model, batch, writer=val_writer, global_step=global_step
+                        model,
+                        batch,
+                        teacher_forcing_ratio=1.0,  # Always use teacher forcing for validation for now
+                        writer=val_writer,
+                        global_step=global_step,
                     )
                     for loss_key, loss_value in losses.items():
                         loss_accumulators[loss_key] += loss_value
@@ -280,9 +318,9 @@ if __name__ == "__main__":
         help="Number of epochs to train the model.",
     )
     parser.add_argument(
-        "--single-batch",
-        action="store_true",
-        help="Whether to use a single batch for training.",
+        "--canary",
+        type=int,
+        help="Take a slice of the dataset for canary testing.",
     )
     parser.add_argument(
         "--debug-grads",
@@ -294,7 +332,7 @@ if __name__ == "__main__":
         model_name=args.model_name,
         epochs=args.epochs,
         debug_grads=args.debug_grads,
-        single_batch=args.single_batch,
+        canary=args.canary,
         load_model=args.load_model,
         segmentation_model=args.segmentation_model,
     )
