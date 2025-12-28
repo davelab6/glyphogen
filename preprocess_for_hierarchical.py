@@ -11,6 +11,8 @@ from glyphogen.hyperparameters import GEN_IMAGE_SIZE, ALPHABET
 from glyphogen.dataset import font_files
 from glyphogen.command_defs import NodeCommand, MAX_COORDINATE, NODE_COMMAND_WIDTH
 
+LIMIT = 0
+
 
 def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
     images_json = []
@@ -20,14 +22,18 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
     ann_id = start_ann_id
 
     for font_path, char in tqdm(glyph_list, desc="Processing glyphs"):
+        if LIMIT > 0 and len(images_json) >= LIMIT:
+            break
         try:
             glyph = Glyph(Path(font_path), ord(char), location={})
+            # print(f"Processing glyph '{char}' from {font_path}")
 
             # Generate vector data first to ensure it's valid
             node_glyph = glyph.vectorize().to_node_glyph()
             node_glyph.normalize()  # IMPORTANT: ensure canonical order
             contour_sequences = node_glyph.encode()
             if contour_sequences is None:
+                print("  Skipping glyph due to encoding failure.")
                 continue
 
             # Now get segmentation data, which should be in the same order
@@ -38,22 +44,26 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                 contour_sequences
             ):
                 # Mismatch between number of contours in segmentation and vectorization
-                continue
-
-            # Generate and save raster image
-            raster_img = glyph.rasterize(GEN_IMAGE_SIZE[0])
-            if np.sum(raster_img) < 0.01:  # Skip blank images
-                print(f"Skipping blank image for {char} in {font_path}")
+                print("  Skipping glyph due to segmentation/vectorization mismatch.")
                 continue
 
             img_filename = f"{img_id}.png"
             img_path = image_dir / img_filename
-            from PIL import Image
+            if not img_path.parent.exists():
+                img_path.parent.mkdir(parents=True, exist_ok=True)
+            if not img_path.exists():
+                # Generate and save raster image
+                raster_img = glyph.rasterize(GEN_IMAGE_SIZE[0])
+                if np.sum(raster_img) < 0.01:  # Skip blank images
+                    print(f"Skipping blank image for {char} in {font_path}")
+                    continue
 
-            pil_img = Image.fromarray(
-                (raster_img.squeeze(-1) * 255).astype(np.uint8), mode="L"
-            )
-            pil_img.save(img_path)
+                from PIL import Image
+
+                pil_img = Image.fromarray(
+                    (raster_img.squeeze(-1) * 255).astype(np.uint8), mode="L"
+                )
+                pil_img.save(img_path)
 
             images_json.append(
                 {
@@ -61,6 +71,8 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                     "width": GEN_IMAGE_SIZE[1],
                     "height": GEN_IMAGE_SIZE[0],
                     "file_name": img_filename,
+                    "font_path": str(font_path),
+                    "character": char,
                 }
             )
 
@@ -98,7 +110,7 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
             img_id += 1
 
         except Exception as e:
-            # print(f"Could not process {char} from {font_path}: {e}")
+            print(f"Could not process {char} from {font_path}: {e}")
             pass
 
     return images_json, annotations_json
