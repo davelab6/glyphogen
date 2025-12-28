@@ -1,5 +1,3 @@
-import random
-from glyphogen.coordinate import to_image_space
 from glyphogen.losses import align_sequences
 from glyphogen.rasterizer import rasterize_batch
 import torch

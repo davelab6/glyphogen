@@ -1,9 +1,7 @@
-from glyphogen.coordinate import to_image_space
 import torch
 from .command_defs import NodeCommand
 from .hyperparameters import GEN_IMAGE_SIZE
 import pydiffvg
-import numpy as np
 
 command_keys = list(NodeCommand.grammar.keys())
 cmd_n_val = command_keys.index("N")
@@ -151,9 +149,7 @@ def rasterize_batch(
             point_start = 0
             for num_cp_end, point_end in zip(num_cp_splits, point_splits):
                 num_cp = num_control_points[num_cp_start:num_cp_end]
-                raw_path_points = points[point_start:point_end]
-
-                path_points = to_image_space(raw_path_points)
+                path_points = points[point_start:point_end]
 
                 path = pydiffvg.Path(
                     num_control_points=num_cp.to(torch.int32).cpu(),

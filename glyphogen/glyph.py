@@ -503,17 +503,13 @@ class SVGGlyph:
             if not segs or not segs[0]:
                 continue
 
-            # 3. Flatten path and transform to image space
-            font_space_points = [(pt.x, pt.y) for pt in path_i.flatten(1.0)]
-            if not font_space_points:
+            # 3. Flatten path (it's already in image space)
+            points = [(pt.x, pt.y) for pt in path_i.flatten(1.0)]
+            if not points:
                 continue
 
-            points_tensor = torch.tensor(font_space_points)
-            image_space_points_tensor = to_image_space(points_tensor)
-            image_space_points = image_space_points_tensor.tolist()
-
             # 4. Get Bounding Box in image space
-            bbox = get_bounds(image_space_points_tensor)
+            bbox = get_bounds(points)
 
             # Check for zero-width or zero-height bounding boxes
             width = bbox[2] - bbox[0]
@@ -537,7 +533,7 @@ class SVGGlyph:
             # 6. Generate Mask in image space
             img = Image.new("L", (GEN_IMAGE_SIZE[0], GEN_IMAGE_SIZE[1]), 0)
             draw = ImageDraw.Draw(img)
-            draw.polygon(image_space_points, fill=1)
+            draw.polygon(points, fill=1)
             mask = np.array(img, dtype=np.uint8)
 
             segmentation_data.append(
@@ -663,5 +659,12 @@ class Glyph:
                 # Add YAUG to the y coordinates
                 for i in range(1, len(coords), 2):
                     coords[i] += int(self.location["YAUG"])
-            path.append(SVGCommand(cmd, coords))
+            # At this point we'll transform the coordinates from
+            # font space to image space, so that everything in the model
+            # is in image space.
+            image_space_coords = []
+            for x, y in zip(coords[0::2], coords[1::2]):
+                ix, iy = to_image_space((x, y))
+                image_space_coords.extend([ix, iy])
+            path.append(SVGCommand(cmd, image_space_coords))
         return SVGGlyph(path, "%s, %s" % (self.font_file, chr(self.unicode_id)))

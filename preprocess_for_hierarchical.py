@@ -1,9 +1,6 @@
 import json
 from pathlib import Path
 import random
-from glyphogen.coordinate import (
-    to_image_space,
-)
 import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -79,16 +76,8 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                 rle = mask_util.encode(np.asfortranarray(seg_item["mask"]))
                 rle["counts"] = rle["counts"].decode("utf-8")
 
-                # Transform sequence coordinates from font units to image space
-                encoded_contour = torch.from_numpy(contour_sequences[i]).float()
-                commands = encoded_contour[:, :NODE_COMMAND_WIDTH]
-                coords_font_space = encoded_contour[:, NODE_COMMAND_WIDTH:]
-                # Normalize and transform
-                coords_img_space = to_image_space(coords_font_space)
-
-                # Reshape back and recombine
-                sequence_img_space = torch.cat([commands, coords_img_space], dim=-1)
-                sequence_as_list = sequence_img_space.tolist()
+                # encoded_contour = torch.from_numpy(contour_sequences[i]).float()
+                # sequence_as_list = encoded_contour.tolist()
 
                 annotations_json.append(
                     {
@@ -99,7 +88,9 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                         "area": float(w * h),
                         "bbox": [float(x), float(y), float(w), float(h)],
                         "iscrowd": 0,
-                        "sequence": sequence_as_list,  # Add the sequence data
+                        "sequence": contour_sequences[
+                            i
+                        ].tolist(),  # Add the sequence data
                     }
                 )
                 ann_id += 1

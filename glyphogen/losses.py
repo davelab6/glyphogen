@@ -1,4 +1,3 @@
-from glyphogen.coordinate import to_image_space
 import torch
 import torch.nn.functional as F
 
@@ -23,12 +22,15 @@ def losses(y, outputs, device, validation=False):
     num_contours_to_compare = min(len(gt_contours), len(pred_commands_list))
     total_command_loss = torch.tensor(0.0, device=device)
     total_coord_loss = torch.tensor(0.0, device=device)
+    total_correct_cmds = 0
+    total_cmds = 0
 
     if num_contours_to_compare == 0:
         return {
             "total_loss": torch.tensor(0.0, device=device, requires_grad=True),
             "command_loss": torch.tensor(0.0, device=device),
             "coord_loss": torch.tensor(0.0, device=device),
+            "command_accuracy": 0.0,
         }
 
     for i in range(num_contours_to_compare):
@@ -59,15 +61,19 @@ def losses(y, outputs, device, validation=False):
             label_smoothing=0.1,
         )
 
-        # 2. Coordinate Loss (Huber) on image-space coordinates
-        coord_loss = F.huber_loss(
-            pred_coords_for_loss,
-            gt_coords_for_loss,
-            delta=HUBER_DELTA,
+        # 2. Coordinate Loss (Huber) on image-space coordinates, masked by command
+        coord_loss = masked_coordinate_loss(
+            device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
         )
 
         total_command_loss += command_loss
         total_coord_loss += coord_loss
+
+        # Accumulate accuracy stats
+        pred_indices = torch.argmax(pred_command_for_loss, dim=-1)
+        gt_indices = torch.argmax(gt_command_for_loss, dim=-1)
+        total_correct_cmds += (pred_indices == gt_indices).sum().item()
+        total_cmds += len(pred_indices)
 
     avg_command_loss = (
         total_command_loss / num_contours_to_compare
@@ -77,6 +83,11 @@ def losses(y, outputs, device, validation=False):
     avg_coord_loss = (
         total_coord_loss / num_contours_to_compare
         if num_contours_to_compare > 0
+        else torch.tensor(0.0)
+    )
+    command_accuracy = (
+        torch.tensor(total_correct_cmds / total_cmds)
+        if total_cmds > 0
         else torch.tensor(0.0)
     )
 
@@ -89,7 +100,43 @@ def losses(y, outputs, device, validation=False):
         "total_loss": total_loss,
         "command_loss": avg_command_loss.detach(),
         "coord_loss": avg_coord_loss.detach(),
+        "command_accuracy_metric": command_accuracy,
     }
+
+
+def masked_coordinate_loss(
+    device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
+):
+    command_indices = torch.argmax(gt_command_for_loss, dim=-1)
+
+    # Create a lookup tensor for coordinate counts
+    arg_counts_list = [NODE_GLYPH_COMMANDS[cmd] for cmd in NODE_GLYPH_COMMANDS]
+    arg_counts = torch.tensor(arg_counts_list, device=device)
+
+    # Get the number of relevant coordinates for each timestep
+    num_relevant_coords = arg_counts[command_indices]
+
+    # Create the mask
+    coord_mask = torch.arange(
+        gt_coords_for_loss.shape[1], device=device
+    ) < num_relevant_coords.unsqueeze(1)
+
+    elementwise_coord_loss = F.huber_loss(
+        pred_coords_for_loss,
+        gt_coords_for_loss,
+        delta=HUBER_DELTA,
+        reduction="none",
+    )
+
+    masked_coord_loss = elementwise_coord_loss * coord_mask
+
+    # Average the loss over the number of relevant coordinates
+    num_coords_in_loss = coord_mask.sum()
+    if num_coords_in_loss > 0:
+        coord_loss = masked_coord_loss.sum() / num_coords_in_loss
+    else:
+        coord_loss = torch.tensor(0.0, device=device)
+    return coord_loss
 
 
 def align_sequences(
@@ -110,7 +157,7 @@ def align_sequences(
     pred_coords_for_loss = pred_coords_img_space
 
     # Pad sequences if lengths differ (should not happen in teacher forcing)
-    # This block should ideally not be hit now, but is kept for safety
+    # But it will happen when we use the model autoregressively for validation
     if pred_command_for_loss.shape[0] != gt_command_for_loss.shape[0]:
         max_len = max(pred_command_for_loss.shape[0], gt_command_for_loss.shape[0])
         pred_len, gt_len = pred_command_for_loss.shape[0], gt_command_for_loss.shape[0]

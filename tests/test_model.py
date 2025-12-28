@@ -13,7 +13,9 @@ from glyphogen.model import VectorizationGenerator
 
 
 def test_output_shapes():
+    segmenter_state = None  # For this test, we don't need a pre-trained segmenter
     model = VectorizationGenerator(
+        segmenter_state=segmenter_state,
         d_model=D_MODEL,
         latent_dim=LATENT_DIM,
         rate=RATE,

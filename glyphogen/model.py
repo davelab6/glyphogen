@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from collections import defaultdict
 from glyphogen.glyph import NodeGlyph
 import torch
 import torch.nn.functional as F
@@ -8,16 +9,19 @@ import torchvision
 from glyphogen.command_defs import (
     NODE_GLYPH_COMMANDS,
     COORDINATE_WIDTH,
-    MAX_COORDINATE,
+    PREDICTED_COORDINATE_WIDTH,
 )
-from glyphogen.coordinate import to_image_space
+from glyphogen.coordinate import (
+    image_space_to_mask_space,
+    mask_space_to_image_space,
+)
 from glyphogen.hyperparameters import GEN_IMAGE_SIZE
 from glyphogen.lstm import LSTMDecoder
 from glyphogen.losses import losses
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
-DEBUG = False
+DEBUG = True
 
 
 def get_model_instance_segmentation(num_classes, load_pretrained=True):
@@ -89,57 +93,6 @@ class VectorizationGenerator(nn.Module):
         self.use_raster = False
 
     @torch.compile
-    def _normalize_to_model_space(self, coords_img_space, box):
-        """
-        Normalizes image-space coordinates to the model's internal [-1, 1] range
-        relative to a given bounding box (also in image space).
-        """
-        x1, y1, x2, y2 = box
-        width = x2 - x1
-        height = y2 - y1
-
-        width = width if width > 0 else 1
-        height = height if height > 0 else 1
-
-        normalized = coords_img_space.clone()
-        normalized[:, 0] = (coords_img_space[:, 0] - x1) / width
-        normalized[:, 1] = (coords_img_space[:, 1] - y1) / height
-        if coords_img_space.shape[1] > 2:
-            # Handles are currently absolute coordinates, so we have to adjust them too.
-            # One day we'll turn them back into relative coordinates and this will have to
-            # change but for now:
-            normalized[:, 2::2] = (coords_img_space[:, 2::2] - x1) / width
-            normalized[:, 3::2] = (coords_img_space[:, 3::2] - y1) / height
-
-        return (normalized * 2) - 1
-
-    @torch.compile
-    def _denormalize_from_model_space(self, coords_norm, box):
-        """
-        Denormalizes coordinates from the model's internal [-1, 1] range back
-        to image space relative to a given bounding box.
-        """
-        x1, y1, x2, y2 = box
-        width = x2 - x1
-        height = y2 - y1
-
-        coords_0_1 = (coords_norm + 1) / 2
-
-        denormalized = coords_0_1.clone()
-        denormalized[:, 0] = coords_0_1[:, 0] * width + x1
-        denormalized[:, 1] = coords_0_1[:, 1] * height + y1
-        if coords_norm.shape[1] > 2:
-            denormalized[:, 2::2] = coords_0_1[:, 2::2] * width
-            denormalized[:, 3::2] = coords_0_1[:, 3::2] * height
-            # Handles are currently absolute coordinates, so we have to adjust them too.
-            # One day we'll turn them back into relative coordinates and this will have to
-            # change but for now:
-            denormalized[:, 2::2] = denormalized[:, 2::2] + x1
-            denormalized[:, 3::2] = denormalized[:, 3::2] + y1
-
-        return denormalized
-
-    @torch.compile
     def encode(self, inputs):
         x = self.conv1(inputs)
         x = self.norm1(x)
@@ -202,8 +155,8 @@ class VectorizationGenerator(nn.Module):
             target_sequences = None
 
         # Step 2: For each contour, get a latent vector and decode the sequence.
-        all_pred_commands = []
-        all_pred_coords_abs = []
+        glyph_pred_commands = []
+        glyph_pred_coords_img_space = []
 
         command_width = len(NODE_GLYPH_COMMANDS)
 
@@ -226,11 +179,10 @@ class VectorizationGenerator(nn.Module):
             if target_sequences is not None:  # Training
                 gt_sequence = target_sequences[i].unsqueeze(0)
                 gt_commands = gt_sequence[:, :, :command_width]
-                gt_coords_font_space = gt_sequence[:, :, command_width:]
-                gt_coords_img_space = to_image_space(gt_coords_font_space)
+                gt_coords_img_space = gt_sequence[:, :, command_width:]
 
                 # Normalize GT coords for teacher forcing
-                gt_coords_norm = self._normalize_to_model_space(
+                gt_coords_norm = image_space_to_mask_space(
                     gt_coords_img_space.squeeze(0), box
                 ).unsqueeze(0)
 
@@ -244,21 +196,84 @@ class VectorizationGenerator(nn.Module):
                     teacher_forcing_ratio=teacher_forcing_ratio,
                 )
             else:  # Inference
-                pred_commands, pred_coords_norm = self.decoder.generate_sequence(
-                    context=z, max_length=50
+                # Autoregressive generation loop
+                hidden_state = None
+
+                from .command_defs import NodeCommand
+
+                device = raster_image.device
+                batch_size = 1  # We process one image at a time
+                sos_index = NodeCommand.encode_command("SOS")
+
+                command_part = torch.zeros(batch_size, 1, command_width, device=device)
+                command_part[:, 0, sos_index] = 1.0
+
+                coords_part_img_space = torch.zeros(
+                    batch_size, 1, COORDINATE_WIDTH, device=device
                 )
+                coords_part_norm = image_space_to_mask_space(
+                    coords_part_img_space.squeeze(0), box
+                ).unsqueeze(0)
+
+                current_input = torch.cat([command_part, coords_part_norm], dim=-1)
+
+                # Lists for the current contour's timesteps
+                contour_timestep_commands = []
+                contour_timestep_coords_norm = []
+
+                for _ in range(50):  # max_length
+                    command_logits, coord_output_norm, hidden_state = (
+                        self.decoder._forward_step(current_input, z, hidden_state)
+                    )
+
+                    contour_timestep_commands.append(command_logits)
+                    contour_timestep_coords_norm.append(coord_output_norm)
+
+                    command_probs = F.softmax(command_logits.squeeze(1), dim=-1)
+                    predicted_command_idx = torch.argmax(
+                        command_probs, dim=1, keepdim=True
+                    )
+
+                    if predicted_command_idx.item() == NodeCommand.encode_command(
+                        "EOS"
+                    ):
+                        break
+
+                    next_command_onehot = F.one_hot(
+                        predicted_command_idx, num_classes=command_width
+                    ).float()
+
+                    coord_padded = torch.zeros(
+                        batch_size, 1, COORDINATE_WIDTH, device=device
+                    )
+                    coord_padded[:, :, :PREDICTED_COORDINATE_WIDTH] = coord_output_norm
+
+                    current_input = torch.cat(
+                        [next_command_onehot, coord_padded], dim=-1
+                    )
+
+                if not contour_timestep_commands:
+                    pred_commands = torch.empty(
+                        batch_size, 0, command_width, device=device
+                    )
+                    pred_coords_norm = torch.empty(
+                        batch_size, 0, PREDICTED_COORDINATE_WIDTH, device=device
+                    )
+                else:
+                    pred_commands = torch.cat(contour_timestep_commands, dim=1)
+                    pred_coords_norm = torch.cat(contour_timestep_coords_norm, dim=1)
 
             # Denormalize predicted coordinates back to image space for loss calculation
-            pred_coords_img_space = self._denormalize_from_model_space(
+            pred_coords_img_space = mask_space_to_image_space(
                 pred_coords_norm.squeeze(0), box
             )
 
-            all_pred_commands.append(pred_commands.squeeze(0))
-            all_pred_coords_abs.append(pred_coords_img_space)
+            glyph_pred_commands.append(pred_commands.squeeze(0))
+            glyph_pred_coords_img_space.append(pred_coords_img_space)
 
         return {
-            "pred_commands": all_pred_commands,
-            "pred_coords_img_space": all_pred_coords_abs,
+            "pred_commands": glyph_pred_commands,
+            "pred_coords_img_space": glyph_pred_coords_img_space,
             "used_teacher_forcing": target_sequences is not None,
         }
 
@@ -268,9 +283,7 @@ def step(model, batch, writer, global_step, teacher_forcing_ratio=1.0):
     images, targets = batch
 
     # Accumulate losses and outputs over the batch
-    batch_total_losses = []
-    batch_command_losses = []
-    batch_coord_losses = []
+    batch_losses = defaultdict(list)
     all_outputs = []
 
     # Process each item in the batch individually, as the model's
@@ -295,55 +308,28 @@ def step(model, batch, writer, global_step, teacher_forcing_ratio=1.0):
                 teacher_forcing_ratio=teacher_forcing_ratio,
             )
         else:  # Validation/Inference
-            outputs = model(
-                img.unsqueeze(0), gt_targets=y, teacher_forcing_ratio=1.0
-            )  # Always teacher force for validation
+            # Always use teacher forcing during validation for speed
+            outputs = model(img.unsqueeze(0), gt_targets=y, teacher_forcing_ratio=1.0)
         all_outputs.append(outputs)
 
         # Calculate loss for the single item
         loss_values = losses(y, outputs, device, validation=not model.training)
 
-        # For debugging, dump ground truth and predicted sequences
-        if DEBUG and writer is not None:
-            pred_commands_and_coords = [
-                (
-                    outputs["pred_commands"][idx].detach(),
-                    outputs["pred_coords_img_space"][idx].detach(),
-                )
-                for idx in range(len(outputs["pred_commands"]))
-            ]
-            gt_commands_and_coords = []
-            for contour_idx in range(len(gt_contours)):
-                gt_sequence = gt_contours[contour_idx]["sequence"]
-                command_width = len(NODE_GLYPH_COMMANDS)
-                gt_command = gt_sequence[:, :command_width].detach()
-                gt_coords_img_space = gt_sequence[:, command_width:].detach()
-                gt_commands_and_coords.append((gt_command, gt_coords_img_space))
-            pred_glyph = NodeGlyph.from_numpy(pred_commands_and_coords)
-            debug_string = pred_glyph.to_svg_glyph().to_svg_string()
-            gt_glyph = NodeGlyph.from_numpy(gt_commands_and_coords)
-            gt_debug_string = gt_glyph.to_svg_glyph().to_svg_string()
-            writer.add_text(
-                f"SVG/Debug_{i}",
-                f"GT: {gt_debug_string}\nPred: {debug_string}",
-                global_step,
-            )
+        if DEBUG and writer is not None and global_step % 100 == 0:
+            dump_debug_sequences(writer, global_step, i, gt_contours, outputs)
         # Append loss tensors to lists for later averaging
         if "total_loss" in loss_values:
-            batch_total_losses.append(loss_values["total_loss"])
-            batch_command_losses.append(loss_values["command_loss"])
-            batch_coord_losses.append(loss_values["coord_loss"])
+            for key, val in loss_values.items():
+                batch_losses[key].append(val)
 
     # Create final loss dictionary for the training loop
-    final_losses = {}
-    if batch_total_losses:
+    if batch_losses:
         # Average losses across the batch
-        final_losses["total_loss"] = torch.stack(batch_total_losses).mean()
-        final_losses["command_loss"] = torch.stack(batch_command_losses).mean()
-        final_losses["coord_loss"] = torch.stack(batch_coord_losses).mean()
+        final_losses = {k: torch.stack(v).mean() for k, v in batch_losses.items()}
     else:
         print("Warning: No valid samples in batch.")
         # Handle empty or invalid batch
+        final_losses = {}
         final_losses["total_loss"] = torch.tensor(
             0.0, device=device, requires_grad=True
         )
@@ -351,3 +337,30 @@ def step(model, batch, writer, global_step, teacher_forcing_ratio=1.0):
         final_losses["coord_loss"] = torch.tensor(0.0)
 
     return final_losses, all_outputs
+
+
+def dump_debug_sequences(writer, global_step, i, gt_contours, outputs):
+    """For debugging, dump ground truth and predicted sequences"""
+    pred_commands_and_coords = [
+        (
+            outputs["pred_commands"][idx].detach(),
+            outputs["pred_coords_img_space"][idx].detach(),
+        )
+        for idx in range(len(outputs["pred_commands"]))
+    ]
+    gt_commands_and_coords = []
+    for contour_idx in range(len(gt_contours)):
+        gt_sequence = gt_contours[contour_idx]["sequence"]
+        command_width = len(NODE_GLYPH_COMMANDS)
+        gt_command = gt_sequence[:, :command_width].detach()
+        gt_coords_img_space = gt_sequence[:, command_width:].detach()
+        gt_commands_and_coords.append((gt_command, gt_coords_img_space))
+    pred_glyph = NodeGlyph.from_numpy(pred_commands_and_coords)
+    debug_string = pred_glyph.to_svg_glyph().to_svg_string()
+    gt_glyph = NodeGlyph.from_numpy(gt_commands_and_coords)
+    gt_debug_string = gt_glyph.to_svg_glyph().to_svg_string()
+    writer.add_text(
+        f"SVG/Debug_{i}",
+        f"GT: {gt_debug_string}\nPred: {debug_string}",
+        global_step,
+    )
