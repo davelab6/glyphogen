@@ -16,6 +16,9 @@ def to_image_space(pts):
     img_size = GEN_IMAGE_SIZE[0]
     baseline = 0.33 * img_size
 
+    # Add 100 units to X to stop italics from being cut off
+    x += 100.0 / MAX_COORDINATE
+
     # Apply scaling and baseline translation
     # This seems to scale the glyph to fit roughly in the top 2/3 of the image
     transformed_x = x * img_size * 2.0 / 3.0
