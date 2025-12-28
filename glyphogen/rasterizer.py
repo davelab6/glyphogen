@@ -48,7 +48,11 @@ def nodes_to_segments(cmd, coord):
 
                     is_curve = (p1_cmd == cmd_n_val) and (p2_cmd == cmd_n_val)
                     p1_pos, p2_pos = p1_coord[0:2], p2_coord[0:2]
-                    p1_hout, p2_hin = p1_pos + p1_coord[4:6], p2_pos + p2_coord[2:4]
+                    # Handle positions are absolute.
+                    p1_hout = p1_coord[4:6]
+                    p2_hin = p2_coord[2:4]
+                    # If they change to relative, use this instead:
+                    # p1_hout, p2_hin = p1_pos + p1_coord[4:6], p2_pos + p2_coord[2:4]
 
                     if is_curve:
                         all_points.extend([p1_hout, p2_hin, p2_pos])
@@ -116,6 +120,7 @@ def rasterize_batch(
 
     for glyph_contours in contour_sequences:
         if not glyph_contours:
+            # print("No contours for this glyph, returning blank image.")
             images.append(dead_image)
             continue
 
@@ -162,6 +167,7 @@ def rasterize_batch(
 
         # If there are no shapes, return a blank image
         if len(all_shapes) == 0:
+            # print("No shapes for this glyph, returning blank image.")
             images.append(dead_image)
             continue
 
