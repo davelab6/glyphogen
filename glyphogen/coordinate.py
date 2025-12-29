@@ -1,6 +1,6 @@
 from typing import List, Tuple
 import torch
-from .command_defs import MAX_COORDINATE
+from .command_defs import NODE_GLYPH_COMMANDS, MAX_COORDINATE, NODE_COMMAND_WIDTH
 from .hyperparameters import GEN_IMAGE_SIZE
 
 
@@ -51,64 +51,75 @@ class ImageSpaceBbox(list):
 
 
 @torch.compile
-def image_space_to_mask_space(coords_img_space, box):
+def image_space_to_mask_space(sequence, box):
     """
-    Normalizes image-space coordinates to the model's internal [-1, 1] range
-    relative to a given bounding box (also in image space).
+    Normalizes a sequence's image-space coordinates to the model's internal
+    [-1, 1] range relative to a given bounding box. Handles mixed
+    absolute (M) and relative (other) commands.
+    """
+    commands = sequence[:, :NODE_COMMAND_WIDTH]
+    coords_img_space = sequence[:, NODE_COMMAND_WIDTH:]
 
-    We also convert the handle coordinates from absolute to relative coordinates
-    for easier learning.
-    """
     x1, y1, x2, y2 = box
-    width = x2 - x1
-    height = y2 - y1
+    width = x2 - x1 if x2 > x1 else 1
+    height = y2 - y1 if y2 > y1 else 1
 
-    width = width if width > 0 else 1
-    height = height if height > 0 else 1
+    command_indices = torch.argmax(commands, dim=-1)
+    m_index = list(NODE_GLYPH_COMMANDS.keys()).index("M")
+    is_m_mask = (command_indices == m_index).unsqueeze(1)
 
     normalized = coords_img_space.clone()
-    normalized[:, 0] = (coords_img_space[:, 0] - x1) / width
-    normalized[:, 1] = (coords_img_space[:, 1] - y1) / height
 
-    # Handles are currently absolute coordinates. Normalize them too.
-    normalized[:, 2] = (coords_img_space[:, 2] - x1) / width
-    normalized[:, 3] = (coords_img_space[:, 3] - y1) / height
-    normalized[:, 4] = (coords_img_space[:, 4] - x1) / width
-    normalized[:, 5] = (coords_img_space[:, 5] - y1) / height
-    # # And now convert them to relative coordinates for easier learning
-    # normalized[:, 2] -= normalized[:, 0]
-    # normalized[:, 3] -= normalized[:, 1]
-    # normalized[:, 4] -= normalized[:, 0]
-    # normalized[:, 5] -= normalized[:, 1]
+    # Scale all x-like and y-like coordinates by width and height respectively
+    if coords_img_space.shape[1] > 0:
+        normalized[:, 0::2] /= width
+        normalized[:, 1::2] /= height
 
-    return (normalized * 2) - 1
+    # Additionally translate the absolute 'M' coordinates
+    if torch.sum(is_m_mask) > 0:
+        m_coords = normalized[is_m_mask.squeeze(1)]
+        m_coords[:, 0] -= x1 / width
+        m_coords[:, 1] -= y1 / height
+        normalized[is_m_mask.squeeze(1)] = m_coords
+
+    # Final scaling to [-1, 1]
+    normalized = (normalized * 2) - 1
+    
+    return torch.cat([commands, normalized], dim=-1)
 
 
 @torch.compile
-def mask_space_to_image_space(coords_norm, box):
+def mask_space_to_image_space(sequence, box):
     """
-    Denormalizes coordinates from the model's internal [-1, 1] range back
-    to image space relative to a given bounding box.
+    Denormalizes a sequence's [-1, 1] coordinates back to image space.
+    Handles mixed absolute (M) and relative (other) commands.
     """
+    commands = sequence[:, :NODE_COMMAND_WIDTH]
+    coords_norm = sequence[:, NODE_COMMAND_WIDTH:]
+
     x1, y1, x2, y2 = box
-    width = x2 - x1
-    height = y2 - y1
+    width = x2 - x1 if x2 > x1 else 1
+    height = y2 - y1 if y2 > y1 else 1
 
+    command_indices = torch.argmax(commands, dim=-1)
+    m_index = list(NODE_GLYPH_COMMANDS.keys()).index("M")
+    is_m_mask = (command_indices == m_index).unsqueeze(1)
+
+    # Scale from [-1, 1] to [0, 1]
     coords_0_1 = (coords_norm + 1) / 2
-
+    
     denormalized = coords_0_1.clone()
-    # # Convert the handles back from relative to absolute coordinates
-    # denormalized[:, 2] = coords_0_1[:, 2] + coords_0_1[:, 0]
-    # denormalized[:, 3] = coords_0_1[:, 3] + coords_0_1[:, 1]
-    # denormalized[:, 4] = coords_0_1[:, 4] + coords_0_1[:, 0]
-    # denormalized[:, 5] = coords_0_1[:, 5] + coords_0_1[:, 1]
 
-    # Denormalize the position back into image space
-    denormalized[:, 0] = coords_0_1[:, 0] * width + x1
-    denormalized[:, 1] = coords_0_1[:, 1] * height + y1
-    denormalized[:, 2] = denormalized[:, 2] * width + x1
-    denormalized[:, 3] = denormalized[:, 3] * height + y1
-    denormalized[:, 4] = denormalized[:, 4] * width + x1
-    denormalized[:, 5] = denormalized[:, 5] * height + y1
+    # Scale all x-like and y-like coordinates
+    if coords_norm.shape[1] > 0:
+        denormalized[:, 0::2] *= width
+        denormalized[:, 1::2] *= height
 
-    return denormalized
+    # Additionally translate the absolute 'M' coordinates
+    if torch.sum(is_m_mask) > 0:
+        m_coords = denormalized[is_m_mask.squeeze(1)]
+        m_coords[:, 0] += x1
+        m_coords[:, 1] += y1
+        denormalized[is_m_mask.squeeze(1)] = m_coords
+
+    return torch.cat([commands, denormalized], dim=-1)

@@ -10,10 +10,15 @@ BASIC_SVG_COMMANDS = {
 }
 
 NODE_GLYPH_COMMANDS = {
-    "SOS": 0,  # Start of Sequence
-    "N": 6,  # Node with two handles (x, y, delta_hin_x, delta_hin_y, delta_hout_x, delta_hout_y)
-    "L": 2,  # Line to (x, y)
-    "EOS": 0,  # End of Sequence
+    "SOS": 0,
+    "M": 2,  # Absolute move to (x, y)
+    "L": 2,  # Relative line to (dx, dy)
+    "LH": 1, # Relative horizontal line to (dx)
+    "LV": 1, # Relative vertical line to (dy)
+    "N": 6,  # Relative node with two handles (dx, dy, dhix, dhiy, dhox, dhoy)
+    "NH": 4, # Relative horizontal-handle node (dx, dy, dh_in_x, dh_out_x)
+    "NV": 4, # Relative vertical-handle node (dx, dy, dh_in_y, dh_out_y)
+    "EOS": 0,
 }
 
 MAX_COORDINATE = 1000
