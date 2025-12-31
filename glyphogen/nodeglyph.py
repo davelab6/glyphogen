@@ -5,7 +5,6 @@ if TYPE_CHECKING:
 
 import numpy as np
 import numpy.typing as npt
-import torch
 
 from glyphogen.hyperparameters import MAX_SEQUENCE_LENGTH
 
@@ -217,14 +216,8 @@ class NodeGlyph:
                 )
                 output.append(np.concatenate((command_vector, padded_coords)))
 
-            # Append SOS
-            push_command("SOS", [])
-
             for command in contour.commands(vocabulary):
                 push_command(command.command, command.coordinates)
-
-            # Append EOS
-            push_command("EOS", [])
 
             encoded_contour = np.array(output, dtype=np.float32)
 
@@ -255,16 +248,14 @@ class NodeGlyph:
                 command_index = np.argmax(command_ndarray[i]).item()
                 command_str = command_keys[command_index]
 
-                if command_str == "SOS":
-                    continue
-                if command_str == "EOS":
-                    break
-
                 num_coords = representation_cls.grammar[command_str]
                 coords_slice = coord_ndarray[i, :num_coords]
                 contour_commands.append(
                     representation_cls(command_str, coords_slice.tolist())
                 )
+                if command_str == "EOS":
+                    break
+
             glyph_commands.append(contour_commands)
 
         return cls.from_command_lists(glyph_commands)

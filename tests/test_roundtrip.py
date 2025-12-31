@@ -101,7 +101,10 @@ def test_real_glyph_roundtrip(char_to_test):
 
     # 2b. List[List[NodeCommand]] -> NodeGlyph
     nodeglyph_reconstructed = NodeGlyph(
-        [NodeCommand.contour_from_commands(contour) for contour in contours_commands],
+        [
+            NodeCommand.contour_from_commands(contour, tolerant=False)
+            for contour in contours_commands
+        ],
         nodeglyph_orig.origin,
     )
 

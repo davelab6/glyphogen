@@ -57,7 +57,6 @@ MAX_SEQUENCE_LENGTH = MAX_COMMANDS + 2  # +2 for SOS and EOS tokens
 
 ALPHABET = ["a", "d", "h", "e", "s", "i", "o", "n", "t"]
 # # While pre-training the vectorizer, shove as many glyphs in as we can
-import string
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
 

@@ -1,9 +1,9 @@
-from PIL import Image
-import torch
-from torchvision.datasets import CocoDetection
 import glob
-from fontTools.ttLib import TTFont
+
+import torch
 import torchvision.transforms.v2 as T
+from fontTools.ttLib import TTFont
+from torchvision.datasets import CocoDetection
 
 from glyphogen.hyperparameters import BASE_DIR
 

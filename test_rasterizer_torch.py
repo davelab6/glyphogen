@@ -1,12 +1,17 @@
+from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
-from glyphogen.dataset import get_pretrain_data, collate_fn
+
+# from glyphogen.dataset import get_pretrain_data, collate_fn
 from glyphogen.rasterizer import rasterize_batch
+import numpy as np
 import pydiffvg
 import torch.nn.functional as F
+from glyphogen.glyph import Glyph
+import sys
 
 
-def main():
+def old_main():
     """
     Test script for loading a batch from the pre-train dataset and preparing it for rasterization.
     """
@@ -48,6 +53,17 @@ def main():
         )
 
         pydiffvg.imwrite(comparison_image.cpu(), f"comparison-{ix:02d}.png")
+
+
+def main():
+    file, char = sys.argv[1:3]
+    g = Glyph(Path(file), ord(char), {})
+    raster_img = g.rasterize()
+    print(g.vectorize().to_svg_string())
+    from PIL import Image
+
+    pil_img = Image.fromarray((raster_img.squeeze(-1) * 255).astype(np.uint8), mode="L")
+    pil_img.save("glyph.png")
 
 
 if __name__ == "__main__":

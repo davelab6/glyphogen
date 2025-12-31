@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from glyphogen.command_defs import NODE_GLYPH_COMMANDS
+from glyphogen.command_defs import NodeCommand
 from glyphogen.hyperparameters import (
     HUBER_DELTA,
     VECTOR_LOSS_WEIGHT_COMMAND,
@@ -110,7 +110,7 @@ def masked_coordinate_loss(
     command_indices = torch.argmax(gt_command_for_loss, dim=-1)
 
     # Create a lookup tensor for coordinate counts
-    arg_counts_list = [NODE_GLYPH_COMMANDS[cmd] for cmd in NODE_GLYPH_COMMANDS]
+    arg_counts_list = [NodeCommand.grammar[cmd] for cmd in NodeCommand.grammar]
     arg_counts = torch.tensor(arg_counts_list, device=device)
 
     # Get the number of relevant coordinates for each timestep
@@ -145,16 +145,29 @@ def align_sequences(
     pred_command,
     pred_coords_img_space,
 ):
-    command_width = len(NODE_GLYPH_COMMANDS)
-    gt_command = gt_sequence[:, :command_width]
-    gt_coords_img_space = gt_sequence[:, command_width:]
-    # Since both training and validation are now teacher-forced, the logic is the same.
     # The model was fed gt_sequence[:-1], so its output corresponds to gt_sequence[1:].
-    gt_command_for_loss = gt_command[1:]
-    gt_coords_for_loss = gt_coords_img_space[1:]
+    # We need to construct a full sequence for the prediction to be able to unroll it.
+    # The first element of a sequence is SOS, which has no coords.
+    sos_part = gt_sequence[0:1, :]
+    # The rest of the sequence is the model's prediction.
+    pred_rel_sequence = torch.cat([pred_command, pred_coords_img_space], dim=-1)
+    
+    # Create the full relative sequence for the prediction
+    full_pred_rel_sequence = torch.cat([sos_part, pred_rel_sequence], dim=0)
 
-    pred_command_for_loss = pred_command
-    pred_coords_for_loss = pred_coords_img_space
+    # Unroll both ground truth and predicted sequences to absolute coordinates
+    abs_gt_sequence = NodeCommand.unroll_relative_coordinates(gt_sequence)
+    abs_pred_sequence = NodeCommand.unroll_relative_coordinates(full_pred_rel_sequence)
+
+    gt_command_for_loss, gt_coords_for_loss = NodeCommand.split_tensor(abs_gt_sequence)
+    pred_command_for_loss, pred_coords_for_loss = NodeCommand.split_tensor(abs_pred_sequence)
+
+    # We compare the outputs from the 'M' command onwards.
+    gt_command_for_loss = gt_command_for_loss[1:]
+    gt_coords_for_loss = gt_coords_for_loss[1:]
+    pred_command_for_loss = pred_command_for_loss[1:]
+    pred_coords_for_loss = pred_coords_for_loss[1:]
+
 
     # Pad sequences if lengths differ (should not happen in teacher forcing)
     # But it will happen when we use the model autoregressively for validation
@@ -183,7 +196,7 @@ def align_sequences(
             )
         if gt_len < max_len:
             pad_len = max_len - gt_len
-            eos_index = list(NODE_GLYPH_COMMANDS.keys()).index("EOS")
+            eos_index = NodeCommand.encode_command("EOS")
             gt_command_pad = torch.zeros(
                 pad_len,
                 gt_command_for_loss.shape[1],

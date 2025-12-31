@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import random
+from glyphogen.svgglyph import SVGGlyph
 import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -9,7 +10,7 @@ import torch
 from glyphogen.glyph import Glyph
 from glyphogen.hyperparameters import GEN_IMAGE_SIZE, ALPHABET
 from glyphogen.dataset import font_files
-from glyphogen.command_defs import NodeCommand, MAX_COORDINATE, NODE_COMMAND_WIDTH
+from glyphogen.command_defs import NodeCommand, MAX_COORDINATE
 
 LIMIT = 0
 
@@ -25,19 +26,20 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
         if LIMIT > 0 and len(images_json) >= LIMIT:
             break
         try:
-            glyph = Glyph(Path(font_path), ord(char), location={})
+            pth = Path(font_path)
+            glyph = Glyph(pth, ord(char), location={})
             # print(f"Processing glyph '{char}' from {font_path}")
 
             # Generate vector data first to ensure it's valid
             node_glyph = glyph.vectorize().to_node_glyph()
             node_glyph.normalize()  # IMPORTANT: ensure canonical order
-            contour_sequences = node_glyph.encode()
+            contour_sequences = node_glyph.encode(NodeCommand)
             if contour_sequences is None:
                 print("  Skipping glyph due to encoding failure.")
                 continue
 
             # Now get segmentation data, which should be in the same order
-            svg_glyph = node_glyph.to_svg_glyph()
+            svg_glyph = SVGGlyph.from_node_glyph(node_glyph)
             segmentation_data = svg_glyph.get_segmentation_data()
 
             if not segmentation_data or len(segmentation_data) != len(
@@ -47,7 +49,7 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                 print("  Skipping glyph due to segmentation/vectorization mismatch.")
                 continue
 
-            img_filename = f"{img_id}.png"
+            img_filename = f"{pth.stem}-{char}.png"
             img_path = image_dir / img_filename
             if not img_path.parent.exists():
                 img_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +113,6 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
 
         except Exception as e:
             print(f"Could not process {char} from {font_path}: {e}")
-            pass
 
     return images_json, annotations_json
 
@@ -157,7 +158,7 @@ def main():
     test_images, test_annotations = process_glyph_data(
         test_glyphs,
         TEST_IMG_DIR,
-        start_img_id=len(train_images),
+        start_img_id=116472,
         start_ann_id=len(train_annotations),
     )
     test_coco_json = {

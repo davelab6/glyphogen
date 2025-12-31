@@ -1,16 +1,12 @@
 #!/usr/bin/env python
 import random
+
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
+from glyphogen.command_defs import NodeCommand
 from glyphogen.hyperparameters import PROJ_SIZE
-
-from glyphogen.command_defs import (
-    NODE_COMMAND_WIDTH,
-    COORDINATE_WIDTH,
-    PREDICTED_COORDINATE_WIDTH,
-)
 
 
 class LSTMDecoder(nn.Module):
@@ -21,17 +17,17 @@ class LSTMDecoder(nn.Module):
         self.proj_size = PROJ_SIZE
         self.rate = rate
 
-        self.command_embedding = nn.Linear(NODE_COMMAND_WIDTH, d_model)
-        self.coord_embedding = nn.Linear(COORDINATE_WIDTH, d_model)
+        self.command_embedding = nn.Linear(NodeCommand.command_width, d_model)
+        self.coord_embedding = nn.Linear(NodeCommand.coordinate_width, d_model)
         self.lstm = nn.LSTM(
             d_model + latent_dim, d_model, batch_first=True, proj_size=self.proj_size
         )
         self.layer_norm = nn.LayerNorm(self.proj_size)
         self.dropout = nn.Dropout(rate)
-        self.output_command = nn.Linear(self.proj_size, NODE_COMMAND_WIDTH)
+        self.output_command = nn.Linear(self.proj_size, NodeCommand.command_width)
         self.output_command_activation = nn.ReLU()
         self.output_coords = nn.Linear(
-            self.proj_size + NODE_COMMAND_WIDTH, PREDICTED_COORDINATE_WIDTH
+            self.proj_size + NodeCommand.command_width, NodeCommand.coordinate_width
         )
         nn.init.zeros_(self.output_coords.bias)
         self.coord_output_scale = nn.Parameter(torch.tensor(0.1))
@@ -41,9 +37,12 @@ class LSTMDecoder(nn.Module):
         """
         Performs a single decoding step.
         """
-        command_input = input_token[:, :, :NODE_COMMAND_WIDTH].float()
+        command_input = input_token[:, :, : NodeCommand.command_width].float()
         coord_input = input_token[
-            :, :, NODE_COMMAND_WIDTH : NODE_COMMAND_WIDTH + COORDINATE_WIDTH
+            :,
+            :,
+            NodeCommand.command_width : NodeCommand.command_width
+            + NodeCommand.coordinate_width,
         ].float()
 
         command_emb = self.command_embedding(command_input)
@@ -74,7 +73,7 @@ class LSTMDecoder(nn.Module):
         # First input is always the SOS token from the ground truth
         current_input = x[:, 0:1, :]
         hidden_state = None
-        
+
         all_command_logits = []
         all_coord_outputs = []
 
@@ -87,7 +86,7 @@ class LSTMDecoder(nn.Module):
 
             # Decide on the next input
             use_teacher_forcing = random.random() < teacher_forcing_ratio
-            
+
             if i + 1 < seq_len:
                 if use_teacher_forcing:
                     # Use next ground truth token
@@ -95,15 +94,21 @@ class LSTMDecoder(nn.Module):
                 else:
                     # Use model's own prediction
                     command_probs = F.softmax(command_logits.squeeze(1), dim=-1)
-                    predicted_command_idx = torch.argmax(command_probs, dim=1, keepdim=True)
+                    predicted_command_idx = torch.argmax(
+                        command_probs, dim=1, keepdim=True
+                    )
                     next_command_onehot = F.one_hot(
-                        predicted_command_idx, num_classes=NODE_COMMAND_WIDTH
+                        predicted_command_idx, num_classes=NodeCommand.command_width
                     ).float()
-                    
-                    coord_padded = torch.zeros(batch_size, 1, COORDINATE_WIDTH, device=x.device)
-                    coord_padded[:, :, :PREDICTED_COORDINATE_WIDTH] = coord_output
-                    
-                    current_input = torch.cat([next_command_onehot, coord_padded], dim=-1)
+
+                    coord_padded = torch.zeros(
+                        batch_size, 1, NodeCommand.coordinate_width, device=x.device
+                    )
+                    coord_padded[:, :, : NodeCommand.coordinate_width] = coord_output
+
+                    current_input = torch.cat(
+                        [next_command_onehot, coord_padded], dim=-1
+                    )
 
         command_output = torch.cat(all_command_logits, dim=1)
         coord_output = torch.cat(all_coord_outputs, dim=1)

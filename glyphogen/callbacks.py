@@ -1,12 +1,13 @@
-from glyphogen.losses import align_sequences
-from glyphogen.rasterizer import rasterize_batch
+import numpy as np
 import torch
 from torchvision.utils import draw_bounding_boxes
 
-from glyphogen.hyperparameters import BATCH_SIZE
-from .glyph import NodeGlyph, NodeCommand
-import numpy as np
-from .command_defs import NODE_GLYPH_COMMANDS
+from glyphogen.losses import align_sequences
+from glyphogen.rasterizer import rasterize_batch
+
+from .command_defs import NodeCommand
+from .nodeglyph import NodeGlyph
+from .svgglyph import SVGGlyph
 
 
 def log_vectorizer_outputs(
@@ -53,9 +54,9 @@ def log_vectorizer_outputs(
                 ]
 
                 # Decode to NodeGlyph
-                predicted_raster = rasterize_batch([contour_sequences], device=device)[
-                    0
-                ]
+                predicted_raster = rasterize_batch(
+                    [contour_sequences], NodeCommand, device=device
+                )[0]
             else:
                 # If model predicts no contours, show a blank image
                 predicted_raster = torch.ones_like(img[0:1])
@@ -66,9 +67,9 @@ def log_vectorizer_outputs(
             true_inv = 1.0 - img[0:1, :, :]  # Take first channel and keep dims
             zeros = torch.zeros_like(predicted_inv)
 
-            # overlay_image = torch.cat([predicted_inv, true_inv, zeros], dim=0)
-            # writer.add_image(f"Vectorizer_Images/Overlay_{i}", overlay_image, epoch)
-            writer.add_image(f"Vectorizer_Images/Overlay_{i}", predicted_raster, epoch)
+            overlay_image = torch.cat([predicted_inv, true_inv, zeros], dim=0)
+            writer.add_image(f"Vectorizer_Images/Overlay_{i}", overlay_image, epoch)
+            # writer.add_image(f"Vectorizer_Images/Overlay_{i}", predicted_raster, epoch)
 
             # --- Log SVG Outputs (if enabled and epoch matches) ---
             if log_svgs and not skip_svgs:
@@ -82,8 +83,8 @@ def log_vectorizer_outputs(
                 ]
 
                 try:
-                    decoded_glyph = NodeGlyph.from_numpy(contour_sequences)
-                    svg_string = decoded_glyph.to_svg_glyph().to_svg_string()
+                    decoded_glyph = NodeGlyph.decode(contour_sequences, NodeCommand)
+                    svg_string = SVGGlyph.from_node_glyph(decoded_glyph).to_svg_string()
                     debug_string = decoded_glyph.to_debug_string()
                 except Exception as e:
                     svg_string = f"Couldn't generate SVG: {e}"
@@ -158,7 +159,7 @@ def log_confusion_matrix(state, writer, epoch):
 
     true_indices = torch.cat(state["all_true_indices"])
     pred_indices = torch.cat(state["all_pred_indices"])
-    num_classes = len(NODE_GLYPH_COMMANDS)
+    num_classes = len(NodeCommand.grammar)
     matrix = torch.zeros((num_classes, num_classes), dtype=torch.int32)
     for i in range(true_indices.shape[0]):
         true_label = true_indices[i]
@@ -167,7 +168,7 @@ def log_confusion_matrix(state, writer, epoch):
             matrix[true_label, pred_label] += 1
 
     # Format as Markdown table
-    command_names = list(NODE_GLYPH_COMMANDS.keys())
+    command_names = list(NodeCommand.grammar.keys())
     header = "| True \\ Pred | " + " | ".join(command_names) + " |\n"
     separator = "|--- " * (num_classes + 1) + "|\n"
     body = ""
@@ -226,8 +227,8 @@ def log_bounding_boxes(model, data_loader, writer, epoch, num_images=4):
         # Get predicted boxes and labels
         pred_boxes = pred_target["boxes"]
         pred_labels = [
-            f"Pred: {'hole' if l==2 else 'outer'} ({(s*100):.0f}%)"
-            for l, s in zip(pred_target["labels"], pred_target["scores"])
+            f"Pred: {'hole' if label==2 else 'outer'} ({(s*100):.0f}%)"
+            for label, s in zip(pred_target["labels"], pred_target["scores"])
         ]
 
         # Draw boxes on the image

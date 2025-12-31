@@ -1,6 +1,6 @@
 from typing import List, Tuple
-import torch
-from .command_defs import MAX_COORDINATE, NodeCommand
+
+from .command_defs import MAX_COORDINATE
 from .hyperparameters import GEN_IMAGE_SIZE
 
 

@@ -1,25 +1,19 @@
 #!/usr/bin/env python
 from collections import defaultdict
-from glyphogen.glyph import NodeGlyph
+
+from glyphogen.svgglyph import SVGGlyph
 import torch
 import torch.nn.functional as F
-from torch import nn
 import torchvision
-
-from glyphogen.command_defs import (
-    NODE_GLYPH_COMMANDS,
-    COORDINATE_WIDTH,
-    PREDICTED_COORDINATE_WIDTH,
-)
-from glyphogen.coordinate import (
-    image_space_to_mask_space,
-    mask_space_to_image_space,
-)
-from glyphogen.hyperparameters import GEN_IMAGE_SIZE
-from glyphogen.lstm import LSTMDecoder
-from glyphogen.losses import losses
-from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
+from torch import nn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
+
+from glyphogen.command_defs import NodeCommand
+from glyphogen.nodeglyph import NodeGlyph
+from glyphogen.hyperparameters import GEN_IMAGE_SIZE
+from glyphogen.losses import losses
+from glyphogen.lstm import LSTMDecoder
 
 DEBUG = True
 
@@ -87,7 +81,7 @@ class VectorizationGenerator(nn.Module):
             LSTMDecoder(d_model=d_model, latent_dim=latent_dim, rate=rate)
         )
         self.arg_counts = torch.tensor(
-            list(NODE_GLYPH_COMMANDS.values()), dtype=torch.long
+            list(NodeCommand.grammar.values()), dtype=torch.long
         )
 
         self.use_raster = False
@@ -122,7 +116,7 @@ class VectorizationGenerator(nn.Module):
         z = self.output_dense(x)
         return z
 
-    @torch.compile
+    # @torch.compile
     def forward(self, raster_image, gt_targets=None, teacher_forcing_ratio=1.0):
         # This model implements the canonical mask normalization strategy.
         # It processes one image at a time (batch size should be 1).
@@ -158,7 +152,7 @@ class VectorizationGenerator(nn.Module):
         glyph_pred_commands = []
         glyph_pred_coords_img_space = []
 
-        command_width = len(NODE_GLYPH_COMMANDS)
+        command_width = NodeCommand.command_width
 
         for i in range(len(contour_boxes)):
             box = contour_boxes[i].clamp(min=0, max=raster_image.shape[-1] - 1)
@@ -178,16 +172,18 @@ class VectorizationGenerator(nn.Module):
 
             if target_sequences is not None:  # Training
                 gt_sequence = target_sequences[i].unsqueeze(0)
+                if gt_sequence.shape[2] != command_width + NodeCommand.coordinate_width:
+                    raise ValueError(
+                        f"GT sequence has incorrect width {gt_sequence.shape[2]}, expected {command_width + NodeCommand.coordinate_width}, regenerate your data"
+                    )
                 gt_commands = gt_sequence[:, :, :command_width]
-                gt_coords_img_space = gt_sequence[:, :, command_width:]
 
                 # Normalize GT coords for teacher forcing
-                gt_coords_norm = image_space_to_mask_space(
-                    gt_coords_img_space.squeeze(0), box
+                decoder_input_norm = NodeCommand.image_space_to_mask_space(
+                    target_sequences[i], box
                 ).unsqueeze(0)
 
                 # Prepare decoder input
-                decoder_input_norm = torch.cat([gt_commands, gt_coords_norm], dim=-1)
                 decoder_input = decoder_input_norm[:, :-1, :]
 
                 pred_commands, pred_coords_norm = self.decoder(
@@ -199,8 +195,6 @@ class VectorizationGenerator(nn.Module):
                 # Autoregressive generation loop
                 hidden_state = None
 
-                from .command_defs import NodeCommand
-
                 device = raster_image.device
                 batch_size = 1  # We process one image at a time
                 sos_index = NodeCommand.encode_command("SOS")
@@ -209,9 +203,9 @@ class VectorizationGenerator(nn.Module):
                 command_part[:, 0, sos_index] = 1.0
 
                 coords_part_img_space = torch.zeros(
-                    batch_size, 1, COORDINATE_WIDTH, device=device
+                    batch_size, 1, NodeCommand.coordinate_width, device=device
                 )
-                coords_part_norm = image_space_to_mask_space(
+                coords_part_norm = NodeCommand.image_space_to_mask_space(
                     coords_part_img_space.squeeze(0), box
                 ).unsqueeze(0)
 
@@ -244,9 +238,11 @@ class VectorizationGenerator(nn.Module):
                     ).float()
 
                     coord_padded = torch.zeros(
-                        batch_size, 1, COORDINATE_WIDTH, device=device
+                        batch_size, 1, NodeCommand.coordinate_width, device=device
                     )
-                    coord_padded[:, :, :PREDICTED_COORDINATE_WIDTH] = coord_output_norm
+                    coord_padded[:, :, : NodeCommand.coordinate_width] = (
+                        coord_output_norm
+                    )
 
                     current_input = torch.cat(
                         [next_command_onehot, coord_padded], dim=-1
@@ -257,16 +253,17 @@ class VectorizationGenerator(nn.Module):
                         batch_size, 0, command_width, device=device
                     )
                     pred_coords_norm = torch.empty(
-                        batch_size, 0, PREDICTED_COORDINATE_WIDTH, device=device
+                        batch_size, 0, NodeCommand.coordinate_width, device=device
                     )
                 else:
                     pred_commands = torch.cat(contour_timestep_commands, dim=1)
                     pred_coords_norm = torch.cat(contour_timestep_coords_norm, dim=1)
 
             # Denormalize predicted coordinates back to image space for loss calculation
-            pred_coords_img_space = mask_space_to_image_space(
-                pred_coords_norm.squeeze(0), box
-            )
+            pred_sequence = torch.cat([pred_commands, pred_coords_norm], dim=-1)
+            pred_coords_img_space = NodeCommand.mask_space_to_image_space(
+                pred_sequence.squeeze(0), box
+            )[:, NodeCommand.command_width :]
 
             glyph_pred_commands.append(pred_commands.squeeze(0))
             glyph_pred_coords_img_space.append(pred_coords_img_space)
@@ -342,23 +339,20 @@ def step(model, batch, writer, global_step, teacher_forcing_ratio=1.0):
 def dump_debug_sequences(writer, global_step, i, gt_contours, outputs):
     """For debugging, dump ground truth and predicted sequences"""
     pred_commands_and_coords = [
-        (
-            outputs["pred_commands"][idx].detach(),
-            outputs["pred_coords_img_space"][idx].detach(),
+        torch.cat(
+            [
+                outputs["pred_commands"][idx].detach().cpu(),
+                outputs["pred_coords_img_space"][idx].detach().cpu(),
+            ],
+            dim=-1,
         )
         for idx in range(len(outputs["pred_commands"]))
     ]
-    gt_commands_and_coords = []
-    for contour_idx in range(len(gt_contours)):
-        gt_sequence = gt_contours[contour_idx]["sequence"]
-        command_width = len(NODE_GLYPH_COMMANDS)
-        gt_command = gt_sequence[:, :command_width].detach()
-        gt_coords_img_space = gt_sequence[:, command_width:].detach()
-        gt_commands_and_coords.append((gt_command, gt_coords_img_space))
-    pred_glyph = NodeGlyph.from_numpy(pred_commands_and_coords)
-    debug_string = pred_glyph.to_svg_glyph().to_svg_string()
-    gt_glyph = NodeGlyph.from_numpy(gt_commands_and_coords)
-    gt_debug_string = gt_glyph.to_svg_glyph().to_svg_string()
+
+    pred_glyph = NodeGlyph.decode(pred_commands_and_coords, NodeCommand)
+    debug_string = SVGGlyph.from_node_glyph(pred_glyph).to_svg_string()
+    gt_glyph = NodeGlyph.decode([x["sequence"].cpu() for x in gt_contours], NodeCommand)
+    gt_debug_string = SVGGlyph.from_node_glyph(gt_glyph).to_svg_string()
     writer.add_text(
         f"SVG/Debug_{i}",
         f"GT: {gt_debug_string}\nPred: {debug_string}",

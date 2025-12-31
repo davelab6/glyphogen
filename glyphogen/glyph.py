@@ -15,14 +15,12 @@ from PIL import Image
 from glyphogen.coordinate import to_image_space
 from glyphogen.svgglyph import SVGGlyph
 
-# No point cacheing as we are storing the PNGs in our dataset
-CACHING = False
-
-from PIL import Image
-
 from .command_defs import SVGCommand
 from .hyperparameters import BASE_DIR, RASTER_IMG_SIZE
 from .rasterizer import rasterize_batch
+
+# No point cacheing as we are storing the PNGs in our dataset
+CACHING = False
 
 
 class AbsoluteSVGPathPen(SVGPathPen):
@@ -95,18 +93,17 @@ class Glyph:
         if contour_sequences is None:
             return np.zeros((size, size, 1), dtype=np.float64)
 
-        from .command_defs import NODE_COMMAND_WIDTH
-
         contour_tensors = []
         for encoded_contour in contour_sequences:
             encoded_tensor = torch.from_numpy(encoded_contour).float()
-            cmds_tensor = encoded_tensor[:, :NODE_COMMAND_WIDTH]
-            coords_tensor = encoded_tensor[:, NODE_COMMAND_WIDTH:]
+            cmds_tensor, coords_tensor = SVGCommand.split_tensor(encoded_tensor)
 
             contour_tensors.append((cmds_tensor, coords_tensor))
 
         image_tensor = rasterize_batch(
             [contour_tensors],
+            SVGCommand,
+            seed=42,
             img_size=size,
             requires_grad=False,
             device=torch.device("cpu"),

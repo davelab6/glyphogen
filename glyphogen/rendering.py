@@ -2,10 +2,11 @@ import io
 import subprocess
 from typing import Dict
 
+import diskcache
 import numpy as np
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageChops
-import diskcache
+
 from glyphogen.hyperparameters import GEN_IMAGE_SIZE, STYLE_IMAGE_SIZE
 
 cache_dir = "imgcache"
