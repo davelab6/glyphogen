@@ -114,28 +114,26 @@ def main(
         batch_size=BATCH_SIZE,
         collate_fn=collate_fn,
         drop_last=True,
-        pin_memory=True,
         worker_init_fn=seed_worker,
-        num_workers=8,
+        num_workers=0,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
         collate_fn=collate_fn,
         drop_last=True,
-        pin_memory=True,
         worker_init_fn=seed_worker,
-        num_workers=8,
+        num_workers=0,
     )
 
     if canary is not None:
         print("Reducing dataset for canary testing")
 
     # Optimizer and Loss
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=0.005
-    )
-    # optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    # optimizer = torch.optim.AdamW(
+    #     model.parameters(), lr=LEARNING_RATE, weight_decay=0.005
+    # )
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     # Work out gamma from number of steps and start/end learning rate
     # final_learning_rate = LEARNING_RATE * (gamma ** epochs)
     gamma = (FINAL_LEARNING_RATE / LEARNING_RATE) ** (1 / epochs)
@@ -179,7 +177,8 @@ def main(
         kbar = pkbar.Kbar(
             target=(
                 len(train_loader) if canary is None else min(len(train_loader), canary)
-            ),
+            )
+            - 1,  # Last batch is dropped
             epoch=epoch,
             num_epochs=epochs,
             width=8,
@@ -201,7 +200,7 @@ def main(
                 write_gradient_norms(model, losses, train_writer, global_step)
 
             losses["total_loss"].backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # torch.nn.utils.clip_grad_value_(model.parameters(), 1.0)
             optimizer.step()
             for loss_key, loss_value in losses.items():
                 loss_accumulators[loss_key] += loss_value.item()
@@ -232,7 +231,8 @@ def main(
                     len(test_loader)
                     if canary is None
                     else min(len(test_loader), canary)
-                ),
+                )
+                - 1,  # Last batch is dropped
                 epoch=epoch,
                 num_epochs=epochs,
                 width=8,

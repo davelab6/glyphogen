@@ -1,3 +1,4 @@
+from glyphogen.typing import ModelResults
 import numpy as np
 import torch
 from torchvision.utils import draw_bounding_boxes
@@ -40,17 +41,17 @@ def log_vectorizer_outputs(
             img = images[i].to(device)
 
             # Run inference (uses autoregressive generation via gt_targets=None)
-            outputs = model(img.unsqueeze(0), gt_targets=None)
+            outputs: ModelResults = model(img.unsqueeze(0), gt_targets=None)
 
             # --- Log Raster Visualization ---
-            if outputs["pred_commands"]:
+            if outputs.pred_commands:
                 # Prepare contour sequences for from_numpy
                 contour_sequences = [
                     (
-                        outputs["pred_commands"][idx],
-                        outputs["pred_coords_img_space"][idx],
+                        outputs.pred_commands[idx],
+                        outputs.pred_coords_img_space[idx],
                     )
-                    for idx in range(len(outputs["pred_commands"]))
+                    for idx in range(len(outputs.pred_commands))
                 ]
 
                 # Decode to NodeGlyph
@@ -76,10 +77,10 @@ def log_vectorizer_outputs(
                 # Prepare contour sequences for from_numpy
                 contour_sequences = [
                     (
-                        outputs["pred_commands"][idx],
-                        outputs["pred_coords_img_space"][idx],
+                        outputs.pred_commands[idx],
+                        outputs.pred_coords_img_space[idx],
                     )
-                    for idx in range(len(outputs["pred_commands"]))
+                    for idx in range(len(outputs.pred_commands))
                 ]
 
                 try:
@@ -98,10 +99,10 @@ def log_vectorizer_outputs(
                     k: v for k, v in enumerate(list(NodeCommand.grammar.keys()))
                 }
                 raw_commands_list = []
-                for contour_idx in range(len(outputs["pred_commands"])):
-                    pred_cmds = outputs["pred_commands"][contour_idx]
+                for contour_idx in range(len(outputs.pred_commands)):
+                    pred_cmds = outputs.pred_commands[contour_idx]
                     for cmd_idx in range(pred_cmds.shape[0]):
-                        cmd_argmax = np.argmax(pred_cmds[cmd_idx].cpu().numpy())
+                        cmd_argmax = int(np.argmax(pred_cmds[cmd_idx].cpu().numpy()))
                         cmd_name = command_keys.get(cmd_argmax, "?")
                         raw_commands_list.append(f"{cmd_argmax} ({cmd_name})")
                 raw_commands = " ".join(raw_commands_list)
@@ -116,34 +117,44 @@ def init_confusion_matrix_state():
     return {"all_true_indices": [], "all_pred_indices": []}
 
 
-def collect_confusion_matrix_data(state, outputs_list, targets_tuple):
+def collect_confusion_matrix_data(
+    state, outputs_list: list[ModelResults], targets_tuple
+):
     """Collects prediction and ground truth data from a validation batch."""
 
     # Iterate over each sample in the batch
     for i in range(len(targets_tuple)):
         y = targets_tuple[i]
-        outputs = outputs_list[i]
+        outputs: ModelResults = outputs_list[i]
 
         gt_contours = y["gt_contours"]
-        pred_commands_list = outputs.get("pred_commands", [])
-        pred_coords_img_space_list = outputs["pred_coords_img_space"]
+        pred_commands_list = outputs.pred_commands
+        pred_coords_norm_list = outputs.pred_coords_norm
+        contour_boxes = outputs.contour_boxes
 
         num_contours_to_compare = min(len(gt_contours), len(pred_commands_list))
 
         for j in range(num_contours_to_compare):
             pred_command = pred_commands_list[j]
-            pred_coords_img_space = pred_coords_img_space_list[j]
-            gt_sequence = gt_contours[j]["sequence"]
+            pred_coords_norm = pred_coords_norm_list[j]
+            box = contour_boxes[j]
+
+            # Convert GT sequence from image space to normalized mask space
+            gt_sequence_img_space = gt_contours[j]["sequence"]
+            gt_sequence_norm = NodeCommand.image_space_to_mask_space(
+                gt_sequence_img_space, box
+            )
+
             (
                 gt_command_for_loss,
                 _,
                 pred_command_for_loss,
                 _,
             ) = align_sequences(
-                gt_sequence.device,
-                gt_sequence,
+                gt_sequence_norm.device,
+                gt_sequence_norm,
                 pred_command,
-                pred_coords_img_space,
+                pred_coords_norm,
             )
 
             true_indices = torch.argmax(gt_command_for_loss, dim=-1)

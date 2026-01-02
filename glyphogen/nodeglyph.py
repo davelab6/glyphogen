@@ -17,9 +17,9 @@ class Node:
     Conversion to particular command and coordinate systems is handled elsewhere.
     """
 
-    coordinates: npt.NDArray[np.int_]
-    in_handle: Optional[npt.NDArray[np.int_]]
-    out_handle: Optional[npt.NDArray[np.int_]]
+    coordinates: npt.NDArray[np.float32]
+    in_handle: Optional[npt.NDArray[np.float32]]
+    out_handle: Optional[npt.NDArray[np.float32]]
     _contour: "NodeContour"
     ALIGNMENT_EPSILON = 0.1
 
@@ -145,9 +145,9 @@ class NodeContour:
 
     def push(
         self,
-        coordinates: npt.NDArray[np.int_],
-        in_handle: Optional[npt.NDArray[np.int_]],
-        out_handle: Optional[npt.NDArray[np.int_]],
+        coordinates: npt.NDArray[np.float32],
+        in_handle: Optional[npt.NDArray[np.float32]],
+        out_handle: Optional[npt.NDArray[np.float32]],
     ) -> Node:
         node = Node(
             coordinates=coordinates,

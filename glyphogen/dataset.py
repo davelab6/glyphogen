@@ -36,7 +36,9 @@ class GlyphCocoDataset(CocoDetection):
         super().__init__(root, annFile)
         self.transforms = transforms
 
-    def __getitem__(self, index):
+    def __getitem__(
+        self, index
+    ):  # -> DatasetItem, although the type checker hates it because you can't override __getitem__
         img, target_anns = super().__getitem__(index)
         img_id = self.ids[index]
 

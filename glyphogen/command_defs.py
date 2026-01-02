@@ -1,5 +1,6 @@
 from abc import ABC
 from typing import List, Optional, Self, Sequence, Union
+from jaxtyping import Float
 
 import numpy as np
 import numpy.typing as npt
@@ -21,42 +22,42 @@ class classproperty:
 
 class CoordinateRepresentation(ABC):
     @classmethod
-    def emit_node_position(cls, n: Node) -> npt.NDArray[np.int_]: ...
+    def emit_node_position(cls, n: Node) -> npt.NDArray[np.float32]: ...
 
     @classmethod
-    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.int_]]: ...
+    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]: ...
 
     @classmethod
-    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.int_]]: ...
+    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]: ...
 
 
 class AbsoluteCoordinateRepresentation(CoordinateRepresentation):
     @classmethod
-    def emit_node_position(cls, n: Node) -> npt.NDArray[np.int_]:
+    def emit_node_position(cls, n: Node) -> npt.NDArray[np.float32]:
         return n.coordinates
 
     @classmethod
-    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.int_]]:
+    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]:
         return n.in_handle
 
     @classmethod
-    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.int_]]:
+    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]:
         return n.out_handle
 
 
 class AbsolutePositionRelativeHandleRepresentation(CoordinateRepresentation):
     @classmethod
-    def emit_node_position(cls, n: Node) -> npt.NDArray[np.int_]:
+    def emit_node_position(cls, n: Node) -> npt.NDArray[np.float32]:
         return n.coordinates
 
     @classmethod
-    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.int_]]:
+    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]:
         if n.in_handle is None:
             return None
         return n.in_handle - n.coordinates
 
     @classmethod
-    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.int_]]:
+    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]:
         if n.out_handle is None:
             return None
         return n.out_handle - n.coordinates
@@ -66,7 +67,7 @@ class RelativeCoordinateRepresentation(AbsolutePositionRelativeHandleRepresentat
     """Handles are also relative to the node position."""
 
     @classmethod
-    def emit_node_position(cls, n: Node) -> npt.NDArray[np.int_]:
+    def emit_node_position(cls, n: Node) -> npt.NDArray[np.float32]:
         if n.index == 0:
             return n.coordinates
         previous_node = n.previous
@@ -99,6 +100,22 @@ class CommandRepresentation(ABC):
     @classmethod
     def encode_command(cls, s: str) -> int:
         return list(cls.grammar.keys()).index(s)
+
+    @classmethod
+    def encode_command_one_hot(cls, s: str) -> torch.Tensor:
+        index = cls.encode_command(s)
+        one_hot = torch.zeros(cls.command_width, dtype=torch.float32)
+        one_hot[index] = 1.0
+        return one_hot
+
+    @classmethod
+    def decode_command(cls, index: int) -> str:
+        return list(cls.grammar.keys())[index]
+
+    @classmethod
+    def decode_command_one_hot(cls, one_hot: torch.Tensor) -> str:
+        index = int(torch.argmax(one_hot).item())
+        return cls.decode_command(index)
 
     @classmethod
     def split_tensor(cls, tensor: torch.Tensor) -> Sequence[torch.Tensor]:
@@ -364,21 +381,22 @@ class NodeCommand(CommandRepresentation):
         cls, commands: Sequence[CommandRepresentation], tolerant=True
     ) -> NodeContour:
         contour = NodeContour([])
-        # Expect SOS
-        if not commands or commands[0].command != "SOS" and not tolerant:
-            raise ValueError(
-                f"NodeCommand sequence must start with an 'SOS' command, found {commands[0].command}."
-            )
+        commands = list(commands)
+        # Pop SOS
+        if commands[0].command == "SOS":
+            commands.pop(0)
         # Expect a M
-        if not commands or commands[1].command != "M" and not tolerant:
+        if len(commands) < 1:
+            return contour
+        if not commands or commands[0].command != "M" and not tolerant:
             raise ValueError(
                 f"NodeCommand second command must be 'M' command, found {commands[0].command}."
             )
-        cur_coord = np.array(commands[1].coordinates[0:2], dtype=np.float32)
+        cur_coord = np.array(commands[0].coordinates[0:2], dtype=np.float32)
         if cur_coord.shape != (2,) and tolerant:
             cur_coord = np.pad(cur_coord, (0, 2 - cur_coord.shape[0]), "constant")
         command = "M"
-        for step in commands[2:]:
+        for step in commands[1:]:
             assert cur_coord.shape == (
                 2,
             ), f"Messed up after command {command}, shape is {cur_coord.shape}"
@@ -450,119 +468,121 @@ class NodeCommand(CommandRepresentation):
         return contour
 
     @classmethod
-    def image_space_to_mask_space(cls, sequence, box):
+    def image_space_to_mask_space(cls, sequence, box: Float[torch.Tensor, "4"]):
         """
         Normalizes a sequence's image-space coordinates to the model's internal
-        [-1, 1] range relative to a given bounding box. Handles mixed
-        absolute (M) and relative (other) commands. Lives here as it is
-        dependent on the interpretation of the command sequences.
+        [-1, 1] range relative to a given bounding box. This version is vectorized,
+        differentiates between absolute (M) and relative (other) coordinates,
+        and avoids in-place operations to be torch.compile-friendly.
         """
         commands, coords_img_space = cls.split_tensor(sequence)
-
         x1, y1, x2, y2 = box
-        width = x2 - x1 if x2 > x1 else 1
-        height = y2 - y1 if y2 > y1 else 1
+        width = torch.clamp(x2 - x1, min=1.0)
+        height = torch.clamp(y2 - y1, min=1.0)
 
         command_indices = torch.argmax(commands, dim=-1)
-        m_index = NodeCommand.encode_command("M")
-        is_m_mask = (command_indices == m_index).unsqueeze(1)
+        m_mask = (command_indices == NodeCommand.encode_command("M")).unsqueeze(1)
 
-        normalized = coords_img_space.clone()
+        # --- Calculate treatment for ALL coordinates as if they were RELATIVE deltas ---
+        # Deltas should be scaled by 2/width to be correct in a [-1, 1] space
+        coord_width = coords_img_space.shape[1]
+        scale_vec_rel = torch.tensor(
+            [2.0 / width, 2.0 / height] * (coord_width // 2)
+            + [2.0 / width] * (coord_width % 2),
+            device=sequence.device,
+            dtype=sequence.dtype,
+        )
+        # LV command's first (and only) coord is a dY, so it should be scaled by height.
+        lv_mask = (command_indices == NodeCommand.encode_command("LV")).unsqueeze(1)
+        scale_vec_lv = scale_vec_rel.clone()
+        # Replace first element with height scaling if coord_width > 0
+        if coord_width > 0:
+            scale_vec_lv[0] = 2.0 / height
 
-        # Scale all x-like and y-like coordinates by width and height respectively
-        # Careful here with LV, its first and only coordinate is y-like
-        lv_index = NodeCommand.encode_command("LV")
-        is_lv_mask = (command_indices == lv_index).unsqueeze(1)
+        relative_result = torch.where(
+            lv_mask, coords_img_space * scale_vec_lv, coords_img_space * scale_vec_rel
+        )
 
-        # Additionally translate the absolute 'M' coordinates
-        if torch.sum(is_m_mask) > 0:
-            m_coords = normalized[is_m_mask.squeeze(1)]
-            m_coords[:, 0] -= x1
-            m_coords[:, 1] -= y1
-            normalized[is_m_mask.squeeze(1)] = m_coords
+        # --- Calculate treatment for ALL coordinates as if they were ABSOLUTE positions ---
+        absolute_result = coords_img_space.clone()
+        # Translate
+        absolute_result[:, 0] -= x1
+        absolute_result[:, 1] -= y1
+        # Scale to [0,1]
+        absolute_result[:, 0] /= width
+        absolute_result[:, 1] /= height
+        # Shift to [-1,1]
+        absolute_result = (absolute_result * 2) - 1
 
-        if coords_img_space.shape[1] > 0:
-            if torch.sum(is_lv_mask) > 0:
-                lv_coords = normalized[is_lv_mask.squeeze(1)]
-                lv_coords[:, 0] /= height
-                normalized[is_lv_mask.squeeze(1)] = lv_coords
+        # --- Combine ---
+        # Where the command is 'M', use the absolute result, otherwise use the relative result.
+        normalized_coords = torch.where(m_mask, absolute_result, relative_result)
 
-            non_lv_mask = ~is_lv_mask.squeeze(1)
-            if torch.sum(non_lv_mask) > 0:
-                non_lv_coords = normalized[non_lv_mask]
-                non_lv_coords[:, 0::2] /= width
-                non_lv_coords[:, 1::2] /= height
-                normalized[non_lv_mask] = non_lv_coords
-
-        # Everything else is relative so our work here is done
-
-        # Final scaling to [-1, 1]
-        normalized = (normalized * 2) - 1
-
-        return torch.cat([commands, normalized], dim=-1)
+        return torch.cat([commands, normalized_coords], dim=-1)
 
     @classmethod
     def mask_space_to_image_space(cls, sequence, box):
         """
         Denormalizes a sequence's [-1, 1] coordinates back to image space.
-        Handles mixed absolute (M) and relative (other) commands. Lives here as it is
-        dependent on the interpretation of the command sequences.
+        This version is vectorized, differentiates between absolute (M) and
+        relative (other) coordinates, and avoids in-place operations to be
+        torch.compile-friendly.
         """
         commands, coords_norm = cls.split_tensor(sequence)
-
         x1, y1, x2, y2 = box
-        width = x2 - x1 if x2 > x1 else 1
-        height = y2 - y1 if y2 > y1 else 1
+        width = torch.clamp(x2 - x1, min=1.0)
+        height = torch.clamp(y2 - y1, min=1.0)
 
         command_indices = torch.argmax(commands, dim=-1)
-        m_index = NodeCommand.encode_command("M")
-        is_m_mask = (command_indices == m_index).unsqueeze(1)
+        m_mask = (command_indices == NodeCommand.encode_command("M")).unsqueeze(1)
 
-        # Scale from [-1, 1] to [0, 1]
-        coords_0_1 = (coords_norm + 1) / 2
+        # --- Handle Relative Coordinates (Scaling from [-1, 1] space) ---
+        coord_width = coords_norm.shape[1]
+        # Deltas in [-1,1] space should be scaled by width/2 to be correct in image space
+        scale_vec_rel = torch.tensor(
+            [width / 2.0, height / 2.0] * (coord_width // 2)
+            + [width / 2.0] * (coord_width % 2),
+            device=sequence.device,
+            dtype=sequence.dtype,
+        )
+        lv_mask = (command_indices == NodeCommand.encode_command("LV")).unsqueeze(1)
+        scale_vec_lv = scale_vec_rel.clone()
+        # Replace first element with height scaling if coord_width > 0
+        if coord_width > 0:
+            scale_vec_lv[0] = height / 2.0
 
-        denormalized = coords_0_1.clone()
+        relative_result = torch.where(
+            lv_mask, coords_norm * scale_vec_lv, coords_norm * scale_vec_rel
+        )
 
-        # Translate the absolute 'M' coordinates
-        # Scale all x-like and y-like coordinates
-        # Careful here with LV, its first and only coordinate is y-like
-        lv_index = NodeCommand.encode_command("LV")
-        is_lv_mask = (command_indices == lv_index).unsqueeze(1)
+        # --- Handle Absolute 'M' Coordinates (Translation and Scaling from [-1, 1]) ---
+        absolute_result = coords_norm.clone()
+        # Shift from [-1,1] to [0,1]
+        absolute_result = (absolute_result + 1) / 2
+        # Scale to image dims
+        absolute_result[:, 0] *= width
+        absolute_result[:, 1] *= height
+        # Translate
+        absolute_result[:, 0] += x1
+        absolute_result[:, 1] += y1
 
-        if coords_norm.shape[1] > 0:
-            if torch.sum(is_lv_mask) > 0:
-                lv_coords = denormalized[is_lv_mask.squeeze(1)]
-                lv_coords[:, 0] *= height
-                denormalized[is_lv_mask.squeeze(1)] = lv_coords
+        # --- Combine ---
+        # Where the command is 'M', use the absolute result, otherwise use the relative result.
+        denormalized_coords = torch.where(m_mask, absolute_result, relative_result)
 
-            non_lv_mask = ~is_lv_mask.squeeze(1)
-            if torch.sum(non_lv_mask) > 0:
-                non_lv_coords = denormalized[non_lv_mask]
-                non_lv_coords[:, 0::2] *= width
-                non_lv_coords[:, 1::2] *= height
-                denormalized[non_lv_mask] = non_lv_coords
-
-        if torch.sum(is_m_mask) > 0:
-            m_coords = denormalized[is_m_mask.squeeze(1)]
-            m_coords[:, 0] += x1
-            m_coords[:, 1] += y1
-            denormalized[is_m_mask.squeeze(1)] = m_coords
-
-        return torch.cat([commands, denormalized], dim=-1)
+        return torch.cat([commands, denormalized_coords], dim=-1)
 
     @classmethod
     def unroll_relative_coordinates(cls, sequence: torch.Tensor) -> torch.Tensor:
         """
         Converts a sequence with relative coordinates to one with absolute coordinates.
-        This is a differentiable operation.
+        This is a differentiable and vectorized operation.
         """
         commands, rel_coords = cls.split_tensor(sequence)
         abs_coords = torch.zeros_like(rel_coords)
-        
-        current_pos = torch.zeros(2, device=sequence.device, dtype=sequence.dtype)
 
         command_indices = torch.argmax(commands, dim=-1)
-        
+
         m_index = cls.encode_command("M")
         l_index = cls.encode_command("L")
         lh_index = cls.encode_command("LH")
@@ -573,40 +593,100 @@ class NodeCommand(CommandRepresentation):
         nci_index = cls.encode_command("NCI")
         nco_index = cls.encode_command("NCO")
 
-        for i in range(sequence.shape[0]):
-            cmd_idx = command_indices[i]
-            
-            if cmd_idx == m_index:
-                current_pos = rel_coords[i, 0:2]
-                abs_coords[i, 0:2] = current_pos
-            elif cmd_idx in [l_index, n_index, nh_index, nv_index, nci_index, nco_index]:
-                delta = rel_coords[i, 0:2]
-                current_pos = current_pos + delta
-                abs_coords[i, 0:2] = current_pos
-                if cmd_idx == n_index: # Full node
-                    abs_coords[i, 2:4] = current_pos + rel_coords[i, 2:4] # In-handle
-                    abs_coords[i, 4:6] = current_pos + rel_coords[i, 4:6] # Out-handle
-                elif cmd_idx == nci_index: # In-handle only
-                    abs_coords[i, 2:4] = current_pos + rel_coords[i, 2:4]
-                elif cmd_idx == nco_index: # Out-handle only
-                    abs_coords[i, 2:4] = current_pos + rel_coords[i, 2:4] # Note: NCO stores out-handle in coords 2,3
-                elif cmd_idx == nh_index: # Horizontal handles
-                    abs_coords[i, 2] = current_pos[0] + rel_coords[i, 2] # In-handle x
-                    abs_coords[i, 3] = current_pos[0] + rel_coords[i, 3] # Out-handle x
-                elif cmd_idx == nv_index: # Vertical handles
-                    abs_coords[i, 2] = current_pos[1] + rel_coords[i, 2] # In-handle y
-                    abs_coords[i, 3] = current_pos[1] + rel_coords[i, 3] # Out-handle y
+        # Mask for commands that have relative XY motion
+        relative_xy_mask = (
+            (command_indices == l_index)
+            | (command_indices == n_index)
+            | (command_indices == nh_index)
+            | (command_indices == nv_index)
+            | (command_indices == nci_index)
+            | (command_indices == nco_index)
+        )
 
-            elif cmd_idx == lh_index:
-                delta = torch.zeros(2, device=sequence.device, dtype=sequence.dtype)
-                delta[0] = rel_coords[i, 0]
-                current_pos = current_pos + delta
-                abs_coords[i, 0:2] = current_pos
-            elif cmd_idx == lv_index:
-                delta = torch.zeros(2, device=sequence.device, dtype=sequence.dtype)
-                delta[1] = rel_coords[i, 0]
-                current_pos = current_pos + delta
-                abs_coords[i, 0:2] = current_pos
+        # Create deltas tensor
+        deltas = torch.zeros(
+            sequence.shape[0], 2, device=sequence.device, dtype=sequence.dtype
+        )
+
+        # Add deltas for relative XY commands
+        deltas[relative_xy_mask, :] = rel_coords[relative_xy_mask, 0:2]
+
+        # Add deltas for LH and LV
+        lh_mask = command_indices == lh_index
+        deltas[lh_mask, 0] = rel_coords[lh_mask, 0]
+
+        lv_mask = command_indices == lv_index
+        deltas[lv_mask, 1] = rel_coords[lv_mask, 0]
+
+        # Calculate absolute positions with cumsum
+        abs_positions = torch.cumsum(deltas, dim=0)
+
+        # Find the M command, which sets the initial absolute position
+        m_mask = command_indices == m_index
+        if m_mask.any():
+            m_index_val = torch.where(m_mask)[0][0]
+            m_coords = rel_coords[m_index_val, 0:2]
+
+            # Add M's coords to all subsequent positions
+            abs_positions[m_index_val:] += m_coords
+            # And set M's position directly
+            abs_positions[m_index_val] = m_coords
+
+        # Mask for commands that have position coordinates
+        has_pos_coords_mask = (
+            m_mask
+            | (command_indices == l_index)
+            | (command_indices == lh_index)
+            | (command_indices == lv_index)
+            | (command_indices == n_index)
+            | (command_indices == nh_index)
+            | (command_indices == nv_index)
+            | (command_indices == nci_index)
+            | (command_indices == nco_index)
+        )
+
+        # Place absolute positions in the output tensor
+        abs_coords[has_pos_coords_mask, 0:2] = abs_positions[has_pos_coords_mask]
+
+        # Handle handles, which are relative to the new absolute position
+        n_mask = command_indices == n_index
+        if n_mask.any():
+            abs_coords[n_mask, 2:4] = (
+                abs_positions[n_mask] + rel_coords[n_mask, 2:4]
+            )  # In-handle
+            abs_coords[n_mask, 4:6] = (
+                abs_positions[n_mask] + rel_coords[n_mask, 4:6]
+            )  # Out-handle
+
+        nci_mask = command_indices == nci_index
+        if nci_mask.any():
+            abs_coords[nci_mask, 2:4] = (
+                abs_positions[nci_mask] + rel_coords[nci_mask, 2:4]
+            )
+
+        nco_mask = command_indices == nco_index
+        if nco_mask.any():
+            abs_coords[nco_mask, 2:4] = (
+                abs_positions[nco_mask] + rel_coords[nco_mask, 2:4]
+            )
+
+        nh_mask = command_indices == nh_index
+        if nh_mask.any():
+            abs_coords[nh_mask, 2] = (
+                abs_positions[nh_mask, 0] + rel_coords[nh_mask, 2]
+            )  # In-handle x
+            abs_coords[nh_mask, 3] = (
+                abs_positions[nh_mask, 0] + rel_coords[nh_mask, 3]
+            )  # Out-handle x
+
+        nv_mask = command_indices == nv_index
+        if nv_mask.any():
+            abs_coords[nv_mask, 2] = (
+                abs_positions[nv_mask, 1] + rel_coords[nv_mask, 2]
+            )  # In-handle y
+            abs_coords[nv_mask, 3] = (
+                abs_positions[nv_mask, 1] + rel_coords[nv_mask, 3]
+            )  # Out-handle y
 
         return torch.cat([commands, abs_coords], dim=1)
 

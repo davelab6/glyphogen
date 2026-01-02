@@ -11,7 +11,7 @@ def test_coordinate_transforms():
     """
     Tests that the coordinate space transformations are perfect inverses.
     """
-    box = [100, 100, 300, 400]  # x1, y1, x2, y2
+    box = torch.tensor([100.0, 100.0, 300.0, 400.0])  # x1, y1, x2, y2
 
     # Create a sample sequence tensor
     # [M, L, N]
@@ -85,7 +85,7 @@ def test_real_glyph_roundtrip(char_to_test):
 
     # Now convert to NodeGlyph
     nodeglyph_orig = svg_glyph_orig.to_node_glyph()
-    print("Debug node glyph: ", nodeglyph_orig.to_debug_string())
+    # print("Debug node glyph: ", nodeglyph_orig.to_debug_string())
     # and back again
     svg_glyph_roundtrip = SVGGlyph.from_node_glyph(nodeglyph_orig)
     svg_roundtrip_str = svg_glyph_roundtrip.to_svg_string()
@@ -129,3 +129,53 @@ def test_real_glyph_roundtrip(char_to_test):
     assert (
         nodeglyph_orig == nodeglyph_roundtrip
     ), "NodeGlyph encoding round-trip failed."
+
+
+def test_nodeglyph_decoding():
+    # ['M', 'L', 'N', 'NCO', 'NCI', 'NV', 'NCO', 'EOS', 'NCO', 'NCI', 'NCI', 'NCO', 'EOS']
+    commands = [
+        [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    ]
+
+    coords = [
+        [66, 182, 49, 48, 50, 48],
+        [9, 8, 39, 42, 46, 46],
+        [8, 8, 37, 37, 42, 43],
+        [8, 10, 39, 39, 47, 45],
+        [8, 10, 37, 38, 44, 47],
+        [9, 9, 37, 36, 42, 46],
+        [8, 10, 38, 38, 46, 45],
+        [9, 8, 37, 34, 40, 42],
+        [8, 10, 37, 37, 45, 44],
+        [8, 10, 35, 37, 42, 45],
+        [8, 9, 34, 34, 40, 46],
+        [8, 10, 35, 36, 45, 45],
+        [10, 9, 34, 33, 41, 42],
+    ]
+    glyph = NodeGlyph.decode(
+        [
+            torch.cat(
+                [
+                    torch.tensor(commands, dtype=torch.float32),
+                    torch.tensor(coords, dtype=torch.float32),
+                ],
+                dim=-1,
+            )
+        ],
+        NodeCommand,
+    )
+    assert np.allclose(
+        glyph.contours[0].nodes[0].coordinates, np.array([66 + 9, 182 + 8])
+    )

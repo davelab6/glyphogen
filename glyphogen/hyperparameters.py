@@ -1,8 +1,7 @@
 # Hyperparameters
 LATENT_DIM = 32
-D_MODEL = 512
-PROJ_SIZE = 256
-COMMAND_BOTTLENECK_DIM = 24
+D_MODEL = 1024
+PROJ_SIZE = D_MODEL // 4
 RATE = 0.2  # Specifically, the dropout rate
 EPOCHS = 2000
 BATCH_SIZE = 16
@@ -12,13 +11,13 @@ RASTER_LOSS_WEIGHT = 15000.0
 VECTOR_LOSS_WEIGHT_COMMAND = 1.0  # Keep this at 1, normalize others against it
 # Although you should probably multiply by the number of augmentations
 VECTOR_RASTERIZATION_LOSS_WEIGHT = 0.01
-VECTOR_LOSS_WEIGHT_COORD = 0.01
-CONTOUR_COUNT_WEIGHT = 4.0
-NODE_COUNT_WEIGHT = (
-    0.1  # This helps training a *lot* - but does it cause a command loss plateau?
-)
-HANDLE_SMOOTHNESS_WEIGHT = 0.0
-SIGNED_AREA_WEIGHT = 5e-6
+VECTOR_LOSS_WEIGHT_COORD = 500.0
+# CONTOUR_COUNT_WEIGHT = 4.0
+# NODE_COUNT_WEIGHT = (
+#     0.1  # This helps training a *lot* - but does it cause a command loss plateau?
+# )
+# HANDLE_SMOOTHNESS_WEIGHT = 0.0
+SIGNED_AREA_WEIGHT = 2.0  # XXX Don't know yet
 RASTER_LOSS_CUTOFF = 0.05  # Only apply raster loss if raster loss less than this value
 
 # Turn stuff off again
@@ -29,11 +28,13 @@ NODE_COUNT_WEIGHT = 0
 SIGNED_AREA_WEIGHT = 0
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
-HUBER_DELTA = 3.0
+HUBER_DELTA = (
+    3.0 / 512.0
+)  # Loss computations are in normalized -1 to 1 space across a 512 pixel image.
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
-LEARNING_RATE = 1e-4 * (BATCH_SIZE)
-FINAL_LEARNING_RATE = 1e-6 * (BATCH_SIZE)
+LEARNING_RATE = 1e-6 * (BATCH_SIZE)
+FINAL_LEARNING_RATE = 1e-8 * (BATCH_SIZE)
 
 GEN_IMAGE_SIZE = (512, 512)
 RASTER_IMG_SIZE = GEN_IMAGE_SIZE[0]

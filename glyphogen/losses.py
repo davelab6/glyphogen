@@ -1,27 +1,35 @@
+from typing import List
+from glyphogen.nodeglyph import NodeGlyph
+from glyphogen.svgglyph import SVGGlyph
 import torch
 import torch.nn.functional as F
 
 from glyphogen.command_defs import NodeCommand
 from glyphogen.hyperparameters import (
     HUBER_DELTA,
+    SIGNED_AREA_WEIGHT,
     VECTOR_LOSS_WEIGHT_COMMAND,
     VECTOR_LOSS_WEIGHT_COORD,
 )
+from glyphogen.typing import GroundTruthContour, LossDictionary, ModelResults
 
 
-def losses(y, outputs, device, validation=False):
+def losses(y, outputs: ModelResults, device, validation=False) -> LossDictionary:
     """
     Calculates losses for the hierarchical vectorization model.
     This function iterates through contours and calculates loss for each one,
-    comparing image-space coordinates directly.
+    comparing coordinates in absolute normalized mask space.
     """
     gt_contours = y["gt_contours"]
-    pred_commands_list = outputs["pred_commands"]
-    pred_coords_img_space_list = outputs["pred_coords_img_space"]
+    pred_commands_list = outputs.pred_commands
+    pred_coords_norm_list = outputs.pred_coords_norm
+    contour_boxes = outputs.contour_boxes  # Added for coordinate conversion
 
     num_contours_to_compare = min(len(gt_contours), len(pred_commands_list))
     total_command_loss = torch.tensor(0.0, device=device)
     total_coord_loss = torch.tensor(0.0, device=device)
+    total_signed_area_loss = torch.tensor(0.0, device=device)
+    total_coord_mae_metric = torch.tensor(0.0, device=device)
     total_correct_cmds = 0
     total_cmds = 0
 
@@ -30,14 +38,21 @@ def losses(y, outputs, device, validation=False):
             "total_loss": torch.tensor(0.0, device=device, requires_grad=True),
             "command_loss": torch.tensor(0.0, device=device),
             "coord_loss": torch.tensor(0.0, device=device),
-            "command_accuracy": 0.0,
+            "signed_area_loss": torch.tensor(0.0, device=device),
+            "command_accuracy_metric": torch.tensor(0.0, device=device),
+            "coordinate_mae_metric": torch.tensor(0.0, device=device),
         }
 
     for i in range(num_contours_to_compare):
         pred_command = pred_commands_list[i]
-        pred_coords_img_space = pred_coords_img_space_list[i]
+        pred_coords_norm = pred_coords_norm_list[i]
+        box = contour_boxes[i]
 
-        gt_sequence = gt_contours[i]["sequence"]
+        # Convert GT sequence from image space to normalized mask space
+        gt_sequence_img_space = gt_contours[i]["sequence"]
+        gt_sequence_norm = NodeCommand.image_space_to_mask_space(
+            gt_sequence_img_space, box
+        )
 
         (
             gt_command_for_loss,
@@ -46,9 +61,9 @@ def losses(y, outputs, device, validation=False):
             pred_coords_for_loss,
         ) = align_sequences(
             device,
-            gt_sequence,
+            gt_sequence_norm,
             pred_command,
-            pred_coords_img_space,
+            pred_coords_norm,
         )
 
         if pred_command_for_loss.shape[0] == 0:
@@ -61,30 +76,65 @@ def losses(y, outputs, device, validation=False):
             label_smoothing=0.1,
         )
 
-        # 2. Coordinate Loss (Huber) on image-space coordinates, masked by command
+        # 2. Coordinate Loss (Huber) on absolute normalized mask-space coordinates
         coord_loss = masked_coordinate_loss(
             device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
         )
 
+        # 3. Signed Area Loss
+        # Filter out commands that don't define a vertex (e.g., EOS).
+        # A command needs at least 2 coordinates (one point) to be a vertex.
+        gt_command_indices = torch.argmax(gt_command_for_loss, dim=-1)
+        # This logic is repeated from masked_coordinate_loss, consider refactoring later
+        arg_counts_list = [NodeCommand.grammar[cmd] for cmd in NodeCommand.grammar]
+        arg_counts = torch.tensor(arg_counts_list, device=device)
+        gt_num_relevant_coords = arg_counts[gt_command_indices]
+        gt_vertex_mask = gt_num_relevant_coords >= 2
+
+        pred_command_indices = torch.argmax(pred_command_for_loss, dim=-1)
+        pred_num_relevant_coords = arg_counts[pred_command_indices]
+        pred_vertex_mask = pred_num_relevant_coords >= 2
+
+        # The on-curve points are always the first two coordinates.
+        gt_on_curve_points = gt_coords_for_loss[gt_vertex_mask, 0:2]
+        pred_on_curve_points = pred_coords_for_loss[pred_vertex_mask, 0:2]
+
+        signed_area_loss = abs_signed_area_loss(
+            gt_on_curve_points, pred_on_curve_points
+        )
+
         total_command_loss += command_loss
         total_coord_loss += coord_loss
+        total_signed_area_loss += signed_area_loss
 
         # Accumulate accuracy stats
         pred_indices = torch.argmax(pred_command_for_loss, dim=-1)
         gt_indices = torch.argmax(gt_command_for_loss, dim=-1)
-        total_correct_cmds += (pred_indices == gt_indices).sum().item()
+        correct_commands = (pred_indices == gt_indices).sum().item()
+        total_correct_cmds += correct_commands
         total_cmds += len(pred_indices)
+        # And metric
+        coord_mae_metric = masked_coordinate_mae_metric(
+            device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
+        )
+        total_coord_mae_metric += coord_mae_metric
 
-    avg_command_loss = (
-        total_command_loss / num_contours_to_compare
-        if num_contours_to_compare > 0
-        else torch.tensor(0.0)
-    )
-    avg_coord_loss = (
-        total_coord_loss / num_contours_to_compare
-        if num_contours_to_compare > 0
-        else torch.tensor(0.0)
-    )
+        # if correct_commands / len(pred_indices) > 0.8:
+        #     import IPython
+
+        #     IPython.embed()
+
+    def average_a_loss(loss):
+        return (
+            loss / num_contours_to_compare
+            if num_contours_to_compare > 0
+            else torch.tensor(0.0)
+        )
+
+    avg_command_loss = average_a_loss(total_command_loss)
+    avg_coord_loss = average_a_loss(total_coord_loss)
+    avg_signed_area_loss = average_a_loss(total_signed_area_loss)
+    avg_coord_mae_metric = average_a_loss(total_coord_mae_metric)
     command_accuracy = (
         torch.tensor(total_correct_cmds / total_cmds)
         if total_cmds > 0
@@ -94,20 +144,63 @@ def losses(y, outputs, device, validation=False):
     total_loss = (
         VECTOR_LOSS_WEIGHT_COMMAND * avg_command_loss
         + VECTOR_LOSS_WEIGHT_COORD * avg_coord_loss
+        + SIGNED_AREA_WEIGHT * avg_signed_area_loss
     )
 
     return {
         "total_loss": total_loss,
         "command_loss": avg_command_loss.detach(),
         "coord_loss": avg_coord_loss.detach(),
+        "signed_area_loss": avg_signed_area_loss.detach(),
         "command_accuracy_metric": command_accuracy,
+        "coordinate_mae_metric": avg_coord_mae_metric.detach(),
     }
 
 
-def masked_coordinate_loss(
-    device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
-):
-    command_indices = torch.argmax(gt_command_for_loss, dim=-1)
+def abs_signed_area_loss(true_points, pred_points):
+    """
+    Calculates the signed area of a polygon using the Shoelace formula.
+    The input should be a tensor of shape (N, 2) where N is the number of vertices.
+
+    We do this inefficiently in two steps because the pred points will have
+    gradients and the true points will not, which confuses the compiler
+    """
+    # Compute true signed area
+    if true_points.shape[0] < 3:
+        true_signed_area = torch.tensor(
+            0.0, device=true_points.device, dtype=true_points.dtype
+        )
+    else:
+        x = true_points[:, 0]
+        y = true_points[:, 1]
+        true_signed_area = 0.5 * (
+            torch.sum(x[:-1] * y[1:])
+            + x[-1] * y[0]
+            - torch.sum(y[:-1] * x[1:])
+            - y[-1] * x[0]
+        )
+
+    # Compute predicted signed area
+    if pred_points.shape[0] < 3:
+        pred_signed_area = torch.tensor(
+            0.0, device=pred_points.device, dtype=pred_points.dtype
+        )
+    else:
+        x = pred_points[:, 0]
+        y = pred_points[:, 1]
+        pred_signed_area = 0.5 * (
+            torch.sum(x[:-1] * y[1:])
+            + x[-1] * y[0]
+            - torch.sum(y[:-1] * x[1:])
+            - y[-1] * x[0]
+        )
+
+    return torch.abs(true_signed_area - pred_signed_area)
+
+
+def coordinate_width_mask(commands: torch.Tensor, coords: torch.Tensor):
+    device = commands.device
+    command_indices = torch.argmax(commands, dim=-1)
 
     # Create a lookup tensor for coordinate counts
     arg_counts_list = [NodeCommand.grammar[cmd] for cmd in NodeCommand.grammar]
@@ -118,8 +211,15 @@ def masked_coordinate_loss(
 
     # Create the mask
     coord_mask = torch.arange(
-        gt_coords_for_loss.shape[1], device=device
+        coords.shape[1], device=device
     ) < num_relevant_coords.unsqueeze(1)
+    return coord_mask
+
+
+def masked_coordinate_loss(
+    device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
+):
+    coord_mask = coordinate_width_mask(gt_command_for_loss, gt_coords_for_loss)
 
     elementwise_coord_loss = F.huber_loss(
         pred_coords_for_loss,
@@ -139,38 +239,66 @@ def masked_coordinate_loss(
     return coord_loss
 
 
+def masked_coordinate_mae_metric(
+    device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
+):
+    """
+    Calculate Mean Absolute Error (MAE) for coordinates, masked by command type.
+    This function computes the MAE only for the coordinates that are relevant
+    based on the command type at each timestep. It is scaled by 512 as the
+    coordinates are normalized in the range [-1, 1], and we want to understand
+    how much they differ in "mask space" space of size 512x512.
+    """
+    coord_mask = coordinate_width_mask(gt_command_for_loss, gt_coords_for_loss)
+    elementwise_coord_error = torch.abs(
+        pred_coords_for_loss * 256.0 - gt_coords_for_loss * 256.0
+    )
+    masked_coord_error = elementwise_coord_error * coord_mask
+    num_coords_in_metric = coord_mask.sum()
+    if num_coords_in_metric > 0:
+        coord_mae = masked_coord_error.sum() / num_coords_in_metric
+    else:
+        coord_mae = torch.tensor(0.0, device=device)
+    return coord_mae
+
+
 def align_sequences(
     device,
-    gt_sequence,
+    gt_sequence_norm,
     pred_command,
-    pred_coords_img_space,
+    pred_coords_norm,
 ):
-    # The model was fed gt_sequence[:-1], so its output corresponds to gt_sequence[1:].
-    # We need to construct a full sequence for the prediction to be able to unroll it.
-    # The first element of a sequence is SOS, which has no coords.
-    sos_part = gt_sequence[0:1, :]
-    # The rest of the sequence is the model's prediction.
-    pred_rel_sequence = torch.cat([pred_command, pred_coords_img_space], dim=-1)
-    
-    # Create the full relative sequence for the prediction
-    full_pred_rel_sequence = torch.cat([sos_part, pred_rel_sequence], dim=0)
+    # Step 1: Align sequences in relative space (the original, simple way)
+    gt_command_all, _ = NodeCommand.split_tensor(gt_sequence_norm)
 
-    # Unroll both ground truth and predicted sequences to absolute coordinates
-    abs_gt_sequence = NodeCommand.unroll_relative_coordinates(gt_sequence)
-    abs_pred_sequence = NodeCommand.unroll_relative_coordinates(full_pred_rel_sequence)
+    gt_command_for_loss = gt_command_all[1:]
+    pred_command_for_loss = pred_command
 
-    gt_command_for_loss, gt_coords_for_loss = NodeCommand.split_tensor(abs_gt_sequence)
-    pred_command_for_loss, pred_coords_for_loss = NodeCommand.split_tensor(abs_pred_sequence)
+    # Step 2: Unroll GT and Predictions to get absolute coordinates for loss
 
-    # We compare the outputs from the 'M' command onwards.
-    gt_command_for_loss = gt_command_for_loss[1:]
-    gt_coords_for_loss = gt_coords_for_loss[1:]
-    pred_command_for_loss = pred_command_for_loss[1:]
-    pred_coords_for_loss = pred_coords_for_loss[1:]
+    # Unroll the full GT sequence and take the part needed for loss ([1:])
+    abs_gt_sequence = NodeCommand.unroll_relative_coordinates(gt_sequence_norm)
+    _, abs_gt_coords_all = NodeCommand.split_tensor(abs_gt_sequence)
+    gt_coords_for_loss = abs_gt_coords_all[1:]
 
+    # To unroll predictions, we need a full sequence.
+    # It starts with SOS (from GT) and then the model's predictions.
+    sos_token = gt_sequence_norm[0:1, :]
+    predicted_relative_sequence = torch.cat([pred_command, pred_coords_norm], dim=-1)
+    full_predicted_relative_sequence = torch.cat(
+        [sos_token, predicted_relative_sequence], dim=0
+    )
 
-    # Pad sequences if lengths differ (should not happen in teacher forcing)
-    # But it will happen when we use the model autoregressively for validation
+    abs_pred_sequence = NodeCommand.unroll_relative_coordinates(
+        full_predicted_relative_sequence
+    )
+    _, abs_pred_coords_all = NodeCommand.split_tensor(abs_pred_sequence)
+
+    # The part of the unrolled prediction that corresponds to the model's output
+    # is from index 1 onwards (to match the GT slice).
+    pred_coords_for_loss = abs_pred_coords_all[1:]
+
+    # Step 3: Pad if necessary (e.g., for autoregressive validation)
     if pred_command_for_loss.shape[0] != gt_command_for_loss.shape[0]:
         max_len = max(pred_command_for_loss.shape[0], gt_command_for_loss.shape[0])
         pred_len, gt_len = pred_command_for_loss.shape[0], gt_command_for_loss.shape[0]
@@ -214,9 +342,164 @@ def align_sequences(
                 [gt_command_for_loss, gt_command_pad], dim=0
             )
             gt_coords_for_loss = torch.cat([gt_coords_for_loss, gt_coords_pad], dim=0)
+
     return (
         gt_command_for_loss,
         gt_coords_for_loss,
         pred_command_for_loss,
         pred_coords_for_loss,
     )
+
+
+def predictions_to_image_space(
+    outputs: ModelResults, gt_contours: List[GroundTruthContour]
+):
+    # For visualization, we need to convert the predicted normalized coordinates
+    # back to image space.
+    pred_commands_list = outputs.pred_commands
+    pred_coords_norm_list = outputs.pred_coords_norm
+    contour_boxes = outputs.contour_boxes
+
+    pred_commands_and_coords_img_space = []
+    for i in range(len(pred_commands_list)):
+        pred_cmd = pred_commands_list[i]
+        pred_coords_norm = pred_coords_norm_list[i]
+        box = contour_boxes[i]
+
+        pred_sequence_norm = torch.cat([pred_cmd, pred_coords_norm], dim=-1)
+        # We need a full sequence to convert back to image space, so prepend SOS
+        sos_token = NodeCommand.image_space_to_mask_space(
+            gt_contours[i]["sequence"], box
+        )[0:1, :]
+        full_pred_sequence_norm = torch.cat([sos_token, pred_sequence_norm], dim=0)
+
+        # Convert back to image space for visualization
+        pred_sequence_img_space = NodeCommand.mask_space_to_image_space(
+            full_pred_sequence_norm, box
+        )
+        # We only need the parts that were actually predicted
+        pred_commands_and_coords_img_space.append(
+            pred_sequence_img_space[1:].detach().cpu()
+        )
+    return pred_commands_and_coords_img_space
+
+
+def dump_debug_sequences(
+    writer, global_step, batch_idx, gt_contours, outputs: ModelResults, loss_values
+):
+    """For debugging, dump ground truth and predicted sequences"""
+    pred_commands_and_coords_img_space = predictions_to_image_space(
+        outputs, gt_contours
+    )
+    pred_glyph = NodeGlyph.decode(pred_commands_and_coords_img_space, NodeCommand)
+    debug_string = SVGGlyph.from_node_glyph(pred_glyph).to_svg_string()
+    gt_glyph = NodeGlyph.decode([x["sequence"].cpu() for x in gt_contours], NodeCommand)
+    gt_nodes = gt_glyph.to_debug_string()
+    gt_debug_string = SVGGlyph.from_node_glyph(gt_glyph).to_svg_string()
+    # very_debug(outputs, gt_contours, writer, global_step, batch_idx)
+
+    writer.add_text(
+        f"SVG/Debug_{batch_idx}",
+        f"""
+GT: {gt_debug_string}
+Pred: {debug_string}
+GT Nodes: {gt_nodes}
+Pred Nodes: {pred_glyph.to_debug_string()}
+Command loss: {loss_values['command_loss'].item():.4f}
+Coord loss: {loss_values['coord_loss'].item():.4f}
+""",
+        global_step,
+    )
+
+
+def very_debug(
+    outputs: ModelResults,
+    gt_contours: List[GroundTruthContour],
+    writer,
+    global_step,
+    batch_idx,
+):
+    # Keep this aligned with the losses function
+    pred_commands_list = outputs.pred_commands
+    pred_coords_norm_list = outputs.pred_coords_norm
+    contour_boxes = outputs.contour_boxes
+
+    num_contours_to_compare = min(len(gt_contours), len(pred_commands_list))
+    device = outputs.pred_commands[0].device
+    for i in range(num_contours_to_compare):
+        pred_command = pred_commands_list[i]
+        pred_coords_norm = pred_coords_norm_list[i]
+        box = contour_boxes[i]
+
+        # Convert GT sequence from image space to normalized mask space
+        gt_sequence_img_space = gt_contours[i]["sequence"]
+        gt_sequence_norm = NodeCommand.image_space_to_mask_space(
+            gt_sequence_img_space, box
+        )
+
+        (
+            gt_command_for_loss,
+            gt_coords_for_loss,
+            pred_command_for_loss,
+            pred_coords_for_loss,
+        ) = align_sequences(
+            device,
+            gt_sequence_norm,
+            pred_command,
+            pred_coords_norm,
+        )
+
+        # Denormalize from [-1, 1] to [0, 512] for debugging
+        gt_coords_denorm = (gt_coords_for_loss.detach().cpu() + 1) / 2 * 512
+        pred_coords_denorm = (pred_coords_for_loss.detach().cpu() + 1) / 2 * 512
+
+        gt_contour_dump = ""
+        commands = (
+            gt_command_for_loss[:, : NodeCommand.command_width].argmax(dim=-1).tolist()
+        )
+        gt_commands_debug = [NodeCommand.decode_command(cmd) for cmd in commands]
+        # Dump the masked coordinates as well
+        gt_coords_debug = gt_coords_denorm.tolist()
+        for cmd, coord in zip(gt_commands_debug, gt_coords_debug):
+            num_coords = NodeCommand.grammar[cmd]
+            gt_contour_dump += (
+                f"{cmd} "
+                + " ".join([f"{coord[j]:.2f}, " for j in range(0, num_coords)])
+                + "\n"
+            )
+        # Now do the same for the predicted
+        pred_contour_dump = ""
+        commands = (
+            pred_command_for_loss[:, : NodeCommand.command_width]
+            .argmax(dim=-1)
+            .tolist()
+        )
+        pred_commands_debug = [NodeCommand.decode_command(cmd) for cmd in commands]
+        pred_coords_debug = pred_coords_denorm.tolist()
+        command_loss = F.cross_entropy(
+            pred_command_for_loss.unsqueeze(0).permute(0, 2, 1),
+            gt_command_for_loss.unsqueeze(0).argmax(dim=-1),
+            label_smoothing=0.1,
+        )
+        coord_loss = masked_coordinate_loss(
+            device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
+        )
+        for cmd, coord in zip(pred_commands_debug, pred_coords_debug):
+            num_coords = NodeCommand.grammar[cmd]
+            pred_contour_dump += (
+                f"{cmd} "
+                + " ".join([f"{coord[j]:.2f}, " for j in range(0, num_coords)])
+                + "\n"
+            )
+        writer.add_text(
+            f"SVG/Debug_{batch_idx}_contour_{i}",
+            f"""
+GT: 
+{gt_contour_dump}
+Pred: 
+{pred_contour_dump}
+Command loss: {command_loss.item():.4f}
+Coord loss: {coord_loss.item():.4f}
+    """,
+            global_step,
+        )
