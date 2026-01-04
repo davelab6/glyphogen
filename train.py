@@ -6,7 +6,6 @@ import os
 import pkbar
 import torch
 from torch.utils.data import DataLoader
-from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.tensorboard import SummaryWriter
 import random
 import sys
@@ -252,7 +251,7 @@ def main(
                     for loss_key, loss_value in losses.items():
                         loss_accumulators[loss_key] += loss_value
                     total_val_loss += losses["total_loss"].item()
-                    collect_confusion_matrix_data(cm_state, outputs, batch[1])
+                    collect_confusion_matrix_data(cm_state, outputs[0], batch)
                     kbar.update(
                         i,
                         values=[

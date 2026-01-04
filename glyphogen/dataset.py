@@ -6,6 +6,9 @@ from fontTools.ttLib import TTFont
 from torchvision.datasets import CocoDetection
 
 from glyphogen.hyperparameters import BASE_DIR
+from glyphogen.typing import CollatedGlyphData, GroundTruthContour, Target
+from typing import List
+import torch.nn.functional as F
 
 # This file is now much simpler as it's only used by the hierarchical model.
 # The original dataset logic is preserved in the history.
@@ -81,10 +84,68 @@ class GlyphCocoDataset(CocoDetection):
 
 def collate_fn(batch):
     """
-    Standard collate_fn for object detection tasks.
-    It does not try to stack the targets, but returns them as a list of dicts.
+    Custom collate_fn for hierarchical glyph data.
+
+    This function takes a batch of samples (each being an (image, target) tuple)
+    and collates them into a single `CollatedGlyphData` dictionary.
+
+    It unnests the contours from each image's target dictionary and flattens
+    them into batch-wide tensors. This pre-processing is moved here from the
+    model's forward pass to make the model more `torch.compile` friendly by
+    avoiding data-dependent control flow (variable-length loops) in the model.
     """
-    return tuple(zip(*batch))
+    # Filter out None items, which can happen if an image fails to load.
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None
+
+    images, gt_targets = zip(*batch)
+
+    all_normalized_masks = []
+    all_contour_boxes = []
+    all_target_sequences = []
+    all_contour_image_idx = []
+
+    for i, target in enumerate(gt_targets):
+        img_height, img_width = images[i].shape[1], images[i].shape[2]
+        gt_contours: List[GroundTruthContour] = target["gt_contours"]
+
+        for contour in gt_contours:
+            box = contour["box"].clamp(min=0, max=max(img_height, img_width) - 1)
+            mask = contour["mask"]
+            sequence = contour["sequence"]
+
+            x1, y1, x2, y2 = box.long()
+            if x1 >= x2 or y1 >= y2:
+                continue
+
+            # Crop and normalize the mask
+            cropped_mask = mask[y1:y2, x1:x2].unsqueeze(0).unsqueeze(0)
+            normalized_mask = F.interpolate(
+                cropped_mask.to(torch.float32),
+                size=(512, 512),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+            all_normalized_masks.append(normalized_mask)
+            all_contour_boxes.append(box)
+            all_target_sequences.append(sequence)
+            all_contour_image_idx.append(i)
+
+    # If a batch has no valid contours, return None. The training loop must handle this.
+    if not all_normalized_masks:
+        return None
+
+    collated_data: CollatedGlyphData = {
+        "images": torch.stack(images, 0),
+        "gt_targets": list(gt_targets),
+        "normalized_masks": torch.cat(all_normalized_masks, dim=0),
+        "contour_boxes": torch.stack(all_contour_boxes, dim=0),
+        "target_sequences": all_target_sequences,
+        "contour_image_idx": torch.tensor(all_contour_image_idx, dtype=torch.long),
+    }
+    return collated_data
 
 
 def get_transform(train):

@@ -12,6 +12,7 @@ from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor, MaskRCNN
 
 from glyphogen.command_defs import NodeCommand
 from glyphogen.typing import (
+    CollatedGlyphData,
     GroundTruthContour,
     LossDictionary,
     ModelResults,
@@ -98,13 +99,16 @@ class VectorizationGenerator(nn.Module):
             param.requires_grad = False
 
         # The new context will be the latent vector of the normalized mask
-        self.decoder = LSTMDecoder(d_model=d_model, latent_dim=latent_dim, rate=rate)
+        self.decoder = torch.compile(
+            LSTMDecoder(d_model=d_model, latent_dim=latent_dim, rate=rate)
+        )
         self.arg_counts: torch.Tensor = torch.tensor(
             list(NodeCommand.grammar.values()), dtype=torch.long
         )
 
         self.use_raster = False
 
+    @torch.compile
     def encode(self, inputs):
         """Return a latent vector encoding of the input mask images."""
         x = self.conv1(inputs)
@@ -135,57 +139,54 @@ class VectorizationGenerator(nn.Module):
         z = self.output_dense(x)
         return z
 
-    @torch.compile(dynamic=True)
-    def get_boxes_and_masks(
-        self, raster_image: torch.Tensor, gt_targets: Optional[Target] = None
-    ) -> Tuple[
-        Optional[torch.Tensor], Optional[torch.Tensor], Optional[list[torch.Tensor]]
-    ]:
-        if gt_targets is not None:
-            # During training, we use the ground truth boxes and masks for stability.
-            gt_contours = gt_targets["gt_contours"]
-            if not gt_contours:
-                return None, None, None
-            contour_boxes = torch.stack([c["box"] for c in gt_contours])
-            contour_masks = torch.stack([c["mask"] for c in gt_contours])
-            target_sequences = [c["sequence"] for c in gt_contours]
-        else:  # Inference
-            with torch.no_grad():
-                segmenter_output: SegmenterOutput = self.segmenter(raster_image)[0]
-            if not segmenter_output["masks"].numel():
-                return None, None, None
-
-            # Sort by mask area descending
-            areas = (
-                segmenter_output["boxes"][:, 2] - segmenter_output["boxes"][:, 0]
-            ) * (segmenter_output["boxes"][:, 3] - segmenter_output["boxes"][:, 1])
-            sorted_indices = torch.argsort(areas, descending=True)
-            contour_boxes = segmenter_output["boxes"][sorted_indices]
-            contour_masks = segmenter_output["masks"][sorted_indices].squeeze(1)
-            target_sequences = None
-        return contour_boxes, contour_masks, target_sequences
-
-    @torch.compile
     def forward(
-        self, raster_image, gt_targets=None, teacher_forcing_ratio=1.0
+        self, collated_batch: "CollatedGlyphData", teacher_forcing_ratio=1.0
     ) -> ModelResults:
         # This model implements the canonical mask normalization strategy.
-        # It processes one image at a time (batch size should be 1).
-        if raster_image.shape[0] > 1:
-            raise NotImplementedError(
-                "Canonical model currently supports a batch size of 1."
+        # It processes a batch of contours collated from multiple images.
+
+        # Data is pre-processed by the collate_fn. We can use it directly.
+        normalized_masks_batch = collated_batch["normalized_masks"]
+        target_sequences = collated_batch["target_sequences"]
+        valid_boxes = collated_batch["contour_boxes"]
+
+        # Send the normalized masks through the latent vector encoder
+        z_batch = self.encode(normalized_masks_batch).unsqueeze(1)
+
+        # and then decode a sequence for each contour
+        if self.training:
+            return self.teacher_forcing(
+                target_sequences, valid_boxes, z_batch, teacher_forcing_ratio
+            )
+        else:  # Validation
+            # Always use teacher forcing during validation for a stable loss metric and speed.
+            return self.teacher_forcing(
+                target_sequences, valid_boxes, z_batch, teacher_forcing_ratio=1.0
             )
 
-        # Step 1: Image goes through segmentation model, we get boxes and masks
-        contour_boxes, contour_masks, target_sequences = self.get_boxes_and_masks(
-            raster_image, gt_targets
-        )
-        if contour_boxes is None or contour_masks is None or target_sequences is None:
+    def generate(self, raster_image: torch.Tensor) -> ModelResults:
+        """
+        This method is for pure inference from a raw image.
+        """
+        # Step 1: Run the segmenter to get predicted boxes and masks
+        with torch.no_grad():
+            # The segmenter expects a batch, so unsqueeze the image
+            segmenter_output: SegmenterOutput = self.segmenter(
+                raster_image.unsqueeze(0)
+            )[0]
+
+        if not segmenter_output["masks"].numel():
             return ModelResults.empty()
 
-        # Step 2: Batch process all contours
+        # Sort by mask area descending
+        areas = (segmenter_output["boxes"][:, 2] - segmenter_output["boxes"][:, 0]) * (
+            segmenter_output["boxes"][:, 3] - segmenter_output["boxes"][:, 1]
+        )
+        sorted_indices = torch.argsort(areas, descending=True)
+        contour_boxes = segmenter_output["boxes"][sorted_indices]
+        contour_masks = segmenter_output["masks"][sorted_indices].squeeze(1)
 
-        # Collect and normalize masks
+        # Step 2: Normalize the predicted masks
         normalized_masks = []
         valid_boxes = []
         for i in range(len(contour_boxes)):
@@ -208,17 +209,11 @@ class VectorizationGenerator(nn.Module):
         if not normalized_masks:
             return ModelResults.empty()
 
-        # Send the normalized masks through the latent vector encoder
+        # Step 3: Encode the masks and decode using autoregression
         normalized_masks_batch = torch.cat(normalized_masks, dim=0)
         z_batch = self.encode(normalized_masks_batch).unsqueeze(1)
 
-        # and then decode a seuence for each contour
-        if target_sequences is not None:  # Training
-            return self.teacher_forcing(
-                target_sequences, valid_boxes, z_batch, teacher_forcing_ratio
-            )
-        else:  # Inference
-            return self.autoregression(raster_image, z_batch, valid_boxes)
+        return self.autoregression(z_batch, valid_boxes)
 
     def teacher_forcing(
         self, target_sequences, valid_boxes, z_batch, teacher_forcing_ratio
@@ -279,7 +274,7 @@ class VectorizationGenerator(nn.Module):
         )
 
     def autoregression(
-        self, raster_image, z_batch, valid_boxes: List[Float[torch.Tensor, "4"]]
+        self, z_batch, valid_boxes: List[Float[torch.Tensor, "4"]]
     ) -> ModelResults:
         glyph_pred_commands = []
         glyph_pred_coords_norm = []
@@ -287,7 +282,7 @@ class VectorizationGenerator(nn.Module):
         # Autoregressive generation for each contour in the batch
         # This part is still sequential per time step, but batched over contours
         batch_size = len(valid_boxes)
-        device = raster_image.device
+        device = z_batch.device
         sos_index = NodeCommand.encode_command("SOS")
 
         command_part = torch.zeros(
@@ -425,68 +420,10 @@ def step(
     model, batch, writer, global_step, teacher_forcing_ratio=1.0
 ) -> Tuple[LossDictionary, List[ModelResults]]:
     device = next(model.parameters()).device
-    images, targets = batch
+    collated_batch = batch
 
-    # Accumulate losses and outputs over the batch
-    batch_losses = defaultdict(list)
-    all_outputs = []
-
-    # Process each item in the batch individually, as the model's
-    # forward pass is designed for a single, complex sample.
-    for i in range(len(images)):
-        img = images[i].to(device)
-        y: Target = targets[i]
-
-        # Move nested ground truth tensors to device
-        gt_contours: List[GroundTruthContour] = y["gt_contours"]
-        for contour in gt_contours:
-            for key, value in contour.items():
-                if isinstance(value, torch.Tensor):
-                    contour[key] = value.to(device)
-
-        # Run the model for a single item
-        # For debugging, we use teacher forcing for validation as well.
-        if model.training:
-            outputs = model(
-                img.unsqueeze(0),
-                gt_targets=y,
-                teacher_forcing_ratio=teacher_forcing_ratio,
-            )
-        else:  # Validation/Inference
-            # Always use teacher forcing during validation for speed
-            outputs = model(img.unsqueeze(0), gt_targets=y, teacher_forcing_ratio=1.0)
-        all_outputs.append(outputs)
-
-        # Calculate loss for the single item
-        loss_values = losses(y, outputs, device, validation=not model.training)
-
-        if DEBUG and writer is not None and global_step % 100 == 0:
-            dump_debug_sequences(
-                writer, global_step, i, gt_contours, outputs, loss_values
-            )
-        # Append loss tensors to lists for later averaging
-        if "total_loss" in loss_values:
-            for key, val in loss_values.items():
-                batch_losses[key].append(val)
-
-    # Create final loss dictionary for the training loop
-    if batch_losses:
-        # Average losses across the batch
-        final_losses = {
-            "total_loss": torch.stack(batch_losses["total_loss"]).mean(),
-            "command_loss": torch.stack(batch_losses["command_loss"]).mean(),
-            "coord_loss": torch.stack(batch_losses["coord_loss"]).mean(),
-            "signed_area_loss": torch.stack(batch_losses["signed_area_loss"]).mean(),
-            "command_accuracy_metric": torch.stack(
-                batch_losses["command_accuracy_metric"]
-            ).mean(),
-            "coordinate_mae_metric": torch.stack(
-                batch_losses["coordinate_mae_metric"]
-            ).mean(),
-        }
-    else:
-        print("Warning: No valid samples in batch.")
-        # Handle empty or invalid batch
+    if collated_batch is None:
+        # Batch was empty or invalid, skip.
         final_losses: LossDictionary = {
             "total_loss": torch.tensor(0.0, device=device, requires_grad=True),
             "command_loss": torch.tensor(0.0, device=device),
@@ -495,5 +432,69 @@ def step(
             "command_accuracy_metric": torch.tensor(0.0, device=device),
             "coordinate_mae_metric": torch.tensor(0.0, device=device),
         }
+        return final_losses, []
 
-    return final_losses, all_outputs
+    # Move all tensors in the collated batch to the correct device
+    for key, value in collated_batch.items():
+        if key == "gt_targets":  # This is handled by the losses function
+            continue
+        if isinstance(value, torch.Tensor):
+            collated_batch[key] = value.to(device)
+        elif isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
+            collated_batch[key] = [v.to(device) for v in value]
+
+    # The model now processes the entire batch of contours at once.
+    if model.training:
+        outputs = model(
+            collated_batch,
+            teacher_forcing_ratio=teacher_forcing_ratio,
+        )
+    else:  # Validation/Inference
+        outputs = model(collated_batch, teacher_forcing_ratio=1.0)
+
+    # Loss is also calculated over the entire batch.
+    loss_values = losses(collated_batch, outputs, device, validation=not model.training)
+
+    if DEBUG and writer is not None and global_step % 100 == 0:
+        # Debugging needs to be adapted for the new batch structure
+        # For now, let's debug the first image in the batch
+        gt_targets = collated_batch["gt_targets"]
+        if gt_targets:
+            contour_image_idx = collated_batch["contour_image_idx"]
+            first_image_contour_mask = contour_image_idx == 0
+
+            # Create a sliced version of outputs for the first image
+            debug_outputs = ModelResults(
+                pred_commands=[
+                    p
+                    for i, p in enumerate(outputs.pred_commands)
+                    if first_image_contour_mask[i]
+                ],
+                pred_coords_norm=[
+                    p
+                    for i, p in enumerate(outputs.pred_coords_norm)
+                    if first_image_contour_mask[i]
+                ],
+                pred_coords_img_space=[
+                    p
+                    for i, p in enumerate(outputs.pred_coords_img_space)
+                    if first_image_contour_mask[i]
+                ],
+                used_teacher_forcing=outputs.used_teacher_forcing,
+                contour_boxes=[
+                    b
+                    for i, b in enumerate(outputs.contour_boxes)
+                    if first_image_contour_mask[i]
+                ],
+            )
+            if debug_outputs.pred_commands:
+                dump_debug_sequences(
+                    writer,
+                    global_step,
+                    0,
+                    gt_targets[0]["gt_contours"],
+                    debug_outputs,
+                    loss_values,
+                )
+
+    return loss_values, [outputs]  # Return list with one item for consistency

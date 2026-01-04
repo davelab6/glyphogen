@@ -11,21 +11,33 @@ from glyphogen.hyperparameters import (
     VECTOR_LOSS_WEIGHT_COMMAND,
     VECTOR_LOSS_WEIGHT_COORD,
 )
-from glyphogen.typing import GroundTruthContour, LossDictionary, ModelResults
+from glyphogen.typing import (
+    CollatedGlyphData,
+    GroundTruthContour,
+    LossDictionary,
+    ModelResults,
+)
 
 
-def losses(y, outputs: ModelResults, device, validation=False) -> LossDictionary:
+@torch.compile
+def losses(
+    collated_batch: CollatedGlyphData,
+    outputs: ModelResults,
+    device,
+    validation=False,
+) -> LossDictionary:
     """
     Calculates losses for the hierarchical vectorization model.
-    This function iterates through contours and calculates loss for each one,
-    comparing coordinates in absolute normalized mask space.
+    This function now iterates through all contours in a collated batch.
     """
-    gt_contours = y["gt_contours"]
     pred_commands_list = outputs.pred_commands
     pred_coords_norm_list = outputs.pred_coords_norm
-    contour_boxes = outputs.contour_boxes  # Added for coordinate conversion
 
-    num_contours_to_compare = min(len(gt_contours), len(pred_commands_list))
+    # Data from the collated batch
+    gt_target_sequences = collated_batch["target_sequences"]
+    contour_boxes = collated_batch["contour_boxes"]
+
+    num_contours_to_compare = len(gt_target_sequences)
     total_command_loss = torch.tensor(0.0, device=device)
     total_coord_loss = torch.tensor(0.0, device=device)
     total_signed_area_loss = torch.tensor(0.0, device=device)
@@ -49,7 +61,8 @@ def losses(y, outputs: ModelResults, device, validation=False) -> LossDictionary
         box = contour_boxes[i]
 
         # Convert GT sequence from image space to normalized mask space
-        gt_sequence_img_space = gt_contours[i]["sequence"]
+        # Move GT tensor to device here, as it's not handled in the main loop anymore
+        gt_sequence_img_space = gt_target_sequences[i].to(device)
         gt_sequence_norm = NodeCommand.image_space_to_mask_space(
             gt_sequence_img_space, box
         )
@@ -118,11 +131,6 @@ def losses(y, outputs: ModelResults, device, validation=False) -> LossDictionary
             device, gt_command_for_loss, gt_coords_for_loss, pred_coords_for_loss
         )
         total_coord_mae_metric += coord_mae_metric
-
-        # if correct_commands / len(pred_indices) > 0.8:
-        #     import IPython
-
-        #     IPython.embed()
 
     def average_a_loss(loss):
         return (
@@ -362,14 +370,14 @@ def predictions_to_image_space(
 
     pred_commands_and_coords_img_space = []
     for i in range(len(pred_commands_list)):
-        pred_cmd = pred_commands_list[i]
-        pred_coords_norm = pred_coords_norm_list[i]
-        box = contour_boxes[i]
+        pred_cmd = pred_commands_list[i].detach().cpu()
+        pred_coords_norm = pred_coords_norm_list[i].detach().cpu()
+        box = contour_boxes[i].detach().cpu()
 
         pred_sequence_norm = torch.cat([pred_cmd, pred_coords_norm], dim=-1)
         # We need a full sequence to convert back to image space, so prepend SOS
         sos_token = NodeCommand.image_space_to_mask_space(
-            gt_contours[i]["sequence"], box
+            gt_contours[i]["sequence"].cpu(), box
         )[0:1, :]
         full_pred_sequence_norm = torch.cat([sos_token, pred_sequence_norm], dim=0)
 
@@ -378,9 +386,7 @@ def predictions_to_image_space(
             full_pred_sequence_norm, box
         )
         # We only need the parts that were actually predicted
-        pred_commands_and_coords_img_space.append(
-            pred_sequence_img_space[1:].detach().cpu()
-        )
+        pred_commands_and_coords_img_space.append(pred_sequence_img_space[1:])
     return pred_commands_and_coords_img_space
 
 

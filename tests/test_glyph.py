@@ -3,14 +3,15 @@ import pytest
 from glyphogen.glyph import (
     Glyph,
     SVGGlyph,
-    NodeGlyph,
-    NodeCommand,
     SVGCommand,
+)
+from glyphogen.nodeglyph import (
+    NodeGlyph,
     NodeContour,
     Node,
 )
 from glyphogen.command_defs import (
-    NODE_COMMAND_WIDTH,
+    NodeCommand,
 )
 from glyphogen.hyperparameters import GEN_IMAGE_SIZE
 import numpy as np
@@ -313,7 +314,6 @@ def test_roundtrip_conversion():
     assert reconverted_svg_glyph.to_svg_string() == "M 0 0 L 100 0 L 100 100 L 0 100 Z"
 
 
-@pytest.mark.xfail(reason="We changed the command vocabulary")
 def test_coordinate_unrolling_roundtrip():
     # 1. Create a NodeGlyph with known absolute coordinates
     contour = NodeContour([])
@@ -342,7 +342,7 @@ def test_coordinate_unrolling_roundtrip():
     )
 
     # 4. Unroll to get absolute coordinates
-    coord_tensor_absolute = unroll_relative_coords(
+    coord_tensor_absolute = NodeCommand.unroll_relative_coords(
         command_tensor, coord_tensor_relative_denormalized
     )
 

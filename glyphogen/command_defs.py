@@ -603,34 +603,37 @@ class NodeCommand(CommandRepresentation):
             | (command_indices == nco_index)
         )
 
-        # Create deltas tensor
-        deltas = torch.zeros(
-            sequence.shape[0], 2, device=sequence.device, dtype=sequence.dtype
+        # Create deltas without in-place assignment to keep dynamo happy
+        zeros_like_xy = torch.zeros_like(rel_coords[:, 0:2])
+
+        # Deltas for relative XY commands
+        deltas_xy = torch.where(
+            relative_xy_mask.unsqueeze(1), rel_coords[:, 0:2], zeros_like_xy
         )
 
-        # Add deltas for relative XY commands
-        deltas[relative_xy_mask, :] = rel_coords[relative_xy_mask, 0:2]
-
-        # Add deltas for LH and LV
+        # Deltas for LH and LV (single-axis moves)
         lh_mask = command_indices == lh_index
-        deltas[lh_mask, 0] = rel_coords[lh_mask, 0]
-
         lv_mask = command_indices == lv_index
-        deltas[lv_mask, 1] = rel_coords[lv_mask, 0]
+        lh_vec = torch.where(
+            lh_mask, rel_coords[:, 0], torch.zeros_like(rel_coords[:, 0])
+        )
+        lv_vec = torch.where(
+            lv_mask, rel_coords[:, 0], torch.zeros_like(rel_coords[:, 0])
+        )
+
+        # Combine into a single delta tensor
+        deltas = torch.stack(
+            (deltas_xy[:, 0] + lh_vec, deltas_xy[:, 1] + lv_vec), dim=1
+        )
+
+        # Seed absolute positions with the absolute move from the M command (vectorized)
+        m_mask = command_indices == m_index
+        base_pos = torch.where(
+            m_mask.unsqueeze(1), rel_coords[:, 0:2], torch.zeros_like(deltas)
+        )
 
         # Calculate absolute positions with cumsum
-        abs_positions = torch.cumsum(deltas, dim=0)
-
-        # Find the M command, which sets the initial absolute position
-        m_mask = command_indices == m_index
-        if m_mask.any():
-            m_index_val = torch.where(m_mask)[0][0]
-            m_coords = rel_coords[m_index_val, 0:2]
-
-            # Add M's coords to all subsequent positions
-            abs_positions[m_index_val:] += m_coords
-            # And set M's position directly
-            abs_positions[m_index_val] = m_coords
+        abs_positions = torch.cumsum(deltas + base_pos, dim=0)
 
         # Mask for commands that have position coordinates
         has_pos_coords_mask = (
@@ -645,48 +648,48 @@ class NodeCommand(CommandRepresentation):
             | (command_indices == nco_index)
         )
 
-        # Place absolute positions in the output tensor
-        abs_coords[has_pos_coords_mask, 0:2] = abs_positions[has_pos_coords_mask]
+        # Build absolute coordinates column-wise without in-place masked writes
+        zeros_scalar = torch.zeros_like(rel_coords[:, 0])
 
-        # Handle handles, which are relative to the new absolute position
+        # Position columns
+        pos_x = torch.where(has_pos_coords_mask, abs_positions[:, 0], zeros_scalar)
+        pos_y = torch.where(has_pos_coords_mask, abs_positions[:, 1], zeros_scalar)
+
+        # In-handle columns
         n_mask = command_indices == n_index
-        if n_mask.any():
-            abs_coords[n_mask, 2:4] = (
-                abs_positions[n_mask] + rel_coords[n_mask, 2:4]
-            )  # In-handle
-            abs_coords[n_mask, 4:6] = (
-                abs_positions[n_mask] + rel_coords[n_mask, 4:6]
-            )  # Out-handle
-
-        nci_mask = command_indices == nci_index
-        if nci_mask.any():
-            abs_coords[nci_mask, 2:4] = (
-                abs_positions[nci_mask] + rel_coords[nci_mask, 2:4]
-            )
-
-        nco_mask = command_indices == nco_index
-        if nco_mask.any():
-            abs_coords[nco_mask, 2:4] = (
-                abs_positions[nco_mask] + rel_coords[nco_mask, 2:4]
-            )
-
         nh_mask = command_indices == nh_index
-        if nh_mask.any():
-            abs_coords[nh_mask, 2] = (
-                abs_positions[nh_mask, 0] + rel_coords[nh_mask, 2]
-            )  # In-handle x
-            abs_coords[nh_mask, 3] = (
-                abs_positions[nh_mask, 0] + rel_coords[nh_mask, 3]
-            )  # Out-handle x
-
         nv_mask = command_indices == nv_index
-        if nv_mask.any():
-            abs_coords[nv_mask, 2] = (
-                abs_positions[nv_mask, 1] + rel_coords[nv_mask, 2]
-            )  # In-handle y
-            abs_coords[nv_mask, 3] = (
-                abs_positions[nv_mask, 1] + rel_coords[nv_mask, 3]
-            )  # Out-handle y
+        nci_mask = command_indices == nci_index
+        nco_mask = command_indices == nco_index
+
+        in_x = torch.zeros_like(pos_x)
+        in_y = torch.zeros_like(pos_y)
+
+        in_x = torch.where(
+            n_mask | nci_mask | nh_mask, abs_positions[:, 0] + rel_coords[:, 2], in_x
+        )
+        in_x = torch.where(nv_mask, abs_positions[:, 1] + rel_coords[:, 2], in_x)
+
+        in_y = torch.where(
+            n_mask | nci_mask, abs_positions[:, 1] + rel_coords[:, 3], in_y
+        )
+        in_y = torch.where(nh_mask, abs_positions[:, 0] + rel_coords[:, 3], in_y)
+        in_y = torch.where(nv_mask, abs_positions[:, 1] + rel_coords[:, 3], in_y)
+
+        # Out-handle columns
+        out_x = torch.zeros_like(pos_x)
+        out_y = torch.zeros_like(pos_y)
+
+        out_x = torch.where(n_mask, abs_positions[:, 0] + rel_coords[:, 4], out_x)
+        out_y = torch.where(n_mask, abs_positions[:, 1] + rel_coords[:, 5], out_y)
+
+        out_x = torch.where(nco_mask, abs_positions[:, 0] + rel_coords[:, 2], out_x)
+        out_y = torch.where(nco_mask, abs_positions[:, 1] + rel_coords[:, 3], out_y)
+
+        out_x = torch.where(nh_mask, abs_positions[:, 0] + rel_coords[:, 3], out_x)
+        out_y = torch.where(nv_mask, abs_positions[:, 1] + rel_coords[:, 3], out_y)
+
+        abs_coords = torch.stack((pos_x, pos_y, in_x, in_y, out_x, out_y), dim=1)
 
         return torch.cat([commands, abs_coords], dim=1)
 

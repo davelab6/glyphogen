@@ -56,3 +56,19 @@ class GroundTruthContour(TypedDict):
 class Target(TypedDict):
     image_id: int
     gt_contours: List[GroundTruthContour]
+
+
+class CollatedGlyphData(TypedDict):
+    """
+    Data structure for a batch of glyph data, collated by the custom collate_fn.
+    Contours from all images in the batch are flattened into single tensors.
+    """
+
+    images: Float[torch.Tensor, "batch channels height width"]
+    gt_targets: List[Target]  # Original targets for loss calculation
+    normalized_masks: Float[torch.Tensor, "total_contours 1 512 512"]
+    contour_boxes: Float[torch.Tensor, "total_contours 4"]
+    target_sequences: List[
+        Float[torch.Tensor, "seq_len 17"]
+    ]  # Still a list of variable-length tensors
+    contour_image_idx: torch.Tensor  # Maps each contour to its image index in the batch
