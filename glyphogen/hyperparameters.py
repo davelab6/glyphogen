@@ -12,22 +12,8 @@ VECTOR_LOSS_WEIGHT_COMMAND = 1.0  # Keep this at 1, normalize others against it
 # Although you should probably multiply by the number of augmentations
 VECTOR_RASTERIZATION_LOSS_WEIGHT = 0.01
 VECTOR_LOSS_WEIGHT_COORD = 500.0
-# CONTOUR_COUNT_WEIGHT = 4.0
-# NODE_COUNT_WEIGHT = (
-#     0.1  # This helps training a *lot* - but does it cause a command loss plateau?
-# )
-# HANDLE_SMOOTHNESS_WEIGHT = 0.0
-SIGNED_AREA_WEIGHT = 4.0
-ALIGNMENT_LOSS_WEIGHT = 0.0
-RASTER_LOSS_CUTOFF = 0.05  # Only apply raster loss if raster loss less than this value
-
-# Turn stuff off again
-HANDLE_SMOOTHNESS_WEIGHT = 0
-VECTOR_RASTERIZATION_LOSS_WEIGHT = 0
-CONTOUR_COUNT_WEIGHT = 0  # You might be tempted to turn this off, thinking it's fighting against command loss. It isn't, it's a separate head on the CNN, not on the LSTM stream
-NODE_COUNT_WEIGHT = 0
-SIGNED_AREA_WEIGHT = 0
-ALIGNMENT_LOSS_WEIGHT = 0
+SIGNED_AREA_WEIGHT = 2.0
+ALIGNMENT_LOSS_WEIGHT = 0.5
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = (

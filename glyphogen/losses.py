@@ -3,6 +3,7 @@ from glyphogen.nodeglyph import NodeGlyph
 from glyphogen.svgglyph import SVGGlyph
 import torch
 import torch.nn.functional as F
+import sys
 
 from glyphogen.command_defs import NodeCommand
 from glyphogen.hyperparameters import (
@@ -100,16 +101,17 @@ def losses(
         )
 
         # 3. Signed Area Loss
-        gt_command_indices = torch.argmax(gt_command_for_loss, dim=-1)
-        arg_counts_list = [NodeCommand.grammar[cmd] for cmd in NodeCommand.grammar]
-        arg_counts = torch.tensor(arg_counts_list, device=device)
-        gt_num_relevant_coords = arg_counts[gt_command_indices]
-        gt_vertex_mask = gt_num_relevant_coords >= 2
+        # A vertex is any command that is not SOS or EOS.
+        eos_idx = NodeCommand.encode_command("EOS")
+        sos_idx = NodeCommand.encode_command("SOS")
+        gt_vertex_mask = (gt_command_for_loss.argmax(dim=-1) != eos_idx) & (
+            gt_command_for_loss.argmax(dim=-1) != sos_idx
+        )
+        pred_vertex_mask = (pred_command_for_loss.argmax(dim=-1) != eos_idx) & (
+            pred_command_for_loss.argmax(dim=-1) != sos_idx
+        )
 
-        pred_command_indices = torch.argmax(pred_command_for_loss, dim=-1)
-        pred_num_relevant_coords = arg_counts[pred_command_indices]
-        pred_vertex_mask = pred_num_relevant_coords >= 2
-
+        # The on-curve points are always the first two coordinates.
         gt_on_curve_points = gt_coords_for_loss[gt_vertex_mask, 0:2]
         pred_on_curve_points = pred_coords_for_loss[pred_vertex_mask, 0:2]
 
@@ -222,16 +224,19 @@ def alignment_loss(
     on_curve_points = pred_coords[:, 0:2]
 
     # We need to filter out points that are not part of the sequence, e.g. EOS padding
-    valid_nodes_mask = (
-        torch.argmax(gt_command_for_loss, dim=-1)
-        != NodeCommand.encode_command("EOS")
-    )
+    valid_nodes_mask = torch.argmax(
+        gt_command_for_loss, dim=-1
+    ) != NodeCommand.encode_command("EOS")
     num_valid_nodes = valid_nodes_mask.sum().item()
 
     # X-alignments
     for alignment_set in x_alignment_sets:
-        # Ensure all indices in the set are valid for the current sequence length
-        valid_set = [idx for idx in alignment_set if idx < num_valid_nodes]
+        # Map node indices to row indices in the `_for_loss` tensors.
+        # The sequence (after SOS, which filter out in align_sequences)
+        # is [M, Cmd for node 0, Cmd for node 1, ...],
+        # so the command for node `i` is at row `i+1`.
+        row_indices = [idx + 1 for idx in alignment_set]
+        valid_set = [idx for idx in row_indices if idx < num_valid_nodes]
         if len(valid_set) > 1:
             # Gather the x-coordinates for the aligned points
             aligned_x_coords = on_curve_points[valid_set, 0]
@@ -239,14 +244,14 @@ def alignment_loss(
 
     # Y-alignments
     for alignment_set in y_alignment_sets:
-        valid_set = [idx for idx in alignment_set if idx < num_valid_nodes]
+        row_indices = [idx + 1 for idx in alignment_set]
+        valid_set = [idx for idx in row_indices if idx < num_valid_nodes]
         if len(valid_set) > 1:
             # Gather the y-coordinates for the aligned points
             aligned_y_coords = on_curve_points[valid_set, 1]
             total_y_variance += torch.var(aligned_y_coords)
 
     return total_x_variance + total_y_variance
-
 
 
 def coordinate_width_mask(commands: torch.Tensor, coords: torch.Tensor):

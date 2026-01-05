@@ -150,6 +150,7 @@ def main(
     )
     best_val_metric = 0
     global_step = 0
+    torch._dynamo.config.capture_scalar_outputs = True
     if debug_grads:
         torch._functorch.config.donated_buffer = False
     for epoch in range(epochs):
