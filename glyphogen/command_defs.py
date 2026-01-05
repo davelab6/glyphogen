@@ -311,6 +311,7 @@ class NodeCommand(CommandRepresentation):
         "LH": 1,  # Relative horizontal line to (dx)
         "LV": 1,  # Relative vertical line to (dy)
         "N": 6,  # Relative node with two handles (dx, dy, dhix, dhiy, dhox, dhoy)
+        "NS": 5,  # Relative smooth node (dx, dy, angle, length_in, length_out)
         "NH": 4,  # Relative horizontal-handle node (dx, dy, dh_in_x, dh_out_x)
         "NV": 4,  # Relative vertical-handle node (dx, dy, dh_in_y, dh_out_y)
         "NCI": 4,  # Relative node with in-handle only (dx, dy, dhix, dhiy)
@@ -358,6 +359,31 @@ class NodeCommand(CommandRepresentation):
                 assert in_handle is not None and out_handle is not None
                 commands.append(
                     NodeCommand("NV", rel_pos + [in_handle[1], out_handle[1]])
+                )
+            elif node.is_smooth:
+                assert in_handle is not None and out_handle is not None
+                # For a smooth node, the handles are collinear and opposite.
+                # We define the geometry by the angle of the outgoing handle,
+                # and the lengths of both handles.
+                # To be robust to slight imprecision in the source font,
+                # we average the direction of the two handles.
+                vec_in = in_handle
+                vec_out = out_handle
+                vec_in_opposite = -vec_in
+                norm_in = np.linalg.norm(vec_in_opposite)
+                norm_out = np.linalg.norm(vec_out)
+
+                # Average the unit vectors
+                avg_vec = (vec_in_opposite / norm_in) + (vec_out / norm_out)
+                angle = np.arctan2(avg_vec[1], avg_vec[0])
+
+                length_in = np.linalg.norm(vec_in)
+                length_out = np.linalg.norm(vec_out)
+                commands.append(
+                    NodeCommand(
+                        "NS",
+                        rel_pos + [float(angle), float(length_in), float(length_out)],
+                    )
                 )
             elif in_handle is not None and out_handle is not None:
                 commands.append(
@@ -426,6 +452,32 @@ class NodeCommand(CommandRepresentation):
                     in_handle=in_handle,
                     out_handle=out_handle,
                 )
+            elif command == "NS":
+                cur_coord += np.array(coords[0:2], dtype=np.float32)
+                angle = coords[2]
+                length_in = coords[3]
+                length_out = coords[4]
+                # Reconstruct handles based on the convention:
+                # angle is for the outgoing handle, incoming is opposite.
+                out_handle = np.array(
+                    [
+                        cur_coord[0] + length_out * np.cos(angle),
+                        cur_coord[1] + length_out * np.sin(angle),
+                    ],
+                    dtype=np.float32,
+                )
+                in_handle = np.array(
+                    [
+                        cur_coord[0] - length_in * np.cos(angle),
+                        cur_coord[1] - length_in * np.sin(angle),
+                    ],
+                    dtype=np.float32,
+                )
+                contour.push(
+                    coordinates=cur_coord.copy(),
+                    in_handle=in_handle,
+                    out_handle=out_handle,
+                )
             elif command == "NH":
                 cur_coord += np.array(coords[0:2], dtype=np.float32)
                 in_handle = cur_coord + np.array([coords[2], 0.0], dtype=np.float32)
@@ -479,12 +531,14 @@ class NodeCommand(CommandRepresentation):
         x1, y1, x2, y2 = box
         width = torch.clamp(x2 - x1, min=1.0)
         height = torch.clamp(y2 - y1, min=1.0)
+        avg_dim = (width + height) / 2.0
 
         command_indices = torch.argmax(commands, dim=-1)
         m_mask = (command_indices == NodeCommand.encode_command("M")).unsqueeze(1)
+        lv_mask = (command_indices == NodeCommand.encode_command("LV")).unsqueeze(1)
+        ns_mask = (command_indices == NodeCommand.encode_command("NS")).unsqueeze(1)
 
         # --- Calculate treatment for ALL coordinates as if they were RELATIVE deltas ---
-        # Deltas should be scaled by 2/width to be correct in a [-1, 1] space
         coord_width = coords_img_space.shape[1]
         scale_vec_rel = torch.tensor(
             [2.0 / width, 2.0 / height] * (coord_width // 2)
@@ -493,14 +547,23 @@ class NodeCommand(CommandRepresentation):
             dtype=sequence.dtype,
         )
         # LV command's first (and only) coord is a dY, so it should be scaled by height.
-        lv_mask = (command_indices == NodeCommand.encode_command("LV")).unsqueeze(1)
         scale_vec_lv = scale_vec_rel.clone()
-        # Replace first element with height scaling if coord_width > 0
         if coord_width > 0:
             scale_vec_lv[0] = 2.0 / height
 
+        # NS has special scaling for angle and lengths
+        scale_vec_ns = scale_vec_rel.clone()
+        if coord_width > 4:
+            scale_vec_ns[2] = 1.0 / np.pi  # Angle -> [-1, 1]
+            scale_vec_ns[3] = 2.0 / avg_dim  # Lengths
+            scale_vec_ns[4] = 2.0 / avg_dim
+
+        relative_result = coords_img_space * scale_vec_rel
         relative_result = torch.where(
-            lv_mask, coords_img_space * scale_vec_lv, coords_img_space * scale_vec_rel
+            lv_mask, coords_img_space * scale_vec_lv, relative_result
+        )
+        relative_result = torch.where(
+            ns_mask, coords_img_space * scale_vec_ns, relative_result
         )
 
         # --- Calculate treatment for ALL coordinates as if they were ABSOLUTE positions ---
@@ -532,9 +595,12 @@ class NodeCommand(CommandRepresentation):
         x1, y1, x2, y2 = box
         width = torch.clamp(x2 - x1, min=1.0)
         height = torch.clamp(y2 - y1, min=1.0)
+        avg_dim = (width + height) / 2.0
 
         command_indices = torch.argmax(commands, dim=-1)
         m_mask = (command_indices == NodeCommand.encode_command("M")).unsqueeze(1)
+        lv_mask = (command_indices == NodeCommand.encode_command("LV")).unsqueeze(1)
+        ns_mask = (command_indices == NodeCommand.encode_command("NS")).unsqueeze(1)
 
         # --- Handle Relative Coordinates (Scaling from [-1, 1] space) ---
         coord_width = coords_norm.shape[1]
@@ -545,14 +611,24 @@ class NodeCommand(CommandRepresentation):
             device=sequence.device,
             dtype=sequence.dtype,
         )
-        lv_mask = (command_indices == NodeCommand.encode_command("LV")).unsqueeze(1)
+        # LV command's first (and only) coord is a dY, so it should be scaled by height.
         scale_vec_lv = scale_vec_rel.clone()
-        # Replace first element with height scaling if coord_width > 0
         if coord_width > 0:
             scale_vec_lv[0] = height / 2.0
 
+        # NS has special scaling for angle and lengths
+        scale_vec_ns = scale_vec_rel.clone()
+        if coord_width > 4:
+            scale_vec_ns[2] = np.pi  # Denormalize angle
+            scale_vec_ns[3] = avg_dim / 2.0  # Denormalize lengths
+            scale_vec_ns[4] = avg_dim / 2.0
+
+        relative_result = coords_norm * scale_vec_rel
         relative_result = torch.where(
-            lv_mask, coords_norm * scale_vec_lv, coords_norm * scale_vec_rel
+            lv_mask, coords_norm * scale_vec_lv, relative_result
+        )
+        relative_result = torch.where(
+            ns_mask, coords_norm * scale_vec_ns, relative_result
         )
 
         # --- Handle Absolute 'M' Coordinates (Translation and Scaling from [-1, 1]) ---
@@ -588,6 +664,7 @@ class NodeCommand(CommandRepresentation):
         lh_index = cls.encode_command("LH")
         lv_index = cls.encode_command("LV")
         n_index = cls.encode_command("N")
+        ns_index = cls.encode_command("NS")
         nh_index = cls.encode_command("NH")
         nv_index = cls.encode_command("NV")
         nci_index = cls.encode_command("NCI")
@@ -597,6 +674,7 @@ class NodeCommand(CommandRepresentation):
         relative_xy_mask = (
             (command_indices == l_index)
             | (command_indices == n_index)
+            | (command_indices == ns_index)
             | (command_indices == nh_index)
             | (command_indices == nv_index)
             | (command_indices == nci_index)
@@ -642,6 +720,7 @@ class NodeCommand(CommandRepresentation):
             | (command_indices == lh_index)
             | (command_indices == lv_index)
             | (command_indices == n_index)
+            | (command_indices == ns_index)
             | (command_indices == nh_index)
             | (command_indices == nv_index)
             | (command_indices == nci_index)
@@ -651,43 +730,66 @@ class NodeCommand(CommandRepresentation):
         # Build absolute coordinates column-wise without in-place masked writes
         zeros_scalar = torch.zeros_like(rel_coords[:, 0])
 
-        # Position columns
+        # Position columns (common to all node types)
         pos_x = torch.where(has_pos_coords_mask, abs_positions[:, 0], zeros_scalar)
         pos_y = torch.where(has_pos_coords_mask, abs_positions[:, 1], zeros_scalar)
 
-        # In-handle columns
+        # --- Handle Calculation ---
+        in_x = torch.zeros_like(pos_x)
+        in_y = torch.zeros_like(pos_y)
+        out_x = torch.zeros_like(pos_x)
+        out_y = torch.zeros_like(pos_y)
+
+        # Standard Node (N)
         n_mask = command_indices == n_index
+        in_x = torch.where(n_mask, abs_positions[:, 0] + rel_coords[:, 2], in_x)
+        in_y = torch.where(n_mask, abs_positions[:, 1] + rel_coords[:, 3], in_y)
+        out_x = torch.where(n_mask, abs_positions[:, 0] + rel_coords[:, 4], out_x)
+        out_y = torch.where(n_mask, abs_positions[:, 1] + rel_coords[:, 5], out_y)
+
+        # Smooth Node (NS)
+        ns_mask = command_indices == ns_index
+        ns_angle = rel_coords[:, 2]
+        ns_len_in = rel_coords[:, 3]
+        ns_len_out = rel_coords[:, 4]
+        cos_angle = torch.cos(ns_angle)
+        sin_angle = torch.sin(ns_angle)
+
+        ns_in_x = abs_positions[:, 0] - ns_len_in * cos_angle
+        ns_in_y = abs_positions[:, 1] - ns_len_in * sin_angle
+        ns_out_x = abs_positions[:, 0] + ns_len_out * cos_angle
+        ns_out_y = abs_positions[:, 1] + ns_len_out * sin_angle
+
+        in_x = torch.where(ns_mask, ns_in_x, in_x)
+        in_y = torch.where(ns_mask, ns_in_y, in_y)
+        out_x = torch.where(ns_mask, ns_out_x, out_x)
+        out_y = torch.where(ns_mask, ns_out_y, out_y)
+
+        # Other node types (NH, NV, NCI, NCO)
         nh_mask = command_indices == nh_index
         nv_mask = command_indices == nv_index
         nci_mask = command_indices == nci_index
         nco_mask = command_indices == nco_index
 
-        in_x = torch.zeros_like(pos_x)
-        in_y = torch.zeros_like(pos_y)
+        # Handles for NH
+        in_x = torch.where(nh_mask, abs_positions[:, 0] + rel_coords[:, 2], in_x)
+        in_y = torch.where(nh_mask, abs_positions[:, 1], in_y)
+        out_x = torch.where(nh_mask, abs_positions[:, 0] + rel_coords[:, 3], out_x)
+        out_y = torch.where(nh_mask, abs_positions[:, 1], out_y)
 
-        in_x = torch.where(
-            n_mask | nci_mask | nh_mask, abs_positions[:, 0] + rel_coords[:, 2], in_x
-        )
-        in_x = torch.where(nv_mask, abs_positions[:, 1] + rel_coords[:, 2], in_x)
+        # Handles for NV
+        in_x = torch.where(nv_mask, abs_positions[:, 0], in_x)
+        in_y = torch.where(nv_mask, abs_positions[:, 1] + rel_coords[:, 2], in_y)
+        out_x = torch.where(nv_mask, abs_positions[:, 0], out_x)
+        out_y = torch.where(nv_mask, abs_positions[:, 1] + rel_coords[:, 3], out_y)
 
-        in_y = torch.where(
-            n_mask | nci_mask, abs_positions[:, 1] + rel_coords[:, 3], in_y
-        )
-        in_y = torch.where(nh_mask, abs_positions[:, 0] + rel_coords[:, 3], in_y)
-        in_y = torch.where(nv_mask, abs_positions[:, 1] + rel_coords[:, 3], in_y)
+        # Handles for NCI (in-handle only)
+        in_x = torch.where(nci_mask, abs_positions[:, 0] + rel_coords[:, 2], in_x)
+        in_y = torch.where(nci_mask, abs_positions[:, 1] + rel_coords[:, 3], in_y)
 
-        # Out-handle columns
-        out_x = torch.zeros_like(pos_x)
-        out_y = torch.zeros_like(pos_y)
-
-        out_x = torch.where(n_mask, abs_positions[:, 0] + rel_coords[:, 4], out_x)
-        out_y = torch.where(n_mask, abs_positions[:, 1] + rel_coords[:, 5], out_y)
-
+        # Handles for NCO (out-handle only)
         out_x = torch.where(nco_mask, abs_positions[:, 0] + rel_coords[:, 2], out_x)
         out_y = torch.where(nco_mask, abs_positions[:, 1] + rel_coords[:, 3], out_y)
-
-        out_x = torch.where(nh_mask, abs_positions[:, 0] + rel_coords[:, 3], out_x)
-        out_y = torch.where(nv_mask, abs_positions[:, 1] + rel_coords[:, 3], out_y)
 
         abs_coords = torch.stack((pos_x, pos_y, in_x, in_y, out_x, out_y), dim=1)
 

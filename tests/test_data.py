@@ -3,16 +3,16 @@ import numpy as np
 import pytest
 from torch.utils.data import DataLoader
 
-from glyphogen.glyph import NodeGlyph
-from glyphogen.command_defs import NODE_GLYPH_COMMANDS, NODE_COMMAND_WIDTH
+from glyphogen.nodeglyph import NodeGlyph
+from glyphogen.command_defs import NodeCommand
 from glyphogen.dataset import get_hierarchical_data, collate_fn, font_files
 from glyphogen.hyperparameters import ALPHABET
+from glyphogen.svgglyph import SVGGlyph
 
 # Get the index for the commands from the grammar
-command_keys = list(NODE_GLYPH_COMMANDS.keys())
-SOS_INDEX = command_keys.index("SOS")
-EOS_INDEX = command_keys.index("EOS")
-N_INDEX = command_keys.index("N")
+SOS_INDEX = NodeCommand.encode_command("SOS")
+EOS_INDEX = NodeCommand.encode_command("EOS")
+N_INDEX = NodeCommand.encode_command("N")
 
 # Set our own batch size
 BATCH_SIZE = 16
@@ -25,68 +25,30 @@ def dataset():
     return DataLoader(test_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
 
-@pytest.mark.skip(
-    reason="This test is for the old non-hierarchical dataset format, needs updating for hierarchical"
-)
-def test_data_integrity(dataset):
-    for ix, batch in enumerate(dataset):
-        inputs, outputs = batch
-        if not inputs or not outputs:
-            continue
-
-        print("Testing batch %i" % ix)
-        if ix == 50:
-            break
-
-        target_sequences = inputs["target_sequence"]
-        true_commands = outputs["command"]
-
-        for i in range(target_sequences.shape[0]):
-            # (a) The target_sequences always start with a SOS operator, followed by a node command
-            first_command_one_hot = target_sequences[i, 0, :NODE_COMMAND_WIDTH]
-            assert (
-                torch.argmax(first_command_one_hot) == SOS_INDEX
-            ), f"Sequence {i} does not start with SOS"
-            second_command_one_hot = target_sequences[i, 1, :NODE_COMMAND_WIDTH]
-            assert (
-                torch.argmax(second_command_one_hot) == N_INDEX
-            ), f"Sequence {i} does not have a node command after SOS"
-
-            # Find the end of the sequence by looking for the EOS token
-            true_command_indices = torch.argmax(true_commands[i], axis=-1)
-            eos_indices = (true_command_indices == EOS_INDEX).nonzero()
-
-            assert len(eos_indices) > 0, f"Sequence {i} does not have an EOS token"
-            end_of_sequence_index = eos_indices[0]
-
-            # (b) the true_commands must end with a node and then an EOS token.
-            if end_of_sequence_index > 0:
-                command_before_eos_index = end_of_sequence_index - 1
-                command_before_eos_one_hot = true_commands[i, command_before_eos_index]
-                assert (
-                    torch.argmax(command_before_eos_one_hot) in NODE_COMMAND_INDICES
-                ), f"Sequence {i} does not have a node before EOS"
-
-
 def test_svg_generation(dataset):
-    for batch in dataset:
-        inputs, outputs = batch
-        if inputs is None or outputs is None:
-            continue
-        true_commands = outputs["command"]
-        true_coords = outputs["coord"]
-        # Just test the first one that comes along
-        break
+    """
+    Tests that a batch from the dataset can be successfully decoded and
+    converted into an SVG.
+    """
+    # Get one batch from the dataset
+    batch = next(iter(dataset))
+    if batch is None:
+        pytest.skip("Could not get a batch from the dataset.")
 
-    svgs = []
-    for i in range(true_commands.shape[0]):
-        command_tensor = true_commands[i]
-        coord_tensor = true_coords[i]
+    # Get the ground truth data for the first glyph in the batch
+    first_glyph_targets = batch["gt_targets"][0]
+    gt_contours = first_glyph_targets["gt_contours"]
 
-        decoded_glyph = NodeGlyph.from_numpy(
-            command_tensor.numpy(), coord_tensor.numpy()
-        )
-        svg_string = decoded_glyph.to_svg_glyph().to_svg_string()
-        svgs.append(svg_string)
-    # Can't guarantee which one we will get, so let's not test for a specific letter
-    assert len(svgs) > 0
+    # We need the raw command sequences from each contour
+    contour_sequences = [contour["sequence"] for contour in gt_contours]
+
+    # Decode the sequences into a NodeGlyph object
+    decoded_glyph = NodeGlyph.decode(contour_sequences, NodeCommand)
+
+    # Generate an SVG from the NodeGlyph
+    svg_string = SVGGlyph.from_node_glyph(decoded_glyph).to_svg_string()
+
+    # The test just asserts that an SVG was produced without errors
+    assert isinstance(svg_string, str)
+    assert len(svg_string) > 0
+

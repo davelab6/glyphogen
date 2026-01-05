@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from glyphogen.command_defs import NodeCommand
 from glyphogen.hyperparameters import (
+    ALIGNMENT_LOSS_WEIGHT,
     HUBER_DELTA,
     SIGNED_AREA_WEIGHT,
     VECTOR_LOSS_WEIGHT_COMMAND,
@@ -36,11 +37,14 @@ def losses(
     # Data from the collated batch
     gt_target_sequences = collated_batch["target_sequences"]
     contour_boxes = collated_batch["contour_boxes"]
+    x_aligned_point_indices = collated_batch["x_aligned_point_indices"]
+    y_aligned_point_indices = collated_batch["y_aligned_point_indices"]
 
     num_contours_to_compare = len(gt_target_sequences)
     total_command_loss = torch.tensor(0.0, device=device)
     total_coord_loss = torch.tensor(0.0, device=device)
     total_signed_area_loss = torch.tensor(0.0, device=device)
+    total_alignment_loss = torch.tensor(0.0, device=device)
     total_coord_mae_metric = torch.tensor(0.0, device=device)
     total_correct_cmds = 0
     total_cmds = 0
@@ -51,6 +55,7 @@ def losses(
             "command_loss": torch.tensor(0.0, device=device),
             "coord_loss": torch.tensor(0.0, device=device),
             "signed_area_loss": torch.tensor(0.0, device=device),
+            "alignment_loss": torch.tensor(0.0, device=device),
             "command_accuracy_metric": torch.tensor(0.0, device=device),
             "coordinate_mae_metric": torch.tensor(0.0, device=device),
         }
@@ -95,10 +100,7 @@ def losses(
         )
 
         # 3. Signed Area Loss
-        # Filter out commands that don't define a vertex (e.g., EOS).
-        # A command needs at least 2 coordinates (one point) to be a vertex.
         gt_command_indices = torch.argmax(gt_command_for_loss, dim=-1)
-        # This logic is repeated from masked_coordinate_loss, consider refactoring later
         arg_counts_list = [NodeCommand.grammar[cmd] for cmd in NodeCommand.grammar]
         arg_counts = torch.tensor(arg_counts_list, device=device)
         gt_num_relevant_coords = arg_counts[gt_command_indices]
@@ -108,7 +110,6 @@ def losses(
         pred_num_relevant_coords = arg_counts[pred_command_indices]
         pred_vertex_mask = pred_num_relevant_coords >= 2
 
-        # The on-curve points are always the first two coordinates.
         gt_on_curve_points = gt_coords_for_loss[gt_vertex_mask, 0:2]
         pred_on_curve_points = pred_coords_for_loss[pred_vertex_mask, 0:2]
 
@@ -116,9 +117,19 @@ def losses(
             gt_on_curve_points, pred_on_curve_points
         )
 
+        # 4. Alignment Loss
+        align_loss = alignment_loss(
+            pred_coords_for_loss,
+            x_aligned_point_indices[i],
+            y_aligned_point_indices[i],
+            device,
+            gt_command_for_loss,
+        )
+
         total_command_loss += command_loss
         total_coord_loss += coord_loss
         total_signed_area_loss += signed_area_loss
+        total_alignment_loss += align_loss
 
         # Accumulate accuracy stats
         pred_indices = torch.argmax(pred_command_for_loss, dim=-1)
@@ -142,6 +153,7 @@ def losses(
     avg_command_loss = average_a_loss(total_command_loss)
     avg_coord_loss = average_a_loss(total_coord_loss)
     avg_signed_area_loss = average_a_loss(total_signed_area_loss)
+    avg_alignment_loss = average_a_loss(total_alignment_loss)
     avg_coord_mae_metric = average_a_loss(total_coord_mae_metric)
     command_accuracy = (
         torch.tensor(total_correct_cmds / total_cmds)
@@ -153,6 +165,7 @@ def losses(
         VECTOR_LOSS_WEIGHT_COMMAND * avg_command_loss
         + VECTOR_LOSS_WEIGHT_COORD * avg_coord_loss
         + SIGNED_AREA_WEIGHT * avg_signed_area_loss
+        + ALIGNMENT_LOSS_WEIGHT * avg_alignment_loss
     )
 
     return {
@@ -160,6 +173,7 @@ def losses(
         "command_loss": avg_command_loss.detach(),
         "coord_loss": avg_coord_loss.detach(),
         "signed_area_loss": avg_signed_area_loss.detach(),
+        "alignment_loss": avg_alignment_loss.detach(),
         "command_accuracy_metric": command_accuracy,
         "coordinate_mae_metric": avg_coord_mae_metric.detach(),
     }
@@ -169,41 +183,70 @@ def abs_signed_area_loss(true_points, pred_points):
     """
     Calculates the signed area of a polygon using the Shoelace formula.
     The input should be a tensor of shape (N, 2) where N is the number of vertices.
-
-    We do this inefficiently in two steps because the pred points will have
-    gradients and the true points will not, which confuses the compiler
+    This used to contain code to handle the case of contours with less than three
+    points, but we don't need to do that now as such contours are filtered out
+    in svgglyph.py and are not in the dataset.
     """
-    # Compute true signed area
-    if true_points.shape[0] < 3:
-        true_signed_area = torch.tensor(
-            0.0, device=true_points.device, dtype=true_points.dtype
-        )
-    else:
-        x = true_points[:, 0]
-        y = true_points[:, 1]
-        true_signed_area = 0.5 * (
+
+    def compute_signed_area(points):
+        # Compute signed area without branching on shape
+        # Slices naturally handle small tensors: x[:-1] is empty if len(x) <= 1
+        x = points[:, 0]
+        y = points[:, 1]
+
+        signed_area = 0.5 * (
             torch.sum(x[:-1] * y[1:])
-            + x[-1] * y[0]
+            + x[-1:] @ y[:1]  # Last x times first y (becomes empty if n=0)
             - torch.sum(y[:-1] * x[1:])
-            - y[-1] * x[0]
+            - y[-1:] @ x[:1]  # Last y times first x
         )
 
-    # Compute predicted signed area
-    if pred_points.shape[0] < 3:
-        pred_signed_area = torch.tensor(
-            0.0, device=pred_points.device, dtype=pred_points.dtype
-        )
-    else:
-        x = pred_points[:, 0]
-        y = pred_points[:, 1]
-        pred_signed_area = 0.5 * (
-            torch.sum(x[:-1] * y[1:])
-            + x[-1] * y[0]
-            - torch.sum(y[:-1] * x[1:])
-            - y[-1] * x[0]
-        )
+        return signed_area
+
+    true_signed_area = compute_signed_area(true_points)
+    pred_signed_area = compute_signed_area(pred_points)
 
     return torch.abs(true_signed_area - pred_signed_area)
+
+
+def alignment_loss(
+    pred_coords, x_alignment_sets, y_alignment_sets, device, gt_command_for_loss
+):
+    """
+    Calculates a loss based on the variance of coordinates that should be aligned.
+    """
+    total_x_variance = torch.tensor(0.0, device=device)
+    total_y_variance = torch.tensor(0.0, device=device)
+
+    # On-curve points are in the first two columns
+    on_curve_points = pred_coords[:, 0:2]
+
+    # We need to filter out points that are not part of the sequence, e.g. EOS padding
+    valid_nodes_mask = (
+        torch.argmax(gt_command_for_loss, dim=-1)
+        != NodeCommand.encode_command("EOS")
+    )
+    num_valid_nodes = valid_nodes_mask.sum().item()
+
+    # X-alignments
+    for alignment_set in x_alignment_sets:
+        # Ensure all indices in the set are valid for the current sequence length
+        valid_set = [idx for idx in alignment_set if idx < num_valid_nodes]
+        if len(valid_set) > 1:
+            # Gather the x-coordinates for the aligned points
+            aligned_x_coords = on_curve_points[valid_set, 0]
+            total_x_variance += torch.var(aligned_x_coords)
+
+    # Y-alignments
+    for alignment_set in y_alignment_sets:
+        valid_set = [idx for idx in alignment_set if idx < num_valid_nodes]
+        if len(valid_set) > 1:
+            # Gather the y-coordinates for the aligned points
+            aligned_y_coords = on_curve_points[valid_set, 1]
+            total_y_variance += torch.var(aligned_y_coords)
+
+    return total_x_variance + total_y_variance
+
 
 
 def coordinate_width_mask(commands: torch.Tensor, coords: torch.Tensor):

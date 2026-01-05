@@ -1,18 +1,62 @@
+from collections import defaultdict
 import json
-from pathlib import Path
 import random
-from glyphogen.svgglyph import SVGGlyph
+from pathlib import Path
+from typing import Dict, List
+
 import numpy as np
+import torch
+from pycocotools import mask as mask_util
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-import torch
 
-from glyphogen.glyph import Glyph
-from glyphogen.hyperparameters import GEN_IMAGE_SIZE, ALPHABET
+from glyphogen.command_defs import MAX_COORDINATE, NodeCommand
 from glyphogen.dataset import font_files
-from glyphogen.command_defs import NodeCommand, MAX_COORDINATE
+from glyphogen.glyph import Glyph
+from glyphogen.hyperparameters import ALPHABET, GEN_IMAGE_SIZE
+from glyphogen.svgglyph import SVGGlyph
+from glyphogen.nodeglyph import NodeGlyph
 
 LIMIT = 0
+
+
+def get_alignments(node_glyph: "NodeGlyph") -> List[Dict]:
+    """
+    Analyzes the NodeGlyph to find aligned points within each contour.
+    The idea is similar to font hinting: if multiple points share the same
+    x or y coordinate (within a small quantum), they are considered aligned,
+    and we want to encourage the model to maintain this alignment.
+    Points are considered aligned if their coordinates round to the same
+    value within a certain quantum.
+    """
+
+    def round_coord(coord, quantum=3):
+        return round(coord) // quantum * quantum
+
+    rv = []
+
+    for contour in node_glyph.contours:
+        x_coords = defaultdict(list)
+        y_coords = defaultdict(list)
+        for ix, node in enumerate(contour.nodes):
+            x_coords[round_coord(node.coordinates[0])].append(ix)
+            y_coords[round_coord(node.coordinates[1])].append(ix)
+        x_alignments = []
+        y_alignments = []
+
+        for indices in x_coords.values():
+            if len(indices) > 1:
+                x_alignments.append(indices)
+        for indices in y_coords.values():
+            if len(indices) > 1:
+                y_alignments.append(indices)
+        rv.append(
+            {
+                "x_aligned_point_indices": x_alignments,
+                "y_aligned_point_indices": y_alignments,
+            }
+        )
+    return rv
 
 
 def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
@@ -33,9 +77,15 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
             # Generate vector data first to ensure it's valid
             node_glyph = glyph.vectorize().to_node_glyph()
             node_glyph.normalize()  # IMPORTANT: ensure canonical order
+
+            # Have to do this on the node glyph *after normalization*
+            # as we're going to be using the point indices later
+            # for alignment supervision
+            alignment_points = get_alignments(node_glyph)
+
             contour_sequences = node_glyph.encode(NodeCommand)
             if contour_sequences is None:
-                print("  Skipping glyph due to encoding failure.")
+                print(f"  Skipping glyph {glyph} due to encoding failure.")
                 continue
 
             # Now get segmentation data, which should be in the same order
@@ -84,14 +134,8 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                 x, y, x2, y2 = bbox
                 w = x2 - x
                 h = y2 - y
-
-                from pycocotools import mask as mask_util
-
                 rle = mask_util.encode(np.asfortranarray(seg_item["mask"]))
                 rle["counts"] = rle["counts"].decode("utf-8")
-
-                # encoded_contour = torch.from_numpy(contour_sequences[i]).float()
-                # sequence_as_list = encoded_contour.tolist()
 
                 annotations_json.append(
                     {
@@ -102,9 +146,13 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                         "area": float(w * h),
                         "bbox": [float(x), float(y), float(w), float(h)],
                         "iscrowd": 0,
-                        "sequence": contour_sequences[
-                            i
-                        ].tolist(),  # Add the sequence data
+                        "sequence": contour_sequences[i].tolist(),
+                        "x_aligned_point_indices": alignment_points[i][
+                            "x_aligned_point_indices"
+                        ],
+                        "y_aligned_point_indices": alignment_points[i][
+                            "y_aligned_point_indices"
+                        ],
                     }
                 )
                 ann_id += 1

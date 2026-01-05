@@ -106,7 +106,7 @@ class SVGGlyph:
 
             width = bbox[2] - bbox[0]
             height = bbox[3] - bbox[1]
-            if width <= 0 or height <= 0:
+            if width <= 0 or height <= 0 or len(points) < 3:
                 print(
                     f"Warning: Skipping contour with zero width/height in {self.origin}. Bbox: {bbox}"
                 )

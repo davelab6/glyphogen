@@ -2,7 +2,7 @@
 LATENT_DIM = 32
 D_MODEL = 1024
 PROJ_SIZE = D_MODEL // 4
-RATE = 0.2  # Specifically, the dropout rate
+RATE = 0.15  # Specifically, the dropout rate
 EPOCHS = 2000
 BATCH_SIZE = 32
 RASTER_LOSS_WEIGHT = 15000.0
@@ -18,6 +18,7 @@ VECTOR_LOSS_WEIGHT_COORD = 500.0
 # )
 # HANDLE_SMOOTHNESS_WEIGHT = 0.0
 SIGNED_AREA_WEIGHT = 4.0
+ALIGNMENT_LOSS_WEIGHT = 0.0
 RASTER_LOSS_CUTOFF = 0.05  # Only apply raster loss if raster loss less than this value
 
 # Turn stuff off again
@@ -26,6 +27,7 @@ VECTOR_RASTERIZATION_LOSS_WEIGHT = 0
 CONTOUR_COUNT_WEIGHT = 0  # You might be tempted to turn this off, thinking it's fighting against command loss. It isn't, it's a separate head on the CNN, not on the LSTM stream
 NODE_COUNT_WEIGHT = 0
 SIGNED_AREA_WEIGHT = 0
+ALIGNMENT_LOSS_WEIGHT = 0
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = (
@@ -33,7 +35,7 @@ HUBER_DELTA = (
 )  # Loss computations are in normalized -1 to 1 space across a 512 pixel image.
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
-LEARNING_RATE = 1e-6 * (BATCH_SIZE)
+LEARNING_RATE = 5e-6 * (BATCH_SIZE)
 FINAL_LEARNING_RATE = 1e-8 * (BATCH_SIZE)
 
 GEN_IMAGE_SIZE = (512, 512)

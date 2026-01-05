@@ -5,8 +5,10 @@ import numpy as np
 import numpy.typing as npt
 import pathops
 import torch
+import kurbopy
 import uharfbuzz as hb
 from fontTools.pens.qu2cuPen import Qu2CuPen
+from fontTools.pens.filterPen import FilterPen
 from fontTools.pens.svgPathPen import SVGPathPen, pointToString
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.removeOverlaps import _simplify
@@ -37,6 +39,45 @@ class AbsoluteSVGPathPen(SVGPathPen):
         self._lastX, self._lastY = pt
 
 
+class AddExtremaPen(FilterPen):
+    def curveTo(self, *points):
+        bez = kurbopy.CubicBez(
+            kurbopy.Point(*self.current_pt),
+            kurbopy.Point(*points[0]),
+            kurbopy.Point(*points[1]),
+            kurbopy.Point(*points[2]),
+        )
+        extrema = bez.extrema_ranges()
+        # If a range is very small, coalesece it with its neighbor
+        for ix, (left, right) in enumerate(extrema):
+            left, right = extrema[ix]
+            if right - left < 1e-5:
+                if ix > 0:
+                    # Merge with previous
+                    extrema[ix - 1] = (extrema[ix - 1][0], right)
+                    extrema[ix] = (right, right)
+                else:
+                    # Merge with next
+                    if ix + 1 < len(extrema):
+                        extrema[ix + 1] = (left, extrema[ix + 1][1])
+                        extrema[ix] = (left, left)
+        # Now remove any zero-length ranges
+        extrema = [r for r in extrema if r[1] - r[0] >= 1e-5]
+        if len(extrema) == 1:
+            # No extrema, just draw the curve as usual
+            self._outPen.curveTo(points[0], points[1], points[2])
+            self.current_pt = (points[2][0], points[2][1])
+            return
+        for start_t, end_t in bez.extrema_ranges():
+            localbez = bez.subsegment((start_t, end_t))
+            self._outPen.curveTo(
+                (localbez.p1.x, localbez.p1.y),
+                (localbez.p2.x, localbez.p2.y),
+                (localbez.p3.x, localbez.p3.y),
+            )
+            self.current_pt = (localbez.p3.x, localbez.p3.y)
+
+
 cache_dir = Path("imgcache")
 
 
@@ -54,6 +95,9 @@ class Glyph:
     font_file: Path
     unicode_id: int
     location: Dict[str, float]
+
+    def __repr__(self) -> str:
+        return f"Glyph(font_file={self.font_file}, unicode_id={self.unicode_id}, location={self.location})"
 
     def __init__(self, font_file: Path, unicode_id: int, location: Dict[str, float]):
         self.font_file = font_file
@@ -73,7 +117,7 @@ class Glyph:
         )
         if CACHING and (cache_dir / font_base / (key + ".png")).exists():
             img = Image.open(cache_dir / font_base / (key + ".png")).convert("L")
-            img = np.asarray(img, dtype=np.float32) / 255.0
+            img = np.asarray(img, dtype=np.float64) / 255.0
             img = np.expand_dims(img, axis=-1)
         else:
             img = self._rasterize(size)
@@ -118,7 +162,8 @@ class Glyph:
         face = hb.Face(blob)
         font = hb.Font(face)
         svgpen = AbsoluteSVGPathPen({}, ntos=lambda f: str(int(f * scale)))
-        pen = Qu2CuPen(svgpen, max_err=5, all_cubic=True)
+        pen = AddExtremaPen(svgpen)
+        pen = Qu2CuPen(pen, max_err=5, all_cubic=True)
         if self.location:
             font.set_variations(self.location)
         glyph = font.get_nominal_glyph(self.unicode_id)

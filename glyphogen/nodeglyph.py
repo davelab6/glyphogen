@@ -79,22 +79,37 @@ class Node:
             and abs(self.coordinates[0] - self.out_handle[0]) <= self.ALIGNMENT_EPSILON
         )
 
+    @property
+    def is_smooth(self) -> bool:
+        if self.in_handle is None or self.out_handle is None:
+            return False
+        vec_in = self.coordinates - self.in_handle
+        vec_out = self.out_handle - self.coordinates
+        norm_in = np.linalg.norm(vec_in)
+        norm_out = np.linalg.norm(vec_out)
+        if norm_in == 0 or norm_out == 0:
+            return False
+        unit_in = vec_in / norm_in
+        unit_out = vec_out / norm_out
+        dot_product = np.dot(unit_in, unit_out)
+        return np.isclose(dot_product, 1.0, atol=1e-2)
+
     def __eq__(self, other):
         if not isinstance(other, Node):
             return NotImplemented
 
-        coords_equal = np.allclose(self.coordinates, other.coordinates)
+        coords_equal = np.allclose(self.coordinates, other.coordinates, atol=1e-6)
 
         in_handles_equal = (self.in_handle is None and other.in_handle is None) or (
             self.in_handle is not None
             and other.in_handle is not None
-            and np.allclose(self.in_handle, other.in_handle)
+            and np.allclose(self.in_handle, other.in_handle, atol=1e-6)
         )
 
         out_handles_equal = (self.out_handle is None and other.out_handle is None) or (
             self.out_handle is not None
             and other.out_handle is not None
-            and np.allclose(self.out_handle, other.out_handle)
+            and np.allclose(self.out_handle, other.out_handle, atol=1e-6)
         )
 
         if not (coords_equal and in_handles_equal and out_handles_equal):

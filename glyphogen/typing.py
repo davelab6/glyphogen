@@ -40,6 +40,7 @@ class LossDictionary(TypedDict):
     command_loss: Float[torch.Tensor, ""]
     coord_loss: Float[torch.Tensor, ""]
     signed_area_loss: Float[torch.Tensor, ""]
+    alignment_loss: Float[torch.Tensor, ""]
     command_accuracy_metric: Float[torch.Tensor, ""]
     coordinate_mae_metric: Float[torch.Tensor, ""]
 
@@ -51,6 +52,8 @@ class GroundTruthContour(TypedDict):
     sequence: Float[
         torch.Tensor, "seq_len 17"
     ]  # Assuming 17 command dimensions, relative NodeCommand encoding
+    x_aligned_point_indices: List[List[int]]
+    y_aligned_point_indices: List[List[int]]
 
 
 class Target(TypedDict):
@@ -72,3 +75,5 @@ class CollatedGlyphData(TypedDict):
         Float[torch.Tensor, "seq_len 17"]
     ]  # Still a list of variable-length tensors
     contour_image_idx: torch.Tensor  # Maps each contour to its image index in the batch
+    x_aligned_point_indices: List[List[List[int]]]
+    y_aligned_point_indices: List[List[List[int]]]
