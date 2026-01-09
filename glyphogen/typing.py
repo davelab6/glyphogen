@@ -9,6 +9,10 @@ class ModelResults(NamedTuple):
     pred_commands: List[Float[torch.Tensor, "seq_len command_dim"]]
     pred_coords_img_space: List[Float[torch.Tensor, "contour point_dim"]]
     pred_coords_norm: List[Float[torch.Tensor, "contour point_dim"]]
+    pred_coords_std: List[Float[torch.Tensor, "contour point_dim"]]
+    gt_coords_std: List[Float[torch.Tensor, "contour point_dim"]]
+    pred_means: List[Float[torch.Tensor, "contour point_dim"]]
+    pred_stds: List[Float[torch.Tensor, "contour point_dim"]]
     used_teacher_forcing: bool
     contour_boxes: List[
         Float[torch.Tensor, "4"]
@@ -21,6 +25,10 @@ class ModelResults(NamedTuple):
             pred_commands=[],
             pred_coords_img_space=[],
             pred_coords_norm=[],
+            pred_coords_std=[],
+            gt_coords_std=[],
+            pred_means=[],
+            pred_stds=[],
             used_teacher_forcing=False,
             contour_boxes=[],
         )

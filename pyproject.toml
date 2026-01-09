@@ -20,6 +20,8 @@ dependencies = [
     "tensorboard",
     "skia-pathops",
     "torchmetrics",
+    "torchvision",
+    "jaxtyping"
 ]
 # Also pydiffvg but that's not on pypi!
 

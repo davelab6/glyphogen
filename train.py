@@ -11,6 +11,8 @@ import random
 import sys
 from pathlib import Path
 
+from glyphogen.scheduler import get_cosine_annealing_with_warmup
+
 # Add the torchvision references to the path
 sys.path.append("vision/references/detection/")
 
@@ -33,6 +35,7 @@ from glyphogen.hyperparameters import (
     SCHEDULED_SAMPLING_START_EPOCH,
     SCHEDULED_SAMPLING_END_EPOCH,
     SCHEDULED_SAMPLING_MIN_RATIO,
+    WARMUP_STEPS,
 )
 from glyphogen.model import VectorizationGenerator, step
 
@@ -113,6 +116,7 @@ def main(
         batch_size=BATCH_SIZE,
         collate_fn=collate_fn,
         drop_last=True,
+        shuffle=True,
         worker_init_fn=seed_worker,
         num_workers=0,
     )
@@ -128,6 +132,14 @@ def main(
     if canary is not None:
         print("Reducing dataset for canary testing")
 
+    train_batch_count = (
+        len(train_loader) if canary is None else min(len(train_loader), canary)
+    ) - 1  # Last batch is dropped
+
+    test_batch_count = (
+        len(test_loader) if canary is None else min(len(test_loader), canary // 3)
+    ) - 1  # Last batch is dropped, simulate a 1/3 size validation set
+
     # Optimizer and Loss
     # optimizer = torch.optim.AdamW(
     #     model.parameters(), lr=LEARNING_RATE, weight_decay=0.005
@@ -135,8 +147,14 @@ def main(
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     # Work out gamma from number of steps and start/end learning rate
     # final_learning_rate = LEARNING_RATE * (gamma ** epochs)
-    gamma = (FINAL_LEARNING_RATE / LEARNING_RATE) ** (1 / epochs)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
+    # gamma = (FINAL_LEARNING_RATE / LEARNING_RATE) ** (1 / epochs)
+    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
+
+    # Note we are stepping the scheduler each batch, not each epoch
+    alpha_f = FINAL_LEARNING_RATE / LEARNING_RATE
+    scheduler = get_cosine_annealing_with_warmup(
+        optimizer, WARMUP_STEPS, train_batch_count, alpha_f
+    )
 
     # Training Loop
     train_writer = SummaryWriter(
@@ -175,10 +193,7 @@ def main(
         loss_accumulators = defaultdict(lambda: 0.0)
         i = 0
         kbar = pkbar.Kbar(
-            target=(
-                len(train_loader) if canary is None else min(len(train_loader), canary)
-            )
-            - 1,  # Last batch is dropped
+            target=train_batch_count,
             epoch=epoch,
             num_epochs=epochs,
             width=8,
@@ -214,12 +229,17 @@ def main(
             )
 
             global_step += 1
-        scheduler.step()
+            scheduler.step()  # Step the scheduler each batch
+            train_writer.add_scalar(
+                "Learning Rate", scheduler.get_last_lr()[0], global_step
+            )
 
         dump_accumulators(loss_accumulators, train_writer, epoch, i)
         train_writer.flush()
+
+        ## VALIDATION ##
+
         if do_validation:
-            # Validation
             model.eval()
             total_val_loss = 0
             loss_accumulators = defaultdict(lambda: 0.0)
@@ -227,12 +247,7 @@ def main(
             cm_state = init_confusion_matrix_state()
 
             kbar = pkbar.Kbar(
-                target=(
-                    len(test_loader)
-                    if canary is None
-                    else min(len(test_loader), canary)
-                )
-                - 1,  # Last batch is dropped
+                target=test_batch_count,
                 epoch=epoch,
                 num_epochs=epochs,
                 width=8,
@@ -240,7 +255,7 @@ def main(
             )
             with torch.no_grad():
                 for i, batch in enumerate(test_loader):
-                    if canary is not None and i >= canary:
+                    if canary is not None and i >= canary // 3:
                         break
                     losses, outputs = step(
                         model,
@@ -250,9 +265,10 @@ def main(
                         global_step=global_step,
                     )
                     for loss_key, loss_value in losses.items():
-                        loss_accumulators[loss_key] += loss_value
+                        loss_accumulators[loss_key] += loss_value.item()
                     total_val_loss += losses["total_loss"].item()
-                    collect_confusion_matrix_data(cm_state, outputs[0], batch)
+                    if outputs:
+                        collect_confusion_matrix_data(cm_state, outputs[0], batch)
                     kbar.update(
                         i,
                         values=[
@@ -271,8 +287,8 @@ def main(
             # Checkpoint
             if avg_val_metric > best_val_metric:
                 best_val_metric = avg_val_metric
-            torch.save(model.state_dict(), model_name)
-            print(f"Saved best model to {model_name}")
+                # torch.save(model.state_dict(), model_name)
+                # print(f"Saved best model to {model_name}")
 
             # Callbacks
             log_bounding_boxes(model, test_loader, val_writer, epoch)
@@ -280,8 +296,6 @@ def main(
             log_confusion_matrix(cm_state, val_writer, epoch)
 
         # Log the learning rate
-        train_writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], epoch)
-        train_writer.flush()
         val_writer.flush()
 
     train_writer.close()

@@ -120,10 +120,17 @@ class CommandRepresentation(ABC):
     @classmethod
     def split_tensor(cls, tensor: torch.Tensor) -> Sequence[torch.Tensor]:
         """Splits a tensor of shape (N, command_width + coordinate_width)
-        into a tuple of (commands, coordinates) tensors."""
+        or (B, N, command_width + coordinate_width) into a tuple of
+        (commands, coordinates) tensors."""
         command_width = cls.command_width
-        commands = tensor[:, :command_width]
-        coordinates = tensor[:, command_width:]
+        if tensor.dim() == 2:
+            commands = tensor[:, :command_width]
+            coordinates = tensor[:, command_width:]
+        elif tensor.dim() == 3:
+            commands = tensor[:, :, :command_width]
+            coordinates = tensor[:, :, command_width:]
+        else:
+            raise ValueError(f"Unsupported tensor dimension: {tensor.dim()}")
         return commands, coordinates
 
     def __init__(self, command: str, coordinates: List[Union[int, float]]):

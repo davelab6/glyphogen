@@ -221,6 +221,11 @@ class VectorizationGenerator(nn.Module):
         glyph_pred_commands = []
         glyph_pred_coords_norm = []
         glyph_pred_coords_img_space = []
+        glyph_pred_coords_std = []
+        glyph_gt_coords_std = []
+        glyph_pred_means = []
+        glyph_pred_stds = []
+
         # Prepare batch for decoder
         decoder_inputs_norm = [
             NodeCommand.image_space_to_mask_space(seq, box)
@@ -235,38 +240,67 @@ class VectorizationGenerator(nn.Module):
         # Prepare decoder input (all but last token)
         decoder_input_batch = padded_decoder_inputs[:, :-1, :]
 
-        pred_commands_batch, pred_coords_norm_batch = self.decoder(
-            decoder_input_batch,
+        # --- NEW STANDARDIZATION LOGIC ---
+        commands_norm, coords_norm = NodeCommand.split_tensor(decoder_input_batch)
+        command_indices = torch.argmax(commands_norm, dim=-1)
+        means, stds = self.decoder.get_stats_for_sequence(command_indices)
+        coords_std = self.decoder.standardize(coords_norm, means, stds)
+        decoder_input_std = torch.cat([commands_norm, coords_std], dim=-1)
+        # --- END NEW LOGIC ---
+
+        pred_commands_batch, pred_coords_std_batch = self.decoder(
+            decoder_input_std,  # Pass standardized input
             context=z_batch,
             teacher_forcing_ratio=teacher_forcing_ratio,
         )
 
-        # Unpad and denormalize
+        # Unpad and handle results
         for i in range(len(valid_boxes)):
             box = valid_boxes[i]
             seq_len = decoder_inputs_norm[i].shape[0] - 1  # Original length
 
-            pred_commands = pred_commands_batch[i, :seq_len, :]
-            pred_coords_norm = pred_coords_norm_batch[i, :seq_len, :]
+            # --- Ground Truth ---
+            # Get the GT coords for the loss (the part that was predicted)
+            gt_coords_for_loss_std = coords_std[i, :seq_len, :]
+            glyph_gt_coords_std.append(gt_coords_for_loss_std)
 
+            # --- Predictions ---
+            pred_commands = pred_commands_batch[i, :seq_len, :]
+            pred_coords_std = pred_coords_std_batch[i, :seq_len, :]
             glyph_pred_commands.append(pred_commands)
+            glyph_pred_coords_std.append(pred_coords_std)
+
+            # --- De-standardize for metrics and logging ---
+            pred_command_indices = torch.argmax(pred_commands, dim=-1)
+            pred_means, pred_stds = self.decoder.get_stats_for_sequence(
+                pred_command_indices
+            )
+            glyph_pred_means.append(pred_means)
+            glyph_pred_stds.append(pred_stds)
+
+            pred_coords_norm = self.decoder.de_standardize(
+                pred_coords_std, pred_means, pred_stds
+            )
             glyph_pred_coords_norm.append(pred_coords_norm)
 
-            # Also create image space version for logging/decoding
+            # --- De-normalize to image space for logging/decoding ---
             pred_sequence_norm = torch.cat([pred_commands, pred_coords_norm], dim=-1)
-            # To convert back, we need a full sequence including SOS
             sos_token = decoder_inputs_norm[i][0:1, :]
             full_pred_sequence_norm = torch.cat([sos_token, pred_sequence_norm], dim=0)
 
             pred_sequence_img_space = NodeCommand.mask_space_to_image_space(
                 full_pred_sequence_norm, box
             )
-            # Return the coordinate part, excluding the SOS token's coords
             glyph_pred_coords_img_space.append(
                 pred_sequence_img_space[1:, NodeCommand.command_width :]
             )
+
         return ModelResults(
             pred_commands=glyph_pred_commands,
+            pred_coords_std=glyph_pred_coords_std,
+            gt_coords_std=glyph_gt_coords_std,
+            pred_means=glyph_pred_means,
+            pred_stds=glyph_pred_stds,
             pred_coords_norm=glyph_pred_coords_norm,
             pred_coords_img_space=glyph_pred_coords_img_space,
             used_teacher_forcing=True,
@@ -279,32 +313,31 @@ class VectorizationGenerator(nn.Module):
         glyph_pred_commands = []
         glyph_pred_coords_norm = []
         glyph_pred_coords_img_space = []
-        # Autoregressive generation for each contour in the batch
-        # This part is still sequential per time step, but batched over contours
+        glyph_pred_coords_std = []
+        glyph_pred_means = []
+        glyph_pred_stds = []
+
         batch_size = len(valid_boxes)
         device = z_batch.device
         sos_index = NodeCommand.encode_command("SOS")
 
+        # --- Standardize the initial SOS input ---
         command_part = torch.zeros(
             batch_size, 1, NodeCommand.command_width, device=device
         )
         command_part[:, 0, sos_index] = 1.0
-
-        coords_part_img_space = torch.zeros(
+        coords_part_norm = torch.zeros(
             batch_size, 1, NodeCommand.coordinate_width, device=device
         )
+        command_indices = torch.argmax(command_part, dim=-1)
+        means, stds = self.decoder.get_stats_for_sequence(command_indices)
+        coords_part_std = self.decoder.standardize(coords_part_norm, means, stds)
+        current_input_std = torch.cat([command_part, coords_part_std], dim=-1)
+        # ---
 
-        # This part of image_space_to_mask_space is tricky to batch as boxes are different
-        # However, since coords are all zero, we can simplify
-        coords_part_norm = (coords_part_img_space * 2) - 1
-
-        current_input = torch.cat([command_part, coords_part_norm], dim=-1)
         hidden_state = None
-
-        # Lists to store the full sequences for each item in the batch
         batch_contour_commands = [[] for _ in range(batch_size)]
-        batch_contour_coords_norm = [[] for _ in range(batch_size)]
-
+        batch_contour_coords_std = [[] for _ in range(batch_size)]
         active_indices = list(range(batch_size))
 
         for _ in range(50):  # max_length
@@ -313,21 +346,18 @@ class VectorizationGenerator(nn.Module):
 
             active_z = z_batch[active_indices]
 
-            command_logits, coord_output_norm, hidden_state = (
-                self.decoder._forward_step(current_input, active_z, hidden_state)
+            command_logits, coord_output_std, hidden_state = self.decoder._forward_step(
+                current_input_std, active_z, hidden_state
             )
 
-            # Store results for active contours
             for i, original_idx in enumerate(active_indices):
                 batch_contour_commands[original_idx].append(command_logits[i : i + 1])
-                batch_contour_coords_norm[original_idx].append(
-                    coord_output_norm[i : i + 1]
+                batch_contour_coords_std[original_idx].append(
+                    coord_output_std[i : i + 1]
                 )
 
             command_probs = F.softmax(command_logits.squeeze(1), dim=-1)
             predicted_command_idx = torch.argmax(command_probs, dim=1, keepdim=True)
-
-            # Check for EOS and remove finished sequences from the active batch
             eos_mask = predicted_command_idx.squeeze(1) == NodeCommand.encode_command(
                 "EOS"
             )
@@ -339,66 +369,62 @@ class VectorizationGenerator(nn.Module):
                     for i, idx in enumerate(active_indices)
                     if active_indices_mask[i]
                 ]
-                current_input = current_input[active_indices_mask]
+                if not active_indices:
+                    break
                 if hidden_state is not None:
                     h, c = hidden_state
                     hidden_state = (
                         h[:, active_indices_mask, :],
                         c[:, active_indices_mask, :],
                     )
-                if not active_indices:
-                    break
                 predicted_command_idx = predicted_command_idx[active_indices_mask]
-                coord_output_norm = coord_output_norm[active_indices_mask]
+                coord_output_std = coord_output_std[active_indices_mask]
 
             next_command_onehot = F.one_hot(
                 predicted_command_idx,
                 num_classes=NodeCommand.command_width,
             ).float()
-
-            coord_padded = torch.zeros(
-                next_command_onehot.shape[0],
-                1,
-                NodeCommand.coordinate_width,
-                device=device,
+            current_input_std = torch.cat(
+                [next_command_onehot, coord_output_std], dim=-1
             )
-            coord_padded[:, :, : NodeCommand.coordinate_width] = coord_output_norm
 
-            current_input = torch.cat([next_command_onehot, coord_padded], dim=-1)
-
-        # Process and denormalize results
         for i in range(batch_size):
             if not batch_contour_commands[i]:
                 pred_commands = torch.empty(0, NodeCommand.command_width, device=device)
-                pred_coords_norm = torch.empty(
+                pred_coords_std = torch.empty(
                     0, NodeCommand.coordinate_width, device=device
                 )
             else:
-                # Squeeze out the time dimension from the list of tensors
                 pred_commands = torch.cat(batch_contour_commands[i], dim=1).squeeze(0)
-                pred_coords_norm = torch.cat(
-                    batch_contour_coords_norm[i], dim=1
-                ).squeeze(0)
+                pred_coords_std = torch.cat(batch_contour_coords_std[i], dim=1).squeeze(
+                    0
+                )
 
             glyph_pred_commands.append(pred_commands)
+            glyph_pred_coords_std.append(pred_coords_std)
+
+            pred_command_indices = torch.argmax(pred_commands, dim=-1)
+            pred_means, pred_stds = self.decoder.get_stats_for_sequence(
+                pred_command_indices
+            )
+            glyph_pred_means.append(pred_means)
+            glyph_pred_stds.append(pred_stds)
+
+            pred_coords_norm = self.decoder.de_standardize(
+                pred_coords_std, pred_means, pred_stds
+            )
             glyph_pred_coords_norm.append(pred_coords_norm)
 
-            # Also create image space version for logging/decoding
             pred_sequence_norm = torch.cat([pred_commands, pred_coords_norm], dim=-1)
-
-            # We need a full sequence to convert back to image space.
-            # The first token is always SOS with zero coordinates in normalized space.
             sos_cmd = (
                 F.one_hot(
-                    torch.tensor(NodeCommand.encode_command("SOS")),
-                    num_classes=NodeCommand.command_width,
+                    torch.tensor(sos_index), num_classes=NodeCommand.command_width
                 )
                 .float()
                 .to(device)
             )
             sos_coords = torch.zeros(NodeCommand.coordinate_width, device=device)
             sos_token = torch.cat([sos_cmd, sos_coords]).unsqueeze(0)
-
             full_pred_sequence_norm = torch.cat([sos_token, pred_sequence_norm], dim=0)
 
             pred_sequence_img_space = NodeCommand.mask_space_to_image_space(
@@ -409,6 +435,10 @@ class VectorizationGenerator(nn.Module):
             )
         return ModelResults(
             pred_commands=glyph_pred_commands,
+            pred_coords_std=glyph_pred_coords_std,
+            gt_coords_std=[],  # No GT in autoregression
+            pred_means=glyph_pred_means,
+            pred_stds=glyph_pred_stds,
             pred_coords_norm=glyph_pred_coords_norm,
             pred_coords_img_space=glyph_pred_coords_img_space,
             used_teacher_forcing=False,
@@ -431,6 +461,7 @@ def step(
             "signed_area_loss": torch.tensor(0.0, device=device),
             "command_accuracy_metric": torch.tensor(0.0, device=device),
             "coordinate_mae_metric": torch.tensor(0.0, device=device),
+            "alignment_loss": torch.tensor(0.0, device=device),
         }
         return final_losses, []
 
@@ -453,7 +484,9 @@ def step(
         outputs = model(collated_batch, teacher_forcing_ratio=1.0)
 
     # Loss is also calculated over the entire batch.
-    loss_values = losses(collated_batch, outputs, device, validation=not model.training)
+    loss_values = losses(
+        collated_batch, outputs, model, device, validation=not model.training
+    )
 
     if DEBUG and writer is not None and global_step % 100 == 0:
         # Debugging needs to be adapted for the new batch structure
@@ -465,28 +498,18 @@ def step(
 
             # Create a sliced version of outputs for the first image
             debug_outputs = ModelResults(
-                pred_commands=[
-                    p
-                    for i, p in enumerate(outputs.pred_commands)
-                    if first_image_contour_mask[i]
-                ],
-                pred_coords_norm=[
-                    p
-                    for i, p in enumerate(outputs.pred_coords_norm)
-                    if first_image_contour_mask[i]
-                ],
-                pred_coords_img_space=[
-                    p
-                    for i, p in enumerate(outputs.pred_coords_img_space)
-                    if first_image_contour_mask[i]
-                ],
+                **{
+                    field: [
+                        getattr(outputs, field)[i]
+                        for i, mask in enumerate(first_image_contour_mask)
+                        if mask
+                    ]
+                    for field in ModelResults._fields
+                    if field != "used_teacher_forcing"
+                },
                 used_teacher_forcing=outputs.used_teacher_forcing,
-                contour_boxes=[
-                    b
-                    for i, b in enumerate(outputs.contour_boxes)
-                    if first_image_contour_mask[i]
-                ],
             )
+
             if debug_outputs.pred_commands:
                 dump_debug_sequences(
                     writer,

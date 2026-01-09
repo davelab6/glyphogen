@@ -1,19 +1,19 @@
 # Hyperparameters
 LATENT_DIM = 32
-D_MODEL = 1024
+D_MODEL = 512
 PROJ_SIZE = D_MODEL // 4
-RATE = 0.15  # Specifically, the dropout rate
+RATE = 0.2  # Specifically, the dropout rate
 EPOCHS = 2000
 BATCH_SIZE = 32
 RASTER_LOSS_WEIGHT = 15000.0
 
 # Vectorization sub-model weights
 VECTOR_LOSS_WEIGHT_COMMAND = 1.0  # Keep this at 1, normalize others against it
-# Although you should probably multiply by the number of augmentations
-VECTOR_RASTERIZATION_LOSS_WEIGHT = 0.01
-VECTOR_LOSS_WEIGHT_COORD = 500.0
-SIGNED_AREA_WEIGHT = 2.0
-ALIGNMENT_LOSS_WEIGHT = 0.5
+# VECTOR_RASTERIZATION_LOSS_WEIGHT = 0.01
+VECTOR_LOSS_WEIGHT_COORD = 3.0
+VECTOR_LOSS_WEIGHT_COORD_ABSOLUTE = 1.0
+SIGNED_AREA_WEIGHT = 0.5
+ALIGNMENT_LOSS_WEIGHT = 0.05
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = (
@@ -21,8 +21,9 @@ HUBER_DELTA = (
 )  # Loss computations are in normalized -1 to 1 space across a 512 pixel image.
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
-LEARNING_RATE = 5e-6 * (BATCH_SIZE)
-FINAL_LEARNING_RATE = 1e-8 * (BATCH_SIZE)
+LEARNING_RATE = 1e-4
+FINAL_LEARNING_RATE = 1e-8
+WARMUP_STEPS = 6000
 
 GEN_IMAGE_SIZE = (512, 512)
 RASTER_IMG_SIZE = GEN_IMAGE_SIZE[0]
@@ -39,9 +40,6 @@ SCHEDULED_SAMPLING_END_EPOCH = 100
 SCHEDULED_SAMPLING_MIN_RATIO = 0.75
 
 
-# New tokenization hyperparameters
-QUANTIZATION_BIN_SIZE = 10
-COORD_RANGE = (-1000, 1000)
 MAX_SEQUENCE_LENGTH = MAX_COMMANDS + 2  # +2 for SOS and EOS tokens
 
 ALPHABET = ["a", "d", "h", "e", "s", "i", "o", "n", "t"]

@@ -5,6 +5,7 @@ import torchvision.transforms.v2 as T
 from fontTools.ttLib import TTFont
 from torchvision.datasets import CocoDetection
 
+from glyphogen.command_defs import NodeCommand
 from glyphogen.hyperparameters import BASE_DIR
 from glyphogen.typing import CollatedGlyphData, GroundTruthContour, Target
 from typing import List
@@ -83,6 +84,28 @@ class GlyphCocoDataset(CocoDetection):
         if self.transforms is not None:
             # Note: transforms will need to handle a list of targets
             img, targets = self.transforms(img, targets)
+
+        # Debugging: filter out any sequences with curves
+        n_index = NodeCommand.encode_command_one_hot("N")
+        ns_index = NodeCommand.encode_command_one_hot("NS")
+        nh_index = NodeCommand.encode_command_one_hot("NH")
+        nv_index = NodeCommand.encode_command_one_hot("NV")
+        nci_index = NodeCommand.encode_command_one_hot("NCI")
+        nco_index = NodeCommand.encode_command_one_hot("NCO")
+        # Debugging: filter out any sequences with lines
+        l_index = NodeCommand.encode_command_one_hot("L")
+        lh_index = NodeCommand.encode_command_one_hot("LH")
+        lv_index = NodeCommand.encode_command_one_hot("LV")
+        curve_mask = (
+            n_index + ns_index + nh_index + nv_index + nci_index + nco_index
+        ).bool()
+        line_mask = (l_index + lh_index + lv_index + nci_index + nco_index).bool()
+
+        # for sequences in targets:
+        #     (commands, _) = NodeCommand.split_tensor(sequences["sequence"])
+        #     for command in commands:
+        #         if torch.any(command.bool() & curve_mask):
+        #             return None
 
         # The training loop's `step` function expects a tuple of (image, target_dict)
         return img, {"image_id": img_id, "gt_contours": targets}

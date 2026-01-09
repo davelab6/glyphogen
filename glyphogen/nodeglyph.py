@@ -50,7 +50,11 @@ class Node:
         return (
             self.is_line
             and self.index > 0
-            and self.previous.coordinates[1] == self.coordinates[1]
+            and np.isclose(
+                self.previous.coordinates[1],
+                self.coordinates[1],
+                atol=self.ALIGNMENT_EPSILON,
+            )
         )
 
     @property
@@ -58,7 +62,11 @@ class Node:
         return (
             self.is_line
             and self.index > 0
-            and self.previous.coordinates[0] == self.coordinates[0]
+            and np.isclose(
+                self.previous.coordinates[0],
+                self.coordinates[0],
+                atol=self.ALIGNMENT_EPSILON,
+            )
         )
 
     @property
