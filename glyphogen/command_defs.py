@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import List, Optional, Self, Sequence, Union
+from typing import List, Optional, Self, Sequence, Union, TYPE_CHECKING
 from jaxtyping import Float
 
 import numpy as np
@@ -22,42 +22,42 @@ class classproperty:
 
 class CoordinateRepresentation(ABC):
     @classmethod
-    def emit_node_position(cls, n: Node) -> npt.NDArray[np.float32]: ...
+    def emit_node_position(cls, n: "Node") -> npt.NDArray[np.float32]: ...
 
     @classmethod
-    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]: ...
+    def emit_in_handle(cls, n: "Node") -> Optional[npt.NDArray[np.float32]]: ...
 
     @classmethod
-    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]: ...
+    def emit_out_handle(cls, n: "Node") -> Optional[npt.NDArray[np.float32]]: ...
 
 
 class AbsoluteCoordinateRepresentation(CoordinateRepresentation):
     @classmethod
-    def emit_node_position(cls, n: Node) -> npt.NDArray[np.float32]:
+    def emit_node_position(cls, n: "Node") -> npt.NDArray[np.float32]:
         return n.coordinates
 
     @classmethod
-    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]:
+    def emit_in_handle(cls, n: "Node") -> Optional[npt.NDArray[np.float32]]:
         return n.in_handle
 
     @classmethod
-    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]:
+    def emit_out_handle(cls, n: "Node") -> Optional[npt.NDArray[np.float32]]:
         return n.out_handle
 
 
 class AbsolutePositionRelativeHandleRepresentation(CoordinateRepresentation):
     @classmethod
-    def emit_node_position(cls, n: Node) -> npt.NDArray[np.float32]:
+    def emit_node_position(cls, n: "Node") -> npt.NDArray[np.float32]:
         return n.coordinates
 
     @classmethod
-    def emit_in_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]:
+    def emit_in_handle(cls, n: "Node") -> Optional[npt.NDArray[np.float32]]:
         if n.in_handle is None:
             return None
         return n.in_handle - n.coordinates
 
     @classmethod
-    def emit_out_handle(cls, n: Node) -> Optional[npt.NDArray[np.float32]]:
+    def emit_out_handle(cls, n: "Node") -> Optional[npt.NDArray[np.float32]]:
         if n.out_handle is None:
             return None
         return n.out_handle - n.coordinates
@@ -67,7 +67,7 @@ class RelativeCoordinateRepresentation(AbsolutePositionRelativeHandleRepresentat
     """Handles are also relative to the node position."""
 
     @classmethod
-    def emit_node_position(cls, n: Node) -> npt.NDArray[np.float32]:
+    def emit_node_position(cls, n: "Node") -> npt.NDArray[np.float32]:
         if n.index == 0:
             return n.coordinates
         previous_node = n.previous
@@ -83,10 +83,10 @@ class CommandRepresentation(ABC):
     ]  # How would you like your coordinates?
 
     @classmethod
-    def emit(cls, nodes: List[Node]) -> Sequence[Self]: ...
+    def emit(cls, nodes: List["Node"]) -> Sequence[Self]: ...
 
     @classmethod
-    def contour_from_commands(cls, commands: Sequence[Self]) -> NodeContour:
+    def contour_from_commands(cls, commands: Sequence[Self]) -> "NodeContour":
         raise NotImplementedError()
 
     @classproperty
@@ -135,7 +135,7 @@ class CommandRepresentation(ABC):
 
     def __init__(self, command: str, coordinates: List[Union[int, float]]):
         if command not in self.grammar:
-            raise ValueError(f"Invalid SVG command: {command}")
+            raise ValueError(f"Invalid command: {command}")
         if len(coordinates) != self.grammar[command]:
             raise ValueError(
                 f"Invalid number of coordinates for command {command}: expected {self.grammar[command]}, got {len(coordinates)}"
@@ -156,7 +156,7 @@ class SVGCommand(CommandRepresentation):
     coordinate_representation = AbsoluteCoordinateRepresentation
 
     @classmethod
-    def emit(cls, nodes: List[Node]) -> Sequence[Self]:
+    def emit(cls, nodes: List["Node"]) -> Sequence[Self]:
         commands = []
         if not nodes:
             return commands
@@ -198,7 +198,7 @@ class SVGCommand(CommandRepresentation):
     @classmethod
     def contour_from_commands(
         cls, commands: Sequence[CommandRepresentation]
-    ) -> NodeContour:
+    ) -> "NodeContour":
         contour = NodeContour([])
         # Expect a M
         if not commands or commands[0].command != "M":
@@ -328,7 +328,7 @@ class NodeCommand(CommandRepresentation):
     coordinate_representation = RelativeCoordinateRepresentation
 
     @classmethod
-    def emit(cls, nodes: List[Node]) -> Sequence["NodeCommand"]:
+    def emit(cls, nodes: List["Node"]) -> Sequence["NodeCommand"]:
         commands = []
         if not nodes:
             return commands
@@ -412,7 +412,7 @@ class NodeCommand(CommandRepresentation):
     @classmethod
     def contour_from_commands(
         cls, commands: Sequence[CommandRepresentation], tolerant=True
-    ) -> NodeContour:
+    ) -> "NodeContour":
         contour = NodeContour([])
         commands = list(commands)
         # Pop SOS
@@ -879,3 +879,168 @@ class NodeCommand(CommandRepresentation):
             contour_splits,
             point_splits,
         )
+
+
+class TangentNormalCommand(CommandRepresentation):
+    """
+    A command representation where coordinates are relative to a local
+    tangent-normal basis at each node.
+    'M' is still in absolute world-space.
+    'L' coordinates are (forward, sideways) relative to the previous tangent.
+    """
+
+    grammar = {
+        "SOS": 0,
+        "M": 2,
+        "L": 2,
+        "N": 6,
+        "EOS": 0,
+    }
+
+    @classmethod
+    def emit(cls, nodes: List["Node"]) -> Sequence["TangentNormalCommand"]:
+        commands = []
+        if not nodes:
+            return commands
+
+        commands.append(cls("SOS", []))
+        commands.append(cls("M", nodes[0].coordinates.tolist()))
+
+        # Initial basis: pointing right
+        f_hat = np.array([1.0, 0.0], dtype=np.float32)
+
+        for i in range(len(nodes)):
+            p_prev = nodes[i]
+            p_curr = nodes[(i + 1) % len(nodes)]  # Loop back to start
+
+            # World-space delta for the on-curve point
+            delta_pos = p_curr.coordinates - p_prev.coordinates
+
+            # Project on-curve delta onto current basis
+            r_hat = np.array([-f_hat[1], f_hat[0]], dtype=np.float32)
+            turtle_dx = np.dot(delta_pos, f_hat)
+            turtle_dy = np.dot(delta_pos, r_hat)
+
+            # Determine the basis for the *next* step.
+            # The new "forward" is the direction of the outgoing handle of the *current* point `p_prev`,
+            # or the line direction if it was a line.
+            if p_prev.out_handle is not None:
+                next_f_hat_vec = p_prev.out_handle - p_prev.coordinates
+            else:  # is_line
+                next_f_hat_vec = p_curr.coordinates - p_prev.coordinates
+
+            norm = np.linalg.norm(next_f_hat_vec)
+            if norm > 1e-6:
+                next_f_hat = next_f_hat_vec / norm
+            else:
+                next_f_hat = f_hat  # Keep current basis if segment is zero-length
+
+            # A segment is a line if the prev node has no out-handle and curr node has no in-handle
+            if p_prev.out_handle is None and p_curr.in_handle is None:
+                commands.append(cls("L", [turtle_dx, turtle_dy]))
+            else:
+                # Project handles onto the same basis
+                # We use the handles relative to their on-curve points
+                in_handle_rel = (
+                    p_curr.in_handle - p_curr.coordinates
+                    if p_curr.in_handle is not None
+                    else np.array([0, 0])
+                )
+                # The out-handle belongs to the *previous* node
+                out_handle_rel = (
+                    p_prev.out_handle - p_prev.coordinates
+                    if p_prev.out_handle is not None
+                    else np.array([0, 0])
+                )
+
+                h_in_f = np.dot(in_handle_rel, f_hat)
+                h_in_s = np.dot(in_handle_rel, r_hat)
+                h_out_f = np.dot(out_handle_rel, f_hat)
+                h_out_s = np.dot(out_handle_rel, r_hat)
+
+                commands.append(
+                    cls("N", [turtle_dx, turtle_dy, h_in_f, h_in_s, h_out_f, h_out_s])
+                )
+
+            f_hat = next_f_hat
+
+        commands.append(cls("EOS", []))
+        return commands
+
+    @classmethod
+    def contour_from_commands(
+        cls, commands: Sequence[CommandRepresentation], tolerant=True
+    ) -> "NodeContour":
+        contour = NodeContour([])
+        commands = list(commands)
+        if not commands or commands[0].command != "SOS":
+            return contour
+
+        commands.pop(0)
+        if not commands or commands[0].command != "M":
+            return contour
+
+        current_pos = np.array(commands[0].coordinates, dtype=np.float32)
+        # The first node has no handles from the M command
+        prev_node = contour.push(
+            coordinates=current_pos.copy(), in_handle=None, out_handle=None
+        )
+        commands.pop(0)
+
+        # Initial basis: pointing right
+        f_hat = np.array([1.0, 0.0], dtype=np.float32)
+
+        for command in commands:
+            if command.command == "EOS":
+                break
+
+            r_hat = np.array([-f_hat[1], f_hat[0]], dtype=np.float32)
+
+            if command.command == "L":
+                forward, sideways = command.coordinates
+                delta_world = forward * f_hat + sideways * r_hat
+                current_pos += delta_world
+                prev_node = contour.push(
+                    coordinates=current_pos.copy(), in_handle=None, out_handle=None
+                )
+
+                # Update basis from the line segment itself
+                norm = np.linalg.norm(delta_world)
+                if norm > 1e-6:
+                    f_hat = delta_world / norm
+
+            elif command.command == "N":
+                turtle_dx, turtle_dy, h_in_f, h_in_s, h_out_f, h_out_s = (
+                    command.coordinates
+                )
+
+                # Reconstruct world-space deltas from the turtle coordinates
+                delta_pos = turtle_dx * f_hat + turtle_dy * r_hat
+                delta_in_handle = h_in_f * f_hat + h_in_s * r_hat
+                delta_out_handle = h_out_f * f_hat + h_out_s * r_hat
+
+                # Set the out-handle of the PREVIOUS node
+                prev_node.out_handle = prev_node.coordinates + delta_out_handle
+
+                # Create the new node
+                current_pos += delta_pos
+                new_in_handle = current_pos + delta_in_handle
+                prev_node = contour.push(
+                    coordinates=current_pos.copy(),
+                    in_handle=new_in_handle,
+                    out_handle=None,
+                )
+
+                # Update basis from the outgoing handle we just computed for the previous node
+                norm = np.linalg.norm(delta_out_handle)
+                if norm > 1e-6:
+                    f_hat = delta_out_handle / norm
+        if (
+            len(contour.nodes) > 1
+            and np.allclose(
+                contour.nodes[0].coordinates, contour.nodes[-1].coordinates, atol=1e-4
+            )
+        ):
+            last_node = contour.nodes.pop()
+            contour.nodes[0].in_handle = last_node.in_handle
+        return contour
