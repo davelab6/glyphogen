@@ -2,7 +2,7 @@ from glyphogen.representations import (
     AbsoluteCoordinateRepresentation,
     CommandRepresentation,
 )
-from typing import List, Sequence, TYPE_CHECKING, Self
+from typing import List, Sequence, Self
 import numpy as np
 import torch
 from glyphogen.nodeglyph import Node, NodeContour

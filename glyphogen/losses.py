@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 import sys
 
-from glyphogen.representations.nodecommand import NodeCommand
+from glyphogen.representations.model import MODEL_REPRESENTATION
 from glyphogen.hyperparameters import (
     ALIGNMENT_LOSS_WEIGHT,
     HUBER_DELTA,
@@ -76,10 +76,10 @@ def losses(
         box = contour_boxes[i]
 
         gt_sequence_img_space = gt_target_sequences[i].to(device)
-        gt_sequence_norm = NodeCommand.image_space_to_mask_space(
+        gt_sequence_norm = MODEL_REPRESENTATION.image_space_to_mask_space(
             gt_sequence_img_space, box
         )
-        gt_commands_norm, _ = NodeCommand.split_tensor(gt_sequence_norm)
+        gt_commands_norm, _ = MODEL_REPRESENTATION.split_tensor(gt_sequence_norm)
         gt_command_for_loss = gt_commands_norm[1 : pred_command.shape[0] + 1]
 
         # 1. Command Loss (Cross-Entropy)
@@ -123,8 +123,8 @@ def losses(
         )
 
         # 3. Signed Area Loss
-        eos_idx = NodeCommand.encode_command("EOS")
-        sos_idx = NodeCommand.encode_command("SOS")
+        eos_idx = MODEL_REPRESENTATION.encode_command("EOS")
+        sos_idx = MODEL_REPRESENTATION.encode_command("SOS")
         gt_vertex_mask = (abs_gt_command.argmax(dim=-1) != eos_idx) & (
             abs_gt_command.argmax(dim=-1) != sos_idx
         )
@@ -230,7 +230,7 @@ def alignment_loss(
     on_curve_points = pred_coords[:, 0:2]
     valid_nodes_mask = torch.argmax(
         gt_command_for_loss, dim=-1
-    ) != NodeCommand.encode_command("EOS")
+    ) != MODEL_REPRESENTATION.encode_command("EOS")
     num_valid_nodes = valid_nodes_mask.sum().item()
 
     for alignment_set in x_alignment_sets:
@@ -253,7 +253,7 @@ def alignment_loss(
 def coordinate_width_mask(commands: torch.Tensor, coords: torch.Tensor):
     device = commands.device
     command_indices = torch.argmax(commands, dim=-1)
-    arg_counts_list = [NodeCommand.grammar[cmd] for cmd in NodeCommand.grammar]
+    arg_counts_list = [MODEL_REPRESENTATION.grammar[cmd] for cmd in MODEL_REPRESENTATION.grammar]
     arg_counts = torch.tensor(arg_counts_list, device=device)
     num_relevant_coords = arg_counts[command_indices]
     coord_mask = torch.arange(
@@ -328,12 +328,12 @@ def align_sequences(
     pred_command,
     pred_coords_norm,
 ):
-    gt_command_all, _ = NodeCommand.split_tensor(gt_sequence_norm)
+    gt_command_all, _ = MODEL_REPRESENTATION.split_tensor(gt_sequence_norm)
     gt_command_for_loss = gt_command_all[1 : pred_command.shape[0] + 1]
     pred_command_for_loss = pred_command
 
-    abs_gt_sequence = NodeCommand.unroll_relative_coordinates(gt_sequence_norm)
-    _, abs_gt_coords_all = NodeCommand.split_tensor(abs_gt_sequence)
+    abs_gt_sequence = MODEL_REPRESENTATION.unroll_relative_coordinates(gt_sequence_norm)
+    _, abs_gt_coords_all = MODEL_REPRESENTATION.split_tensor(abs_gt_sequence)
     gt_coords_for_loss = abs_gt_coords_all[1 : pred_command.shape[0] + 1]
 
     sos_token = gt_sequence_norm[0:1, :]
@@ -341,10 +341,10 @@ def align_sequences(
     full_predicted_relative_sequence = torch.cat(
         [sos_token, predicted_relative_sequence], dim=0
     )
-    abs_pred_sequence = NodeCommand.unroll_relative_coordinates(
+    abs_pred_sequence = MODEL_REPRESENTATION.unroll_relative_coordinates(
         full_predicted_relative_sequence
     )
-    _, abs_pred_coords_all = NodeCommand.split_tensor(abs_pred_sequence)
+    _, abs_pred_coords_all = MODEL_REPRESENTATION.split_tensor(abs_pred_sequence)
     pred_coords_for_loss = abs_pred_coords_all[1:]
 
     return (
@@ -369,11 +369,11 @@ def predictions_to_image_space(
         box = contour_boxes[i].detach().cpu()
 
         pred_sequence_norm = torch.cat([pred_cmd, pred_coords_norm], dim=-1)
-        sos_token = NodeCommand.image_space_to_mask_space(
+        sos_token = MODEL_REPRESENTATION.image_space_to_mask_space(
             gt_contours[i]["sequence"].cpu(), box
         )[0:1, :]
         full_pred_sequence_norm = torch.cat([sos_token, pred_sequence_norm], dim=0)
-        pred_sequence_img_space = NodeCommand.mask_space_to_image_space(
+        pred_sequence_img_space = MODEL_REPRESENTATION.mask_space_to_image_space(
             full_pred_sequence_norm, box
         )
         pred_commands_and_coords_img_space.append(pred_sequence_img_space[1:])
@@ -387,9 +387,9 @@ def dump_debug_sequences(
     pred_commands_and_coords_img_space = predictions_to_image_space(
         outputs, gt_contours
     )
-    pred_glyph = NodeGlyph.decode(pred_commands_and_coords_img_space, NodeCommand)
+    pred_glyph = NodeGlyph.decode(pred_commands_and_coords_img_space, MODEL_REPRESENTATION)
     debug_string = SVGGlyph.from_node_glyph(pred_glyph).to_svg_string()
-    gt_glyph = NodeGlyph.decode([x["sequence"].cpu() for x in gt_contours], NodeCommand)
+    gt_glyph = NodeGlyph.decode([x["sequence"].cpu() for x in gt_contours], MODEL_REPRESENTATION)
     gt_nodes = gt_glyph.to_debug_string()
     gt_debug_string = SVGGlyph.from_node_glyph(gt_glyph).to_svg_string()
 

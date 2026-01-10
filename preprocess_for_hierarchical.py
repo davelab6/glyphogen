@@ -10,7 +10,7 @@ from pycocotools import mask as mask_util
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from glyphogen.representations.nodecommand import NodeCommand
+from glyphogen.representations.model import MODEL_REPRESENTATION
 from glyphogen.dataset import font_files
 from glyphogen.glyph import Glyph
 from glyphogen.hyperparameters import ALPHABET, GEN_IMAGE_SIZE
@@ -83,7 +83,7 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
             # for alignment supervision
             alignment_points = get_alignments(node_glyph)
 
-            contour_sequences = node_glyph.encode(NodeCommand)
+            contour_sequences = node_glyph.encode(MODEL_REPRESENTATION)
             if contour_sequences is None:
                 print(f"  Skipping glyph {glyph} due to encoding failure.")
                 continue

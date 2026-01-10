@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from glyphogen.hyperparameters import PROJ_SIZE
 
-from glyphogen.representations.nodecommand import NodeCommand
+from glyphogen.representations.model import MODEL_REPRESENTATION
 
 
 class LSTMDecoder(nn.Module):
@@ -16,17 +16,20 @@ class LSTMDecoder(nn.Module):
         self.proj_size = PROJ_SIZE
         self.rate = rate
 
-        self.command_embedding = nn.Linear(NodeCommand.command_width, d_model)
-        self.coord_embedding = nn.Linear(NodeCommand.coordinate_width, d_model)
+        self.command_embedding = nn.Linear(MODEL_REPRESENTATION.command_width, d_model)
+        self.coord_embedding = nn.Linear(MODEL_REPRESENTATION.coordinate_width, d_model)
         self.lstm = nn.LSTM(
             d_model + latent_dim, d_model, batch_first=True, proj_size=self.proj_size
         )
         self.layer_norm = nn.LayerNorm(self.proj_size)
         self.dropout = nn.Dropout(rate)
-        self.output_command = nn.Linear(self.proj_size, NodeCommand.command_width)
+        self.output_command = nn.Linear(
+            self.proj_size, MODEL_REPRESENTATION.command_width
+        )
         self.output_command_activation = nn.ReLU()
         self.output_coords = nn.Linear(
-            self.proj_size + NodeCommand.command_width, NodeCommand.coordinate_width
+            self.proj_size + MODEL_REPRESENTATION.command_width,
+            MODEL_REPRESENTATION.coordinate_width,
         )
         nn.init.zeros_(self.output_coords.bias)
         self.coord_output_scale = nn.Parameter(torch.tensor(0.1))
@@ -36,20 +39,20 @@ class LSTMDecoder(nn.Module):
         """
         Performs a single decoding step.
         Args:
-            input_token (Tensor): Shape (batch_size, 1, NodeCommand.command_width + NodeCommand.coordinate_width)
+            input_token (Tensor): Shape (batch_size, 1, MODEL_REPRESENTATION.command_width + MODEL_REPRESENTATION.coordinate_width)
             context (Tensor): Shape (batch_size, 1, latent_dim)
             hidden_state (tuple, optional): Previous hidden state of the LSTM.
         Returns:
-            command_logits (Tensor): Shape (batch_size, 1, NodeCommand.command_width)
-            coord_output (Tensor): Shape (batch_size, 1, NodeCommand.coordinate_width)
+            command_logits (Tensor): Shape (batch_size, 1, MODEL_REPRESENTATION.command_width)
+            coord_output (Tensor): Shape (batch_size, 1, MODEL_REPRESENTATION.coordinate_width)
             hidden_state (tuple): New hidden state of the LSTM.
         """
-        command_input = input_token[:, :, : NodeCommand.command_width].float()
+        command_input = input_token[:, :, : MODEL_REPRESENTATION.command_width].float()
         coord_input = input_token[
             :,
             :,
-            NodeCommand.command_width : NodeCommand.command_width
-            + NodeCommand.coordinate_width,
+            MODEL_REPRESENTATION.command_width : MODEL_REPRESENTATION.command_width
+            + MODEL_REPRESENTATION.coordinate_width,
         ].float()
 
         command_emb = self.command_embedding(command_input)
@@ -98,18 +101,16 @@ class LSTMDecoder(nn.Module):
         """
         Autoregressively generate a sequence of commands and coordinates.
         """
-        from .representations.nodecommand import NodeCommand
-
         device = context.device
         batch_size = context.shape[0]
-        eos_index = NodeCommand.encode_command("EOS")
-        sos_index = NodeCommand.encode_command("SOS")
+        eos_index = MODEL_REPRESENTATION.encode_command("EOS")
+        sos_index = MODEL_REPRESENTATION.encode_command("SOS")
 
         # Start with SOS token
         current_token_full = torch.zeros(
             batch_size,
             1,
-            NodeCommand.command_width + NodeCommand.coordinate_width,
+            MODEL_REPRESENTATION.command_width + MODEL_REPRESENTATION.coordinate_width,
             device=device,
         )
         current_token_full[:, 0, sos_index] = 1.0
@@ -131,7 +132,7 @@ class LSTMDecoder(nn.Module):
 
             # Append predicted command and coords to lists
             next_command_onehot = F.one_hot(
-                predicted_command_idx, num_classes=NodeCommand.command_width
+                predicted_command_idx, num_classes=MODEL_REPRESENTATION.command_width
             ).float()
             all_commands.append(next_command_onehot)
             all_coords.append(coord_pred)
@@ -142,9 +143,9 @@ class LSTMDecoder(nn.Module):
 
             # Prepare next input token
             coord_padded = torch.zeros(
-                batch_size, 1, NodeCommand.coordinate_width, device=device
+                batch_size, 1, MODEL_REPRESENTATION.coordinate_width, device=device
             )
-            coord_padded[:, :, : NodeCommand.coordinate_width] = coord_pred
+            coord_padded[:, :, : MODEL_REPRESENTATION.coordinate_width] = coord_pred
             current_token_full = torch.cat([next_command_onehot, coord_padded], dim=-1)
 
         command_output = torch.cat(all_commands, dim=1)

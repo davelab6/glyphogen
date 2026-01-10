@@ -1,7 +1,6 @@
 import pydiffvg
 import torch
 
-from .representations.nodecommand import NodeCommand
 from .hyperparameters import GEN_IMAGE_SIZE
 
 
@@ -108,7 +107,9 @@ def rasterize_batch(
 
         render = pydiffvg.RenderFunction.apply
         try:
-            img = render(img_size, img_size, 2, 2, seed, None, *scene_args).to(device)
+            img = render(img_size, img_size, 2, 2, seed, None, *scene_args)
+            assert img is not None
+            img = img.to(device)
         except Exception as e:
             print(f"Failed to rasterize: {e}")
             images.append(dead_image)

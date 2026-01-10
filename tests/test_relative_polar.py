@@ -478,10 +478,16 @@ def test_relative_polar_smooth_roundtrip():
             original_node.coordinates, decoded_node.coordinates, atol=1e-4
         )
         if original_node.out_handle is not None:
+            assert (
+                decoded_node.out_handle is not None
+            ), f"Node {i} decoded out-handle is None"
             assert np.allclose(
                 original_node.out_handle, decoded_node.out_handle, atol=1e-4
             ), f"Node {i} out-handle mismatch: Original {original_node.out_handle}, Decoded {decoded_node.out_handle}"
         if original_node.in_handle is not None:
+            assert (
+                decoded_node.in_handle is not None
+            ), f"Node {i} decoded in-handle is None"
             assert np.allclose(
                 original_node.in_handle, decoded_node.in_handle, atol=1e-4
             ), f"Node {i} in-handle mismatch: Original {original_node.in_handle}, Decoded {decoded_node.in_handle}"

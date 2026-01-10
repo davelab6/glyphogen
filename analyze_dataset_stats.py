@@ -5,10 +5,10 @@ import numpy as np
 from tqdm import tqdm
 
 from glyphogen.dataset import get_hierarchical_data, collate_fn
-from glyphogen.representations.nodecommand import NodeCommand
+from glyphogen.representations.model import MODEL_REPRESENTATION
 
 # Define the coordinate groups
-STAT_GROUPS = NodeCommand.get_initial_stats_dict()
+STAT_GROUPS = MODEL_REPRESENTATION.get_initial_stats_dict()
 
 
 def analyze_dataset_stats():
@@ -26,7 +26,8 @@ def analyze_dataset_stats():
 
     # Get command indices for faster lookup
     cmd_indices = {
-        cmd: NodeCommand.encode_command(cmd) for cmd in NodeCommand.grammar.keys()
+        cmd: MODEL_REPRESENTATION.encode_command(cmd)
+        for cmd in MODEL_REPRESENTATION.grammar.keys()
     }
 
     print(f"Analyzing {len(train_dataset)} glyphs...")
@@ -43,17 +44,17 @@ def analyze_dataset_stats():
             box = contour_boxes[i]
 
             # Convert to the model's normalized coordinate space
-            sequence_norm = NodeCommand.image_space_to_mask_space(
+            sequence_norm = MODEL_REPRESENTATION.image_space_to_mask_space(
                 sequence_img_space, box
             )
-            commands, coords = NodeCommand.split_tensor(sequence_norm)
+            commands, coords = MODEL_REPRESENTATION.split_tensor(sequence_norm)
             command_idxs = torch.argmax(commands, dim=-1)
 
             for j in range(len(command_idxs)):
                 cmd_idx = int(command_idxs[j].item())
                 coord_vec = coords[j]
-                NodeCommand.update_stats_dict_with_command(
-                    STAT_GROUPS, NodeCommand.decode_command(cmd_idx), coord_vec
+                MODEL_REPRESENTATION.update_stats_dict_with_command(
+                    STAT_GROUPS, MODEL_REPRESENTATION.decode_command(cmd_idx), coord_vec
                 )
 
     # --- Calculate and save stats ---

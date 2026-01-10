@@ -6,7 +6,7 @@ from torchvision.utils import draw_bounding_boxes
 from glyphogen.losses import align_sequences
 from glyphogen.rasterizer import rasterize_batch
 
-from .representations.nodecommand import NodeCommand
+from .representations.model import MODEL_REPRESENTATION
 from .nodeglyph import NodeGlyph
 from .svgglyph import SVGGlyph
 
@@ -58,7 +58,7 @@ def log_vectorizer_outputs(
                 ]
 
                 predicted_raster = rasterize_batch(
-                    [contour_sequences], NodeCommand, device=device
+                    [contour_sequences], MODEL_REPRESENTATION, device=device
                 )[0]
             else:
                 # If model predicts no contours, show a blank image
@@ -88,7 +88,9 @@ def log_vectorizer_outputs(
                 ]
 
                 try:
-                    decoded_glyph = NodeGlyph.decode(contour_sequences, NodeCommand)
+                    decoded_glyph = NodeGlyph.decode(
+                        contour_sequences, MODEL_REPRESENTATION
+                    )
                     svg_string = SVGGlyph.from_node_glyph(decoded_glyph).to_svg_string()
                     debug_string = decoded_glyph.to_debug_string()
                 except Exception as e:
@@ -132,7 +134,7 @@ def collect_confusion_matrix_data(
 
         # Convert GT sequence from image space to normalized mask space
         gt_sequence_img_space = gt_target_sequences[j]
-        gt_sequence_norm = NodeCommand.image_space_to_mask_space(
+        gt_sequence_norm = MODEL_REPRESENTATION.image_space_to_mask_space(
             gt_sequence_img_space.to(device), box
         )
 
@@ -162,7 +164,7 @@ def log_confusion_matrix(state, writer, epoch):
 
     true_indices = torch.cat(state["all_true_indices"])
     pred_indices = torch.cat(state["all_pred_indices"])
-    num_classes = len(NodeCommand.grammar)
+    num_classes = len(MODEL_REPRESENTATION.grammar)
     matrix = torch.zeros((num_classes, num_classes), dtype=torch.int32)
     for i in range(true_indices.shape[0]):
         true_label = true_indices[i]
@@ -171,7 +173,7 @@ def log_confusion_matrix(state, writer, epoch):
             matrix[true_label, pred_label] += 1
 
     # Format as Markdown table
-    command_names = list(NodeCommand.grammar.keys())
+    command_names = list(MODEL_REPRESENTATION.grammar.keys())
     header = "| True \\ Pred | " + " | ".join(command_names) + " |\n"
     separator = "|--- " * (num_classes + 1) + "|\n"
     body = ""

@@ -1,6 +1,6 @@
 from typing import List, Tuple
 
-from .command_defs import MAX_COORDINATE
+from .representations import MAX_COORDINATE
 from .hyperparameters import GEN_IMAGE_SIZE
 
 

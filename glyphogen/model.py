@@ -10,7 +10,7 @@ from torch import nn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor, MaskRCNN
 
-from glyphogen.representations.nodecommand import NodeCommand
+from glyphogen.representations.model import MODEL_REPRESENTATION
 from glyphogen.typing import (
     CollatedGlyphData,
     GroundTruthContour,
@@ -103,7 +103,7 @@ class VectorizationGenerator(nn.Module):
             LSTMDecoder(d_model=d_model, latent_dim=latent_dim, rate=rate)
         )
         self.arg_counts: torch.Tensor = torch.tensor(
-            list(NodeCommand.grammar.values()), dtype=torch.long
+            list(MODEL_REPRESENTATION.grammar.values()), dtype=torch.long
         )
 
         self.use_raster = False
@@ -228,7 +228,7 @@ class VectorizationGenerator(nn.Module):
 
         # Prepare batch for decoder
         decoder_inputs_norm = [
-            NodeCommand.image_space_to_mask_space(seq, box)
+            MODEL_REPRESENTATION.image_space_to_mask_space(seq, box)
             for seq, box in zip(target_sequences, valid_boxes)
         ]
 
@@ -241,10 +241,12 @@ class VectorizationGenerator(nn.Module):
         decoder_input_batch = padded_decoder_inputs[:, :-1, :]
 
         # --- NEW STANDARDIZATION LOGIC ---
-        commands_norm, coords_norm = NodeCommand.split_tensor(decoder_input_batch)
+        commands_norm, coords_norm = MODEL_REPRESENTATION.split_tensor(
+            decoder_input_batch
+        )
         command_indices = torch.argmax(commands_norm, dim=-1)
-        means, stds = NodeCommand.get_stats_for_sequence(command_indices)
-        coords_std = NodeCommand.standardize(coords_norm, means, stds)
+        means, stds = MODEL_REPRESENTATION.get_stats_for_sequence(command_indices)
+        coords_std = MODEL_REPRESENTATION.standardize(coords_norm, means, stds)
         decoder_input_std = torch.cat([commands_norm, coords_std], dim=-1)
         # --- END NEW LOGIC ---
 
@@ -272,13 +274,13 @@ class VectorizationGenerator(nn.Module):
 
             # --- De-standardize for metrics and logging ---
             pred_command_indices = torch.argmax(pred_commands, dim=-1)
-            pred_means, pred_stds = NodeCommand.get_stats_for_sequence(
+            pred_means, pred_stds = MODEL_REPRESENTATION.get_stats_for_sequence(
                 pred_command_indices
             )
             glyph_pred_means.append(pred_means)
             glyph_pred_stds.append(pred_stds)
 
-            pred_coords_norm = NodeCommand.de_standardize(
+            pred_coords_norm = MODEL_REPRESENTATION.de_standardize(
                 pred_coords_std, pred_means, pred_stds
             )
             glyph_pred_coords_norm.append(pred_coords_norm)
@@ -288,11 +290,11 @@ class VectorizationGenerator(nn.Module):
             sos_token = decoder_inputs_norm[i][0:1, :]
             full_pred_sequence_norm = torch.cat([sos_token, pred_sequence_norm], dim=0)
 
-            pred_sequence_img_space = NodeCommand.mask_space_to_image_space(
+            pred_sequence_img_space = MODEL_REPRESENTATION.mask_space_to_image_space(
                 full_pred_sequence_norm, box
             )
             glyph_pred_coords_img_space.append(
-                pred_sequence_img_space[1:, NodeCommand.command_width :]
+                pred_sequence_img_space[1:, MODEL_REPRESENTATION.command_width :]
             )
 
         return ModelResults(
@@ -319,19 +321,21 @@ class VectorizationGenerator(nn.Module):
 
         batch_size = len(valid_boxes)
         device = z_batch.device
-        sos_index = NodeCommand.encode_command("SOS")
+        sos_index = MODEL_REPRESENTATION.encode_command("SOS")
 
         # --- Standardize the initial SOS input ---
         command_part = torch.zeros(
-            batch_size, 1, NodeCommand.command_width, device=device
+            batch_size, 1, MODEL_REPRESENTATION.command_width, device=device
         )
         command_part[:, 0, sos_index] = 1.0
         coords_part_norm = torch.zeros(
-            batch_size, 1, NodeCommand.coordinate_width, device=device
+            batch_size, 1, MODEL_REPRESENTATION.coordinate_width, device=device
         )
         command_indices = torch.argmax(command_part, dim=-1)
-        means, stds = NodeCommand.get_stats_for_sequence(command_indices)
-        coords_part_std = NodeCommand.standardize(coords_part_norm, means, stds)
+        means, stds = MODEL_REPRESENTATION.get_stats_for_sequence(command_indices)
+        coords_part_std = MODEL_REPRESENTATION.standardize(
+            coords_part_norm, means, stds
+        )
         current_input_std = torch.cat([command_part, coords_part_std], dim=-1)
         # ---
 
@@ -358,9 +362,9 @@ class VectorizationGenerator(nn.Module):
 
             command_probs = F.softmax(command_logits.squeeze(1), dim=-1)
             predicted_command_idx = torch.argmax(command_probs, dim=1, keepdim=True)
-            eos_mask = predicted_command_idx.squeeze(1) == NodeCommand.encode_command(
-                "EOS"
-            )
+            eos_mask = predicted_command_idx.squeeze(
+                1
+            ) == MODEL_REPRESENTATION.encode_command("EOS")
 
             if any(eos_mask):
                 active_indices_mask = ~eos_mask
@@ -382,7 +386,7 @@ class VectorizationGenerator(nn.Module):
 
             next_command_onehot = F.one_hot(
                 predicted_command_idx,
-                num_classes=NodeCommand.command_width,
+                num_classes=MODEL_REPRESENTATION.command_width,
             ).float()
             current_input_std = torch.cat(
                 [next_command_onehot, coord_output_std], dim=-1
@@ -390,9 +394,11 @@ class VectorizationGenerator(nn.Module):
 
         for i in range(batch_size):
             if not batch_contour_commands[i]:
-                pred_commands = torch.empty(0, NodeCommand.command_width, device=device)
+                pred_commands = torch.empty(
+                    0, MODEL_REPRESENTATION.command_width, device=device
+                )
                 pred_coords_std = torch.empty(
-                    0, NodeCommand.coordinate_width, device=device
+                    0, MODEL_REPRESENTATION.coordinate_width, device=device
                 )
             else:
                 pred_commands = torch.cat(batch_contour_commands[i], dim=1).squeeze(0)
@@ -404,13 +410,13 @@ class VectorizationGenerator(nn.Module):
             glyph_pred_coords_std.append(pred_coords_std)
 
             pred_command_indices = torch.argmax(pred_commands, dim=-1)
-            pred_means, pred_stds = NodeCommand.get_stats_for_sequence(
+            pred_means, pred_stds = MODEL_REPRESENTATION.get_stats_for_sequence(
                 pred_command_indices
             )
             glyph_pred_means.append(pred_means)
             glyph_pred_stds.append(pred_stds)
 
-            pred_coords_norm = NodeCommand.de_standardize(
+            pred_coords_norm = MODEL_REPRESENTATION.de_standardize(
                 pred_coords_std, pred_means, pred_stds
             )
             glyph_pred_coords_norm.append(pred_coords_norm)
@@ -418,20 +424,23 @@ class VectorizationGenerator(nn.Module):
             pred_sequence_norm = torch.cat([pred_commands, pred_coords_norm], dim=-1)
             sos_cmd = (
                 F.one_hot(
-                    torch.tensor(sos_index), num_classes=NodeCommand.command_width
+                    torch.tensor(sos_index),
+                    num_classes=MODEL_REPRESENTATION.command_width,
                 )
                 .float()
                 .to(device)
             )
-            sos_coords = torch.zeros(NodeCommand.coordinate_width, device=device)
+            sos_coords = torch.zeros(
+                MODEL_REPRESENTATION.coordinate_width, device=device
+            )
             sos_token = torch.cat([sos_cmd, sos_coords]).unsqueeze(0)
             full_pred_sequence_norm = torch.cat([sos_token, pred_sequence_norm], dim=0)
 
-            pred_sequence_img_space = NodeCommand.mask_space_to_image_space(
+            pred_sequence_img_space = MODEL_REPRESENTATION.mask_space_to_image_space(
                 full_pred_sequence_norm, valid_boxes[i]
             )
             glyph_pred_coords_img_space.append(
-                pred_sequence_img_space[1:, NodeCommand.command_width :]
+                pred_sequence_img_space[1:, MODEL_REPRESENTATION.command_width :]
             )
         return ModelResults(
             pred_commands=glyph_pred_commands,

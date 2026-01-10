@@ -5,7 +5,7 @@ import torchvision.transforms.v2 as T
 from fontTools.ttLib import TTFont
 from torchvision.datasets import CocoDetection
 
-from glyphogen.representations.nodecommand import NodeCommand
+from glyphogen.representations.model import MODEL_REPRESENTATION
 from glyphogen.hyperparameters import BASE_DIR
 from glyphogen.typing import CollatedGlyphData, GroundTruthContour, Target
 from typing import List
@@ -22,7 +22,7 @@ for file in sorted(list(glob.glob(BASE_DIR + "/*/*.ttf"))):
     ttfont = TTFont(file)
     if "COLR" in ttfont:
         continue
-    if ttfont["head"].unitsPerEm != 1000:
+    if ttfont["head"].unitsPerEm != 1000:  # type: ignore
         continue
     font_files.append(file)
 if not font_files:
@@ -85,24 +85,26 @@ class GlyphCocoDataset(CocoDetection):
             # Note: transforms will need to handle a list of targets
             img, targets = self.transforms(img, targets)
 
-        # Debugging: filter out any sequences with curves
-        n_index = NodeCommand.encode_command_one_hot("N")
-        ns_index = NodeCommand.encode_command_one_hot("NS")
-        nh_index = NodeCommand.encode_command_one_hot("NH")
-        nv_index = NodeCommand.encode_command_one_hot("NV")
-        nci_index = NodeCommand.encode_command_one_hot("NCI")
-        nco_index = NodeCommand.encode_command_one_hot("NCO")
-        # Debugging: filter out any sequences with lines
-        l_index = NodeCommand.encode_command_one_hot("L")
-        lh_index = NodeCommand.encode_command_one_hot("LH")
-        lv_index = NodeCommand.encode_command_one_hot("LV")
-        curve_mask = (
-            n_index + ns_index + nh_index + nv_index + nci_index + nco_index
-        ).bool()
-        line_mask = (l_index + lh_index + lv_index + nci_index + nco_index).bool()
+        # XXX This is NOT representation-independent
+
+        # # Debugging: filter out any sequences with curves
+        # n_index = MODEL_REPRESENTATION.encode_command_one_hot("N")
+        # ns_index = MODEL_REPRESENTATION.encode_command_one_hot("NS")
+        # nh_index = MODEL_REPRESENTATION.encode_command_one_hot("NH")
+        # nv_index = MODEL_REPRESENTATION.encode_command_one_hot("NV")
+        # nci_index = MODEL_REPRESENTATION.encode_command_one_hot("NCI")
+        # nco_index = MODEL_REPRESENTATION.encode_command_one_hot("NCO")
+        # # Debugging: filter out any sequences with lines
+        # l_index = MODEL_REPRESENTATION.encode_command_one_hot("L")
+        # lh_index = MODEL_REPRESENTATION.encode_command_one_hot("LH")
+        # lv_index = MODEL_REPRESENTATION.encode_command_one_hot("LV")
+        # curve_mask = (
+        #     n_index + ns_index + nh_index + nv_index + nci_index + nco_index
+        # ).bool()
+        # line_mask = (l_index + lh_index + lv_index + nci_index + nco_index).bool()
 
         # for sequences in targets:
-        #     (commands, _) = NodeCommand.split_tensor(sequences["sequence"])
+        #     (commands, _) = MODEL_REPRESENTATION.split_tensor(sequences["sequence"])
         #     for command in commands:
         #         if torch.any(command.bool() & curve_mask):
         #             return None
