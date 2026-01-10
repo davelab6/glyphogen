@@ -10,6 +10,16 @@ from glyphogen.nodeglyph import Node, NodeContour
 
 MAX_COORDINATE = 1000
 
+# Implementation node: There's an important notational convention we're using
+# in the relative coordinate representations. We want all node commands to use
+# relative coordinates. *All* of them, so that the model doesn't have to do
+# gymnastics to understand that node 0's coordinates have a different interpretation
+# to all the other nodes in the sequence. But then how do you establish initial
+# position? The convention is that the first node in a contour gets emitted as
+# two separate commands. First, an absolute "Move to" command to set the
+# initial position, then the first node itself is emitted as a relative
+# command with a delta of (0,0).
+
 
 # Dammit Python
 class classproperty:
@@ -72,6 +82,40 @@ class RelativeCoordinateRepresentation(AbsolutePositionRelativeHandleRepresentat
             return n.coordinates
         previous_node = n.previous
         return n.coordinates - previous_node.coordinates
+
+
+class RelativePolarCoordinateRepresentation(CoordinateRepresentation):
+    """Coordinates are represented in polar form relative to the previous node.
+    Handles are also relative to the current node position, in polar form."""
+
+    @classmethod
+    def emit_node_position(cls, n: "Node") -> npt.NDArray[np.float32]:
+        if n.index == 0:
+            # Definitionally this is 0,0 because we emit an explicit move to absolute position first
+            return np.array([0.0, 0.0], dtype=np.float32)
+        previous_node = n.previous
+        delta = n.coordinates - previous_node.coordinates
+        r = np.linalg.norm(delta)
+        theta = np.arctan2(delta[1], delta[0])
+        return np.array([r, theta], dtype=np.float32)
+
+    @classmethod
+    def emit_in_handle(cls, n: "Node") -> Optional[npt.NDArray[np.float32]]:
+        if n.in_handle is None:
+            return None
+        delta = n.in_handle - n.coordinates
+        r = np.linalg.norm(delta)
+        theta = np.arctan2(delta[1], delta[0])
+        return np.array([r, theta], dtype=np.float32)
+
+    @classmethod
+    def emit_out_handle(cls, n: "Node") -> Optional[npt.NDArray[np.float32]]:
+        if n.out_handle is None:
+            return None
+        delta = n.out_handle - n.coordinates
+        r = np.linalg.norm(delta)
+        theta = np.arctan2(delta[1], delta[0])
+        return np.array([r, theta], dtype=np.float32)
 
 
 class CommandRepresentation(ABC):
@@ -308,6 +352,98 @@ class SVGCommand(CommandRepresentation):
             contour_splits,
             point_splits,
         )
+
+
+class SVGCommand(CommandRepresentation):
+    grammar = {
+        "M": 2,  # Move to absolute (x, y)
+        "L": 2,  # Line to absolute (x, y)
+        "C": 6,  # Cubic Bezier: (c1x, c1y, c2x, c2y, x, y)
+        "Z": 0,  # Close path
+    }
+    coordinate_representation = AbsoluteCoordinateRepresentation
+
+    @classmethod
+    def emit(cls, nodes: List["Node"]) -> Sequence["SVGCommand"]:
+        commands: List[SVGCommand] = []
+        if not nodes:
+            return commands
+        commands.append(cls("M", nodes[0].coordinates.tolist()))
+        for i in range(len(nodes)):
+            prev = nodes[i]
+            curr = nodes[(i + 1) % len(nodes)]
+            if curr == nodes[0]:
+                # Closing segment
+                if prev.is_line:
+                    commands.append(cls("L", curr.coordinates.tolist()))
+                else:
+                    assert prev.out_handle is not None and curr.in_handle is not None
+                    c = [
+                        float(prev.out_handle[0]),
+                        float(prev.out_handle[1]),
+                        float(curr.in_handle[0]),
+                        float(curr.in_handle[1]),
+                        float(curr.coordinates[0]),
+                        float(curr.coordinates[1]),
+                    ]
+                    commands.append(cls("C", c))
+                commands.append(cls("Z", []))
+                break
+            if curr.is_line:
+                commands.append(cls("L", curr.coordinates.tolist()))
+            else:
+                assert prev.out_handle is not None and curr.in_handle is not None
+                c = [
+                    float(prev.out_handle[0]),
+                    float(prev.out_handle[1]),
+                    float(curr.in_handle[0]),
+                    float(curr.in_handle[1]),
+                    float(curr.coordinates[0]),
+                    float(curr.coordinates[1]),
+                ]
+                commands.append(cls("C", c))
+        return commands
+
+    @classmethod
+    def contour_from_commands(
+        cls, commands: Sequence["SVGCommand"], tolerant: bool = True
+    ) -> "NodeContour":
+        contour = NodeContour([])
+        commands = list(commands)
+        if not commands or commands[0].command != "M":
+            return contour
+        current_pos = np.array(commands[0].coordinates, dtype=np.float32)
+        prev_node = contour.push(
+            coordinates=current_pos.copy(), in_handle=None, out_handle=None
+        )
+
+        for step in commands[1:]:
+            cmd = step.command
+            if cmd == "L":
+                current_pos = np.array(step.coordinates, dtype=np.float32)
+                prev_node = contour.push(
+                    coordinates=current_pos.copy(), in_handle=None, out_handle=None
+                )
+            elif cmd == "C":
+                c1x, c1y, c2x, c2y, x, y = step.coordinates
+                prev_node.out_handle = np.array([c1x, c1y], dtype=np.float32)
+                current_pos = np.array([x, y], dtype=np.float32)
+                in_h = np.array([c2x, c2y], dtype=np.float32)
+                prev_node = contour.push(
+                    coordinates=current_pos.copy(), in_handle=in_h, out_handle=None
+                )
+            elif cmd == "Z":
+                break
+            else:
+                if not tolerant:
+                    raise ValueError(f"Unsupported SVG command: {cmd}")
+
+        if len(contour.nodes) > 1 and np.allclose(
+            contour.nodes[0].coordinates, contour.nodes[-1].coordinates, atol=1e-4
+        ):
+            last_node = contour.nodes.pop()
+            contour.nodes[0].in_handle = last_node.in_handle
+        return contour
 
 
 class NodeCommand(CommandRepresentation):
@@ -881,166 +1017,230 @@ class NodeCommand(CommandRepresentation):
         )
 
 
-class TangentNormalCommand(CommandRepresentation):
+class RelativePolarCommand(CommandRepresentation):
     """
-    A command representation where coordinates are relative to a local
-    tangent-normal basis at each node.
-    'M' is still in absolute world-space.
-    'L' coordinates are (forward, sideways) relative to the previous tangent.
+    Turtle-like representation using relative polar motion and local angles.
     """
 
     grammar = {
         "SOS": 0,
         "M": 2,
-        "L": 2,
-        "N": 6,
+        "L_POLAR": 2,  # r, phi
+        "L_LEFT_90": 1,  # distance
+        "L_RIGHT_90": 1,  # distance
         "EOS": 0,
     }
+    coordinate_representation = RelativePolarCoordinateRepresentation
+
+    @staticmethod
+    def _unit(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+        n = np.linalg.norm(v)
+        if n > 1e-6:
+            return v / n
+        return fallback
 
     @classmethod
-    def emit(cls, nodes: List["Node"]) -> Sequence["TangentNormalCommand"]:
-        commands = []
+    def emit(cls, nodes: List["Node"]) -> Sequence["RelativePolarCommand"]:
+        commands: List[RelativePolarCommand] = []
         if not nodes:
             return commands
 
         commands.append(cls("SOS", []))
-        commands.append(cls("M", nodes[0].coordinates.tolist()))
+        # Emit move to for the first node
+        first_node = nodes[0]
+        pos = cls.coordinate_representation.emit_node_position(first_node)
+        commands.append(cls("M", pos.tolist()))
 
-        # Initial basis: pointing right
         f_hat = np.array([1.0, 0.0], dtype=np.float32)
 
         for i in range(len(nodes)):
             p_prev = nodes[i]
-            p_curr = nodes[(i + 1) % len(nodes)]  # Loop back to start
+            p_curr = nodes[(i + 1) % len(nodes)]
 
-            # World-space delta for the on-curve point
             delta_pos = p_curr.coordinates - p_prev.coordinates
-
-            # Project on-curve delta onto current basis
+            r = float(np.linalg.norm(delta_pos))
             r_hat = np.array([-f_hat[1], f_hat[0]], dtype=np.float32)
-            turtle_dx = np.dot(delta_pos, f_hat)
-            turtle_dy = np.dot(delta_pos, r_hat)
 
-            # Determine the basis for the *next* step.
-            # The new "forward" is the direction of the outgoing handle of the *current* point `p_prev`,
-            # or the line direction if it was a line.
-            if p_prev.out_handle is not None:
-                next_f_hat_vec = p_prev.out_handle - p_prev.coordinates
-            else:  # is_line
-                next_f_hat_vec = p_curr.coordinates - p_prev.coordinates
-
-            norm = np.linalg.norm(next_f_hat_vec)
-            if norm > 1e-6:
-                next_f_hat = next_f_hat_vec / norm
+            if r > 1e-6:
+                dir_chord = delta_pos / r
+                phi = float(
+                    np.arctan2(np.dot(delta_pos, r_hat), np.dot(delta_pos, f_hat))
+                )
             else:
-                next_f_hat = f_hat  # Keep current basis if segment is zero-length
+                dir_chord = f_hat
+                phi = 0.0
 
-            # A segment is a line if the prev node has no out-handle and curr node has no in-handle
-            if p_prev.out_handle is None and p_curr.in_handle is None:
-                commands.append(cls("L", [turtle_dx, turtle_dy]))
+            # Check for 90-degree turns
+            if np.isclose(phi, np.pi / 2):
+                commands.append(cls("L_LEFT_90", [r]))
+            elif np.isclose(phi, -np.pi / 2):
+                commands.append(cls("L_RIGHT_90", [r]))
             else:
-                # Project handles onto the same basis
-                # We use the handles relative to their on-curve points
-                in_handle_rel = (
-                    p_curr.in_handle - p_curr.coordinates
-                    if p_curr.in_handle is not None
-                    else np.array([0, 0])
-                )
-                # The out-handle belongs to the *previous* node
-                out_handle_rel = (
-                    p_prev.out_handle - p_prev.coordinates
-                    if p_prev.out_handle is not None
-                    else np.array([0, 0])
-                )
+                commands.append(cls("L_POLAR", [r, phi]))
 
-                h_in_f = np.dot(in_handle_rel, f_hat)
-                h_in_s = np.dot(in_handle_rel, r_hat)
-                h_out_f = np.dot(out_handle_rel, f_hat)
-                h_out_s = np.dot(out_handle_rel, r_hat)
-
-                commands.append(
-                    cls("N", [turtle_dx, turtle_dy, h_in_f, h_in_s, h_out_f, h_out_s])
-                )
-
-            f_hat = next_f_hat
+            # Keep the frame fixed for tangent-encoded segments so that subsequent
+            # commands interpret phi in the same basis; otherwise rotate to chord.
+            # For now, we always rotate to chord for line segments.
+            f_hat = cls._unit(delta_pos, f_hat)
 
         commands.append(cls("EOS", []))
         return commands
 
     @classmethod
     def contour_from_commands(
-        cls, commands: Sequence[CommandRepresentation], tolerant=True
+        cls, commands: Sequence[CommandRepresentation], tolerant: bool = True
     ) -> "NodeContour":
+        from .nodeglyph import NodeContour  # avoid circular import
+
         contour = NodeContour([])
-        commands = list(commands)
-        if not commands or commands[0].command != "SOS":
+        all_commands = list(commands)
+        if not all_commands or all_commands[0].command != "SOS":
+            return contour
+        if len(all_commands) < 2 or all_commands[1].command != "M":
             return contour
 
-        commands.pop(0)
-        if not commands or commands[0].command != "M":
-            return contour
+        command_tensors = []
+        coord_tensors = []
+        max_coords = cls.coordinate_width
+        for cmd in all_commands:
+            command_tensors.append(cls.encode_command_one_hot(cmd.command))
+            padded = cmd.coordinates + [0] * (max_coords - len(cmd.coordinates))
+            coord_tensors.append(torch.tensor(padded, dtype=torch.float32))
 
-        current_pos = np.array(commands[0].coordinates, dtype=np.float32)
-        # The first node has no handles from the M command
+        sequence_tensor = torch.cat(
+            [torch.stack(command_tensors), torch.stack(coord_tensors)], dim=1
+        )
+        _, abs_coords = cls.split_tensor(
+            cls.unroll_relative_coordinates(sequence_tensor)
+        )
+        abs_coords_np = abs_coords.cpu().numpy()
+
+        current_pos = np.array(all_commands[1].coordinates, dtype=np.float32)
         prev_node = contour.push(
             coordinates=current_pos.copy(), in_handle=None, out_handle=None
         )
-        commands.pop(0)
 
-        # Initial basis: pointing right
-        f_hat = np.array([1.0, 0.0], dtype=np.float32)
-
-        for command in commands:
+        for idx, command in enumerate(all_commands[2:], start=2):
             if command.command == "EOS":
                 break
 
-            r_hat = np.array([-f_hat[1], f_hat[0]], dtype=np.float32)
+            pos_abs = abs_coords_np[idx, 0:2]
+            in_abs = abs_coords_np[idx, 2:4]
+            out_abs = abs_coords_np[idx, 4:6]
 
-            if command.command == "L":
-                forward, sideways = command.coordinates
-                delta_world = forward * f_hat + sideways * r_hat
-                current_pos += delta_world
+            if command.command == "L_POLAR":
+                r, _ = command.coordinates
+                if abs(r) < 1e-6:
+                    continue
                 prev_node = contour.push(
-                    coordinates=current_pos.copy(), in_handle=None, out_handle=None
+                    coordinates=pos_abs.copy(), in_handle=None, out_handle=None
                 )
-
-                # Update basis from the line segment itself
-                norm = np.linalg.norm(delta_world)
-                if norm > 1e-6:
-                    f_hat = delta_world / norm
-
-            elif command.command == "N":
-                turtle_dx, turtle_dy, h_in_f, h_in_s, h_out_f, h_out_s = (
-                    command.coordinates
-                )
-
-                # Reconstruct world-space deltas from the turtle coordinates
-                delta_pos = turtle_dx * f_hat + turtle_dy * r_hat
-                delta_in_handle = h_in_f * f_hat + h_in_s * r_hat
-                delta_out_handle = h_out_f * f_hat + h_out_s * r_hat
-
-                # Set the out-handle of the PREVIOUS node
-                prev_node.out_handle = prev_node.coordinates + delta_out_handle
-
-                # Create the new node
-                current_pos += delta_pos
-                new_in_handle = current_pos + delta_in_handle
+            elif command.command == "L_LEFT_90":
+                r = command.coordinates[0]
+                if abs(r) < 1e-6:
+                    continue
                 prev_node = contour.push(
-                    coordinates=current_pos.copy(),
-                    in_handle=new_in_handle,
-                    out_handle=None,
+                    coordinates=pos_abs.copy(), in_handle=None, out_handle=None
                 )
+            elif command.command == "L_RIGHT_90":
+                r = command.coordinates[0]
+                if abs(r) < 1e-6:
+                    continue
+                prev_node = contour.push(
+                    coordinates=pos_abs.copy(), in_handle=None, out_handle=None
+                )
+            else:
+                if not tolerant:
+                    raise ValueError(f"Unsupported command: {command.command}")
 
-                # Update basis from the outgoing handle we just computed for the previous node
-                norm = np.linalg.norm(delta_out_handle)
-                if norm > 1e-6:
-                    f_hat = delta_out_handle / norm
-        if (
-            len(contour.nodes) > 1
-            and np.allclose(
-                contour.nodes[0].coordinates, contour.nodes[-1].coordinates, atol=1e-4
-            )
+        if len(contour.nodes) > 1 and np.allclose(
+            contour.nodes[0].coordinates, contour.nodes[-1].coordinates, atol=1e-4
         ):
             last_node = contour.nodes.pop()
             contour.nodes[0].in_handle = last_node.in_handle
         return contour
+
+    @classmethod
+    def unroll_relative_coordinates(cls, sequence: torch.Tensor) -> torch.Tensor:
+        commands, rel = cls.split_tensor(sequence)
+        # abs_coords needs to be 6 wide to store pos, in_handle, out_handle
+        abs_coords = torch.zeros(
+            rel.shape[0], 6, device=sequence.device, dtype=sequence.dtype
+        )
+
+        current_pos = torch.zeros(2, device=sequence.device, dtype=sequence.dtype)
+        f_hat = torch.tensor([1.0, 0.0], device=sequence.device, dtype=sequence.dtype)
+
+        for i in range(sequence.shape[0]):
+            idx = int(torch.argmax(commands[i]).item())
+            co = rel[i]
+            r_hat = torch.tensor(
+                [-f_hat[1], f_hat[0]], device=sequence.device, dtype=sequence.dtype
+            )
+
+            pos_abs = current_pos
+            in_abs = current_pos
+            out_abs = current_pos
+
+            if idx == cls.encode_command("M"):
+                current_pos = co[0:2]
+                pos_abs = current_pos
+            elif idx == cls.encode_command("L_POLAR"):
+                r, phi = co[0], co[1]
+                # The phi here is the *relative* angle change from the current f_hat
+                # So we rotate f_hat by phi
+                rotation_matrix = torch.tensor([
+                    [torch.cos(phi), -torch.sin(phi)],
+                    [torch.sin(phi), torch.cos(phi)]
+                ], device=sequence.device, dtype=sequence.dtype)
+                f_hat = torch.matmul(rotation_matrix, f_hat)
+                
+                delta = r * f_hat
+                current_pos = current_pos + delta
+                pos_abs = current_pos
+            elif idx == cls.encode_command("L_LEFT_90"):
+                r = co[0]
+                phi = torch.tensor(np.pi / 2, device=sequence.device, dtype=sequence.dtype)
+                rotation_matrix = torch.tensor([
+                    [torch.cos(phi), -torch.sin(phi)],
+                    [torch.sin(phi), torch.cos(phi)]
+                ], device=sequence.device, dtype=sequence.dtype)
+                f_hat = torch.matmul(rotation_matrix, f_hat)
+                delta = r * f_hat
+                current_pos = current_pos + delta
+                pos_abs = current_pos
+            elif idx == cls.encode_command("L_RIGHT_90"):
+                r = co[0]
+                phi = torch.tensor(-np.pi / 2, device=sequence.device, dtype=sequence.dtype)
+                rotation_matrix = torch.tensor([
+                    [torch.cos(phi), -torch.sin(phi)],
+                    [torch.sin(phi), torch.cos(phi)]
+                ], device=sequence.device, dtype=sequence.dtype)
+                f_hat = torch.matmul(rotation_matrix, f_hat)
+                delta = r * f_hat
+                current_pos = current_pos + delta
+                pos_abs = current_pos
+            # SOS and EOS do not change position or f_hat
+
+            def _zero_small(t: torch.Tensor) -> torch.Tensor:
+                return torch.where(torch.abs(t) < 1e-5, torch.zeros_like(t), t)
+
+            abs_coords[i, 0:2] = _zero_small(pos_abs)
+            abs_coords[i, 2:4] = _zero_small(in_abs)
+            abs_coords[i, 4:6] = _zero_small(out_abs)
+
+        return torch.cat([commands, abs_coords], dim=1)
+
+    @classmethod
+    def image_space_to_mask_space(cls, sequence, box: Float[torch.Tensor, "4"]):
+        raise NotImplementedError("We will handle this later")
+
+    @classmethod
+    def mask_space_to_image_space(cls, sequence, box):
+        raise NotImplementedError("We will handle this later")
+
+    @classmethod
+    def tensors_to_segments(cls, cmd, coord):
+        raise NotImplementedError(
+            "We don't need this; use SVGCommand to render for visualization."
+        )

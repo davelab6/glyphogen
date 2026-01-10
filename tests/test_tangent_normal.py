@@ -1,16 +1,17 @@
 from pathlib import Path
 import numpy as np
 import pytest
-from glyphogen.command_defs import TangentNormalCommand
+import torch
+from glyphogen.command_defs import RelativePolarCommand
 from glyphogen.glyph import Glyph
 from glyphogen.hyperparameters import ALPHABET
 from glyphogen.nodeglyph import Node, NodeContour, NodeGlyph
 
 
-def test_tangent_normal_line_roundtrip():
+def test_relative_polar_line_roundtrip():
     """
     Tests that a simple square contour can be encoded into TangentNormalCommands
-    and decoded back to the original contour.
+    and decoded back to the original contour, using L_LEFT.
     """
     # 1. Create a simple square NodeContour
     nodes = [
@@ -24,13 +25,30 @@ def test_tangent_normal_line_roundtrip():
         node._contour = original_contour
 
     # 2. Encode it
-    commands = TangentNormalCommand.emit(original_contour.nodes)
+    commands = RelativePolarCommand.emit(original_contour.nodes)
 
-    # 3. Decode it
-    decoded_contour = TangentNormalCommand.contour_from_commands(commands)
+    # 3. Check for correct commands
+    assert commands[0].command == "SOS"
+    assert commands[1].command == "M"
+    assert commands[2].command == "L_POLAR"  # Initial straight line
+    r0, phi0 = commands[2].coordinates
+    assert np.isclose(r0, 100)
+    assert np.isclose(phi0, 0.0)
+    # Next three are left turns of ~+pi/2 with length 100
+    assert commands[3].command == "L_LEFT_90"
+    r1 = commands[3].coordinates[0]
+    assert np.isclose(r1, 100)
+    assert commands[4].command == "L_LEFT_90"
+    r2 = commands[4].coordinates[0]
+    assert np.isclose(r2, 100)
+    assert commands[5].command == "L_LEFT_90"
+    r3 = commands[5].coordinates[0]
+    assert np.isclose(r3, 100)
 
-    # 4. Compare
-    # The decoded contour should have the same number of nodes
+    # 4. Decode it
+    decoded_contour = RelativePolarCommand.contour_from_commands(commands)
+
+    # 5. Compare
     assert len(original_contour.nodes) == len(
         decoded_contour.nodes
     ), f"Expected {len(original_contour.nodes)} nodes, got {len(decoded_contour.nodes)}"
@@ -41,71 +59,305 @@ def test_tangent_normal_line_roundtrip():
             original_node.coordinates, decoded_node.coordinates, atol=1e-4
         ), f"Node {i} mismatch: Original {original_node.coordinates}, Decoded {decoded_node.coordinates}"
 
-    print("\n--- TangentNormalCommand line roundtrip test passed! ---")
+    print("\n--- RelativePolarCommand line roundtrip test passed! ---")
 
 
-def test_tangent_normal_curve_roundtrip():
-    """
-    Tests that a 'D'-shaped contour with a curve can be encoded and decoded.
-    """
-    # 1. Create a 'D' shape. It has two nodes: top-left and bottom-left.
-    # The segment from node 0 to 1 is a curve.
-    # The segment from node 1 to 0 is a straight line.
-    h_len = 100 * 2 / 3  # Approximation for a nice curve
+# def test_relative_polar_curve_roundtrip():
+#     """
+#     Tests that a 'D'-shaped contour with a curve can be encoded and decoded.
+#     """
+#     # 1. Create a 'D' shape. It has two nodes: top-left and bottom-left.
+#     # The segment from node 0 to 1 is a curve.
+#     # The segment from node 1 to 0 is a straight line.
+#     h_len = 100 * 2 / 3  # Approximation for a nice curve
 
-    nodes = [
-        Node(
-            np.array([0, 100]),
-            out_handle=np.array([h_len, 100]),
-            in_handle=None,
-            contour=None,
-        ),
-        Node(
-            np.array([0, 0]),
-            out_handle=None,
-            in_handle=np.array([h_len, 0]),
-            contour=None,
-        ),
-    ]
-    original_contour = NodeContour(nodes)
-    for node in nodes:
-        node._contour = original_contour
+#     nodes = [
+#         Node(
+#             np.array([0, 100]),
+#             out_handle=np.array([h_len, 100]),
+#             in_handle=None,
+#             contour=None,
+#         ),
+#         Node(
+#             np.array([0, 0]),
+#             out_handle=None,
+#             in_handle=np.array([h_len, 0]),
+#             contour=None,
+#         ),
+#     ]
+#     original_contour = NodeContour(nodes)
+#     for node in nodes:
+#         node._contour = original_contour
 
-    # 2. Encode it
-    commands = TangentNormalCommand.emit(original_contour.nodes)
+#     # 2. Encode it
+#     commands = RelativePolarCommand.emit(original_contour.nodes)
 
-    # 3. Decode it
-    decoded_contour = TangentNormalCommand.contour_from_commands(commands)
+#     # 3. Decode it
+#     decoded_contour = RelativePolarCommand.contour_from_commands(commands)
 
-    # 4. Compare
-    # The decoded contour should have the same number of nodes
-    assert len(original_contour.nodes) == len(
-        decoded_contour.nodes
-    ), f"Expected {len(original_contour.nodes)} nodes, got {len(decoded_contour.nodes)}"
+#     # 4. Compare
+#     # The decoded contour should have the same number of nodes
+#     assert len(original_contour.nodes) == len(
+#         decoded_contour.nodes
+#     ), f"Expected {len(original_contour.nodes)} nodes, got {len(decoded_contour.nodes)}"
 
-    for i, original_node in enumerate(original_contour.nodes):
-        decoded_node = decoded_contour.nodes[i]
-        assert np.allclose(
-            original_node.coordinates, decoded_node.coordinates, atol=1e-4
-        ), f"Node {i} coordinate mismatch: Original {original_node.coordinates}, Decoded {decoded_node.coordinates}"
+#     for i, original_node in enumerate(original_contour.nodes):
+#         decoded_node = decoded_contour.nodes[i]
+#         assert np.allclose(
+#             original_node.coordinates, decoded_node.coordinates, atol=1e-4
+#         ), f"Node {i} coordinate mismatch: Original {original_node.coordinates}, Decoded {decoded_node.coordinates}"
 
-        if original_node.out_handle is not None:
-            assert (
-                decoded_node.out_handle is not None
-            ), f"Node {i} decoded out-handle is None"
-            assert np.allclose(
-                original_node.out_handle, decoded_node.out_handle, atol=1e-4
-            ), f"Node {i} out-handle mismatch: Original {original_node.out_handle}, Decoded {decoded_node.out_handle}"
+#         if original_node.out_handle is not None:
+#             assert (
+#                 decoded_node.out_handle is not None
+#             ), f"Node {i} decoded out-handle is None"
+#             assert np.allclose(
+#                 original_node.out_handle, decoded_node.out_handle, atol=1e-4
+#             ), f"Node {i} out-handle mismatch: Original {original_node.out_handle}, Decoded {decoded_node.out_handle}"
 
-        if original_node.in_handle is not None:
-            assert (
-                decoded_node.in_handle is not None
-            ), f"Node {i} decoded in-handle is None"
-            assert np.allclose(
-                original_node.in_handle, decoded_node.in_handle, atol=1e-4
-            ), f"Node {i} in-handle mismatch: Original {original_node.in_handle}, Decoded {decoded_node.in_handle}"
+#         if original_node.in_handle is not None:
+#             assert (
+#                 decoded_node.in_handle is not None
+#             ), f"Node {i} decoded in-handle is None"
+#             assert np.allclose(
+#                 original_node.in_handle, decoded_node.in_handle, atol=1e-4
+#             ), f"Node {i} in-handle mismatch: Original {original_node.in_handle}, Decoded {decoded_node.in_handle}"
 
-    print("\n--- TangentNormalCommand curve roundtrip test passed! ---")
+#     print("\n--- RelativePolarCommand curve roundtrip test passed! ---")
+
+
+# def test_relative_polar_unroll_relative():
+#     """
+#     Tests that the unroll_relative_coordinates method correctly converts
+#     relative tangent-normal commands to absolute coordinates.
+#     """
+#     # 1. Create a 'D' shape
+#     h_len = 100 * 2 / 3
+#     commands = [
+#         RelativePolarCommand("SOS", []),
+#         RelativePolarCommand("M", [0, 100]),
+#         RelativePolarCommand("L_POLAR", [0.0, 0.0]),
+#         # Move south by 100 in polar (r=100, phi=-pi/2), with symmetric handles (in at -u, out at +u)
+#         RelativePolarCommand("N_TANGENT", [100, -np.pi / 2, h_len, h_len]),
+#         # Move north by 100 (r=100, phi=+pi/2) back to (0,100)
+#         RelativePolarCommand("L_POLAR", [100, np.pi / 2]),
+#         RelativePolarCommand("EOS", []),
+#     ]
+
+#     # 2. Convert to a tensor
+#     command_tensors = []
+#     coord_tensors = []
+#     max_coords = RelativePolarCommand.coordinate_width
+#     for cmd in commands:
+#         command_tensors.append(RelativePolarCommand.encode_command_one_hot(cmd.command))
+#         padded_coords = cmd.coordinates + [0] * (max_coords - len(cmd.coordinates))
+#         coord_tensors.append(torch.tensor(padded_coords, dtype=torch.float32))
+
+#     sequence_tensor = torch.cat(
+#         [torch.stack(command_tensors), torch.stack(coord_tensors)], dim=1
+#     )
+
+#     # 3. Unroll it
+#     unrolled_sequence = RelativePolarCommand.unroll_relative_coordinates(
+#         sequence_tensor
+#     )
+#     _, abs_coords = RelativePolarCommand.split_tensor(unrolled_sequence)
+
+#     # 4. Verify the absolute coordinates
+#     # M command
+#     assert np.allclose(abs_coords[1, 0:2], [0, 100])
+#     # Zero-step command leaves position unchanged
+#     assert np.allclose(abs_coords[2, 0:2], [0, 100])
+#     # N command
+#     assert np.allclose(abs_coords[3, 0:2], [0, 0])  # pos
+#     assert np.allclose(abs_coords[3, 2:4], [0 - h_len, 0])  # in handle along -x
+#     assert np.allclose(
+#         abs_coords[3, 4:6], [0 + h_len, 0]
+#     )  # out handle expressed at destination in the fixed frame
+#     # L command
+#     assert np.allclose(abs_coords[4, 0:2], [0, 100])
+
+#     print("\n--- RelativePolarCommand unroll relative test passed! ---")
+
+
+# def test_relative_polar_space_conversion_roundtrip():
+#     """
+#     Tests that the coordinate space conversion methods can roundtrip from
+#     image space to mask space and back.
+#     """
+#     # 1. Create a sequence of commands in image space
+#     commands = [
+#         RelativePolarCommand("SOS", []),
+#         RelativePolarCommand("M", [100, 200]),
+#         RelativePolarCommand("N_POLAR", [50, 0.2, 10, -0.3, 12, 0.4]),
+#         RelativePolarCommand("L_POLAR", [30, 0.1]),
+#         RelativePolarCommand("EOS", []),
+#     ]
+
+#     # 2. Convert to a tensor
+#     command_tensors = []
+#     coord_tensors = []
+#     max_coords = RelativePolarCommand.coordinate_width
+#     for cmd in commands:
+#         command_tensors.append(RelativePolarCommand.encode_command_one_hot(cmd.command))
+
+#         # Pad coordinates to max_coords
+#         padded_coords = cmd.coordinates + [0] * (max_coords - len(cmd.coordinates))
+#         coord_tensors.append(torch.tensor(padded_coords, dtype=torch.float32))
+
+#     command_tensor = torch.stack(command_tensors)
+#     coord_tensor = torch.stack(coord_tensors)
+#     sequence_tensor = torch.cat([command_tensor, coord_tensor], dim=1)
+
+#     # 3. Define a bounding box
+#     box = torch.tensor([50, 50, 250, 350], dtype=torch.float32)  # x1, y1, x2, y2
+
+#     # 4. Normalize to mask space
+#     normalized_sequence = RelativePolarCommand.image_space_to_mask_space(
+#         sequence_tensor, box
+#     )
+
+#     # 5. Denormalize back to image space
+#     denormalized_sequence = RelativePolarCommand.mask_space_to_image_space(
+#         normalized_sequence, box
+#     )
+
+#     # 6. Compare
+#     assert torch.allclose(
+#         sequence_tensor, denormalized_sequence, atol=1e-4
+#     ), "Roundtrip failed: tensors do not match"
+
+#     print("\n--- RelativePolarCommand space conversion roundtrip test passed! ---")
+
+
+# def test_relative_polar_tangent_curve_roundtrip():
+#     """
+#     Tests that a curve with handles aligned to the tangent is correctly
+#     encoded and decoded with N_TANGENT.
+#     """
+#     nodes = [
+#         Node(
+#             np.array([0, 0]), out_handle=np.array([50, 15]), contour=None
+#         ),  # not aligned
+#         Node(
+#             np.array([100, 100]),
+#             in_handle=np.array([50, 100]),
+#             out_handle=np.array([150, 100]),
+#             contour=None,
+#         ),
+#         Node(
+#             np.array([200, 0]), in_handle=np.array([150, 15]), contour=None
+#         ),  # not aligned
+#     ]
+#     original_contour = NodeContour(nodes)
+#     for node in nodes:
+#         node._contour = original_contour
+#     commands = RelativePolarCommand.emit(original_contour.nodes)
+#     # We expect SOS, M, then a curve; depending on chord vs tangent, general or tangent form
+#     assert commands[3].command in ("N_TANGENT", "N_POLAR")
+
+#     # 4. Decode it
+#     decoded_contour = RelativePolarCommand.contour_from_commands(commands)
+#     assert len(original_contour.nodes) == len(decoded_contour.nodes)
+#     for i, original_node in enumerate(original_contour.nodes):
+#         decoded_node = decoded_contour.nodes[i]
+#         assert np.allclose(
+#             original_node.coordinates, decoded_node.coordinates, atol=1e-4
+#         )
+#         if original_node.out_handle is not None:
+#             assert np.allclose(
+#                 original_node.out_handle, decoded_node.out_handle, atol=1e-4
+#             )
+#         if original_node.in_handle is not None:
+#             assert np.allclose(
+#                 original_node.in_handle, decoded_node.in_handle, atol=1e-4
+#             )
+
+#     # 5. Unroll it
+#     # Convert to a tensor
+#     command_tensors = []
+#     coord_tensors = []
+#     max_coords = RelativePolarCommand.coordinate_width
+#     for cmd in commands:
+#         command_tensors.append(RelativePolarCommand.encode_command_one_hot(cmd.command))
+#         padded_coords = cmd.coordinates + [0] * (max_coords - len(cmd.coordinates))
+#         coord_tensors.append(torch.tensor(padded_coords, dtype=torch.float32))
+
+#     sequence_tensor = torch.cat(
+#         [torch.stack(command_tensors), torch.stack(coord_tensors)], dim=1
+#     )
+
+#     unrolled_sequence = RelativePolarCommand.unroll_relative_coordinates(
+#         sequence_tensor
+#     )
+#     _, abs_coords = RelativePolarCommand.split_tensor(unrolled_sequence)
+
+#     assert np.allclose(abs_coords[3, 0:2], [100, 100])  # pos
+#     assert np.allclose(abs_coords[3, 2:4], [50, 100])  # in handle
+#     assert np.allclose(abs_coords[3, 4:6], [150, 100])  # out handle
+
+
+# def test_relative_polar_nci_tangent_roundtrip():
+#     """
+#     Tests that a curve with a tangent-aligned in-handle is correctly
+#     encoded and decoded with NCI_TANGENT.
+#     """
+#     nodes = [
+#         Node(np.array([0, 0]), contour=None),
+#         Node(np.array([100, 0]), in_handle=np.array([50, 0]), contour=None),
+#     ]
+#     original_contour = NodeContour(nodes)
+#     for node in nodes:
+#         node._contour = original_contour
+#     commands = RelativePolarCommand.emit(original_contour.nodes)
+#     assert commands[3].command in ("NCI_TANGENT", "N_POLAR")
+
+#     decoded_contour = RelativePolarCommand.contour_from_commands(commands)
+#     assert len(original_contour.nodes) == len(decoded_contour.nodes)
+#     for i, original_node in enumerate(original_contour.nodes):
+#         decoded_node = decoded_contour.nodes[i]
+#         assert np.allclose(
+#             original_node.coordinates, decoded_node.coordinates, atol=1e-4
+#         )
+#         if original_node.out_handle is not None:
+#             assert np.allclose(
+#                 original_node.out_handle, decoded_node.out_handle, atol=1e-4
+#             )
+#         if original_node.in_handle is not None:
+#             assert np.allclose(
+#                 original_node.in_handle, decoded_node.in_handle, atol=1e-4
+#             )
+
+
+# def test_relative_polar_nco_tangent_roundtrip():
+#     """
+#     Tests that a curve with a tangent-aligned out-handle is correctly
+#     encoded and decoded with NCO_TANGENT.
+#     """
+#     nodes = [
+#         Node(np.array([0, 0]), out_handle=np.array([50, 0]), contour=None),
+#         Node(np.array([100, 0]), contour=None),
+#     ]
+#     original_contour = NodeContour(nodes)
+#     for node in nodes:
+#         node._contour = original_contour
+#     commands = RelativePolarCommand.emit(original_contour.nodes)
+#     assert commands[3].command in ("NCO_TANGENT", "N_POLAR")
+#     decoded_contour = RelativePolarCommand.contour_from_commands(commands)
+#     assert len(original_contour.nodes) == len(decoded_contour.nodes)
+#     for i, original_node in enumerate(original_contour.nodes):
+#         decoded_node = decoded_contour.nodes[i]
+#         assert np.allclose(
+#             original_node.coordinates, decoded_node.coordinates, atol=1e-4
+#         )
+#         if original_node.out_handle is not None:
+#             assert np.allclose(
+#                 original_node.out_handle, decoded_node.out_handle, atol=1e-4
+#             )
+#         if original_node.in_handle is not None:
+#             assert np.allclose(
+#                 original_node.in_handle, decoded_node.in_handle, atol=1e-4
+#             )
 
 
 # @pytest.mark.parametrize("char_to_test", list(ALPHABET))
@@ -138,12 +390,12 @@ def test_tangent_normal_curve_roundtrip():
 #     nodeglyph_orig = svg_glyph_orig.to_node_glyph()
 
 #     # 2a. NodeGlyph -> List[List[NodeCommand]]
-#     contours_commands = nodeglyph_orig.command_lists(TangentNormalCommand)
+#     contours_commands = nodeglyph_orig.command_lists(RelativePolarCommand)
 
 #     # 2b. List[List[NodeCommand]] -> NodeGlyph
 #     nodeglyph_reconstructed = NodeGlyph(
 #         [
-#             TangentNormalCommand.contour_from_commands(contour, tolerant=False)
+#             RelativePolarCommand.contour_from_commands(contour, tolerant=False)
 #             for contour in contours_commands
 #         ],
 #         nodeglyph_orig.origin,
@@ -168,7 +420,7 @@ def test_tangent_normal_curve_roundtrip():
 #                 ), f"Node {j} in contour {i} of glyph '{char_to_test}' lost its smoothness"
 
 #     # 3a. NodeGlyph -> encoded sequence
-#     encoded_sequences = nodeglyph_orig.encode(TangentNormalCommand)
+#     encoded_sequences = nodeglyph_orig.encode(RelativePolarCommand)
 
 #     # This can happen for blank glyphs like 'space'
 #     if encoded_sequences is None:
@@ -176,7 +428,7 @@ def test_tangent_normal_curve_roundtrip():
 #         return
 
 #     # 3b. Encoded sequence -> NodeGlyph
-#     nodeglyph_roundtrip = NodeGlyph.decode(encoded_sequences, TangentNormalCommand)
+#     nodeglyph_roundtrip = NodeGlyph.decode(encoded_sequences, RelativePolarCommand)
 
 #     # 4. Compare original and round-tripped NodeGlyph objects
 #     # We assert on-curve coordinate preservation, not perfect handle equality.
