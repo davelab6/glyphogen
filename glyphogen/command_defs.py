@@ -1028,6 +1028,10 @@ class RelativePolarCommand(CommandRepresentation):
         "L_POLAR": 2,  # r, phi
         "L_LEFT_90": 1,  # distance
         "L_RIGHT_90": 1,  # distance
+        "N_POLAR": 6,  # r, phi, in_len, in_phi, out_len, out_phi
+        "N_POLAR_IN": 4,  # r, phi, in_len, in_phi (out handle absent)
+        "N_POLAR_OUT": 4,  # r, phi, out_len, out_phi (in handle absent)
+        "N_SMOOTH": 5,  # r, phi, out_phi, len_in, len_out
         "EOS": 0,
     }
     coordinate_representation = RelativePolarCoordinateRepresentation
@@ -1046,43 +1050,111 @@ class RelativePolarCommand(CommandRepresentation):
             return commands
 
         commands.append(cls("SOS", []))
-        # Emit move to for the first node
+        # Emit move to for the first node (absolute position)
         first_node = nodes[0]
-        # Use AbsoluteCoordinateRepresentation for the M command
         pos = AbsoluteCoordinateRepresentation.emit_node_position(first_node)
         commands.append(cls("M", pos.tolist()))
 
-        f_hat = np.array([1.0, 0.0], dtype=np.float32)
+        f_hat = np.array(
+            [1.0, 0.0], dtype=np.float32
+        )  # Initial f_hat for the first segment
 
-        for i in range(len(nodes)):
-            p_prev = nodes[i]
-            p_curr = nodes[(i + 1) % len(nodes)]
+        for i, node in enumerate(nodes):
+            p_curr = node
+            p_prev = (
+                node.previous
+            )  # This will be the last node for the first node in a closed contour
 
-            delta_pos = p_curr.coordinates - p_prev.coordinates
+            # Calculate delta_pos for the current node relative to the previous node
+            if i == 0:  # For the first node, its position is relative to itself (0,0)
+                delta_pos = np.array([0.0, 0.0], dtype=np.float32)
+            else:
+                delta_pos = p_curr.coordinates - p_prev.coordinates
+
             r = float(np.linalg.norm(delta_pos))
             r_hat = np.array([-f_hat[1], f_hat[0]], dtype=np.float32)
 
+            # Calculate phi for the node position relative to current f_hat
             if r > 1e-6:
-                dir_chord = delta_pos / r
                 phi = float(
                     np.arctan2(np.dot(delta_pos, r_hat), np.dot(delta_pos, f_hat))
                 )
             else:
-                dir_chord = f_hat
                 phi = 0.0
 
-            # Check for 90-degree turns
-            if np.isclose(phi, np.pi / 2):
-                commands.append(cls("L_LEFT_90", [r]))
-            elif np.isclose(phi, -np.pi / 2):
-                commands.append(cls("L_RIGHT_90", [r]))
-            else:
-                commands.append(cls("L_POLAR", [r, phi]))
+            # Calculate handle polar coordinates relative to current f_hat
+            out_handle_world_rel = (
+                p_curr.out_handle - p_curr.coordinates
+                if p_curr.out_handle is not None
+                else np.array([0.0, 0.0])
+            )
+            in_handle_world_rel = (
+                p_curr.in_handle - p_curr.coordinates
+                if p_curr.in_handle is not None
+                else np.array([0.0, 0.0])
+            )
 
-            # Keep the frame fixed for tangent-encoded segments so that subsequent
-            # commands interpret phi in the same basis; otherwise rotate to chord.
-            # For now, we always rotate to chord for line segments.
-            f_hat = cls._unit(delta_pos, f_hat)
+            out_len = np.linalg.norm(out_handle_world_rel)
+            out_phi = (
+                float(
+                    np.arctan2(
+                        np.dot(out_handle_world_rel, r_hat),
+                        np.dot(out_handle_world_rel, f_hat),
+                    )
+                )
+                if out_len > 1e-6
+                else 0.0
+            )
+
+            in_len = np.linalg.norm(in_handle_world_rel)
+            in_phi = (
+                float(
+                    np.arctan2(
+                        np.dot(in_handle_world_rel, r_hat),
+                        np.dot(in_handle_world_rel, f_hat),
+                    )
+                )
+                if in_len > 1e-6
+                else 0.0
+            )
+
+            # Determine command type
+            if p_curr.is_line:  # No handles
+                if np.isclose(phi, np.pi / 2):
+                    commands.append(cls("L_LEFT_90", [r]))
+                elif np.isclose(phi, -np.pi / 2):
+                    commands.append(cls("L_RIGHT_90", [r]))
+                else:
+                    commands.append(cls("L_POLAR", [r, phi]))
+            else:  # Has at least one handle
+                has_in = p_curr.in_handle is not None and in_len > 1e-6
+                has_out = p_curr.out_handle is not None and out_len > 1e-6
+
+                if has_in and not has_out:
+                    commands.append(cls("N_POLAR_IN", [r, phi, in_len, in_phi]))
+                elif has_out and not has_in:
+                    commands.append(cls("N_POLAR_OUT", [r, phi, out_len, out_phi]))
+                elif p_curr.is_smooth:
+                    commands.append(cls("N_SMOOTH", [r, phi, out_phi, in_len, out_len]))
+                else:
+                    commands.append(
+                        cls("N_POLAR", [r, phi, in_len, in_phi, out_len, out_phi])
+                    )
+
+            # Update f_hat for the next segment based on the outgoing handle of the current node
+            if p_curr.out_handle is not None:
+                next_f_hat_vec = p_curr.out_handle - p_curr.coordinates
+                norm = np.linalg.norm(next_f_hat_vec)
+                if norm > 1e-6:
+                    f_hat = next_f_hat_vec / norm
+                else:
+                    f_hat = cls._unit(
+                        delta_pos, f_hat
+                    )  # Fallback to chord if handle is zero
+            else:
+                f_hat = cls._unit(
+                    delta_pos, f_hat
+                )  # For line segments, f_hat is direction of chord
 
         commands.append(cls("EOS", []))
         return commands
@@ -1116,11 +1188,9 @@ class RelativePolarCommand(CommandRepresentation):
         )
         abs_coords_np = abs_coords.cpu().numpy()
 
-        current_pos = np.array(all_commands[1].coordinates, dtype=np.float32)
-        prev_node = contour.push(
-            coordinates=current_pos.copy(), in_handle=None, out_handle=None
-        )
+        nodes_list: List[Node] = []
 
+        # Iterate from the first actual node command (after SOS and M)
         for idx, command in enumerate(all_commands[2:], start=2):
             if command.command == "EOS":
                 break
@@ -1129,37 +1199,15 @@ class RelativePolarCommand(CommandRepresentation):
             in_abs = abs_coords_np[idx, 2:4]
             out_abs = abs_coords_np[idx, 4:6]
 
-            if command.command == "L_POLAR":
-                r, _ = command.coordinates
-                if abs(r) < 1e-6:
-                    continue
-                prev_node = contour.push(
-                    coordinates=pos_abs.copy(), in_handle=None, out_handle=None
-                )
-            elif command.command == "L_LEFT_90":
-                r = command.coordinates[0]
-                if abs(r) < 1e-6:
-                    continue
-                prev_node = contour.push(
-                    coordinates=pos_abs.copy(), in_handle=None, out_handle=None
-                )
-            elif command.command == "L_RIGHT_90":
-                r = command.coordinates[0]
-                if abs(r) < 1e-6:
-                    continue
-                prev_node = contour.push(
-                    coordinates=pos_abs.copy(), in_handle=None, out_handle=None
-                )
-            else:
-                if not tolerant:
-                    raise ValueError(f"Unsupported command: {command.command}")
+            new_node = Node(
+                coordinates=pos_abs.copy(),
+                in_handle=in_abs.copy(),
+                out_handle=out_abs.copy(),
+                contour=None,  # Will be set by NodeContour constructor
+            )
+            nodes_list.append(new_node)
 
-        if len(contour.nodes) > 1 and np.allclose(
-            contour.nodes[0].coordinates, contour.nodes[-1].coordinates, atol=1e-4
-        ):
-            last_node = contour.nodes.pop()
-            contour.nodes[0].in_handle = last_node.in_handle
-        return contour
+        return NodeContour(nodes_list)
 
     @classmethod
     def unroll_relative_coordinates(cls, sequence: torch.Tensor) -> torch.Tensor:
@@ -1182,45 +1230,226 @@ class RelativePolarCommand(CommandRepresentation):
             pos_abs = current_pos
             in_abs = current_pos
             out_abs = current_pos
+            next_f_hat = f_hat  # Default to keeping f_hat the same
 
             if idx == cls.encode_command("M"):
                 current_pos = co[0:2]
                 pos_abs = current_pos
             elif idx == cls.encode_command("L_POLAR"):
                 r, phi = co[0], co[1]
-                # The phi here is the *relative* angle change from the current f_hat
-                # So we rotate f_hat by phi
-                rotation_matrix = torch.tensor([
-                    [torch.cos(phi), -torch.sin(phi)],
-                    [torch.sin(phi), torch.cos(phi)]
-                ], device=sequence.device, dtype=sequence.dtype)
-                f_hat = torch.matmul(rotation_matrix, f_hat)
-                
-                delta = r * f_hat
+                rotation_matrix = torch.tensor(
+                    [
+                        [torch.cos(phi), -torch.sin(phi)],
+                        [torch.sin(phi), torch.cos(phi)],
+                    ],
+                    device=sequence.device,
+                    dtype=sequence.dtype,
+                )
+                move_dir = torch.matmul(rotation_matrix, f_hat)
+
+                delta = r * move_dir
                 current_pos = current_pos + delta
                 pos_abs = current_pos
+                next_f_hat = (
+                    move_dir  # f_hat for next segment is direction of this segment
+                )
             elif idx == cls.encode_command("L_LEFT_90"):
                 r = co[0]
-                phi = torch.tensor(np.pi / 2, device=sequence.device, dtype=sequence.dtype)
-                rotation_matrix = torch.tensor([
-                    [torch.cos(phi), -torch.sin(phi)],
-                    [torch.sin(phi), torch.cos(phi)]
-                ], device=sequence.device, dtype=sequence.dtype)
-                f_hat = torch.matmul(rotation_matrix, f_hat)
-                delta = r * f_hat
+                phi_turn = torch.tensor(
+                    np.pi / 2, device=sequence.device, dtype=sequence.dtype
+                )
+                rotation_matrix = torch.tensor(
+                    [
+                        [torch.cos(phi_turn), -torch.sin(phi_turn)],
+                        [torch.sin(phi_turn), torch.cos(phi_turn)],
+                    ],
+                    device=sequence.device,
+                    dtype=sequence.dtype,
+                )
+                move_dir = torch.matmul(rotation_matrix, f_hat)
+
+                delta = r * move_dir
                 current_pos = current_pos + delta
                 pos_abs = current_pos
+                next_f_hat = (
+                    move_dir  # f_hat for next segment is direction of this segment
+                )
             elif idx == cls.encode_command("L_RIGHT_90"):
                 r = co[0]
-                phi = torch.tensor(-np.pi / 2, device=sequence.device, dtype=sequence.dtype)
-                rotation_matrix = torch.tensor([
-                    [torch.cos(phi), -torch.sin(phi)],
-                    [torch.sin(phi), torch.cos(phi)]
-                ], device=sequence.device, dtype=sequence.dtype)
-                f_hat = torch.matmul(rotation_matrix, f_hat)
-                delta = r * f_hat
+                phi_turn = torch.tensor(
+                    -np.pi / 2, device=sequence.device, dtype=sequence.dtype
+                )
+                rotation_matrix = torch.tensor(
+                    [
+                        [torch.cos(phi_turn), -torch.sin(phi_turn)],
+                        [torch.sin(phi_turn), torch.cos(phi_turn)],
+                    ],
+                    device=sequence.device,
+                    dtype=sequence.dtype,
+                )
+                move_dir = torch.matmul(rotation_matrix, f_hat)
+
+                delta = r * move_dir
                 current_pos = current_pos + delta
                 pos_abs = current_pos
+                next_f_hat = (
+                    move_dir  # f_hat for next segment is direction of this segment
+                )
+
+            elif idx == cls.encode_command("N_POLAR"):
+                r, phi_node, in_len, in_phi, out_len, out_phi = co
+                rotation_matrix_node = torch.tensor(
+                    [
+                        [torch.cos(phi_node), -torch.sin(phi_node)],
+                        [torch.sin(phi_node), torch.cos(phi_node)],
+                    ],
+                    device=sequence.device,
+                    dtype=sequence.dtype,
+                )
+
+                # Position update
+                node_dir = torch.matmul(rotation_matrix_node, f_hat)
+                delta_pos = r * node_dir
+                current_pos = current_pos + delta_pos
+                pos_abs = current_pos
+
+                # Handle directions expressed in the local (f_hat, r_hat) frame
+                def _dir_from_polar(
+                    length: torch.Tensor, angle: torch.Tensor
+                ) -> torch.Tensor:
+                    # cos component along f_hat, sin component along r_hat
+                    return length * (
+                        torch.cos(angle) * f_hat + torch.sin(angle) * r_hat
+                    )
+
+                out_handle_vec = _dir_from_polar(out_len, out_phi)
+                in_handle_vec = _dir_from_polar(in_len, in_phi)
+
+                out_handle_abs = pos_abs + out_handle_vec
+                in_handle_abs = pos_abs + in_handle_vec
+
+                in_abs = in_handle_abs
+                out_abs = out_handle_abs
+
+                # Update f_hat for the next segment based on the outgoing handle
+                norm_out = torch.linalg.norm(out_handle_vec)
+                if norm_out > 1e-6:
+                    next_f_hat = out_handle_vec / norm_out
+                else:
+                    norm_delta = torch.linalg.norm(delta_pos)
+                    if norm_delta > 1e-6:
+                        next_f_hat = delta_pos / norm_delta
+                    else:
+                        next_f_hat = f_hat
+
+            elif idx == cls.encode_command("N_POLAR_IN"):
+                r, phi_node, in_len, in_phi = co[0:4]
+                rotation_matrix_node = torch.tensor(
+                    [
+                        [torch.cos(phi_node), -torch.sin(phi_node)],
+                        [torch.sin(phi_node), torch.cos(phi_node)],
+                    ],
+                    device=sequence.device,
+                    dtype=sequence.dtype,
+                )
+
+                node_dir = torch.matmul(rotation_matrix_node, f_hat)
+                delta_pos = r * node_dir
+                current_pos = current_pos + delta_pos
+                pos_abs = current_pos
+
+                def _dir_from_polar_in(
+                    length: torch.Tensor, angle: torch.Tensor
+                ) -> torch.Tensor:
+                    return length * (
+                        torch.cos(angle) * f_hat + torch.sin(angle) * r_hat
+                    )
+
+                in_handle_vec = _dir_from_polar_in(in_len, in_phi)
+                in_handle_abs = pos_abs + in_handle_vec
+                in_abs = in_handle_abs
+                out_abs = pos_abs
+
+                norm_delta = torch.linalg.norm(delta_pos)
+                if norm_delta > 1e-6:
+                    next_f_hat = delta_pos / norm_delta
+                else:
+                    next_f_hat = f_hat
+
+            elif idx == cls.encode_command("N_POLAR_OUT"):
+                r, phi_node, out_len, out_phi = co[0:4]
+                rotation_matrix_node = torch.tensor(
+                    [
+                        [torch.cos(phi_node), -torch.sin(phi_node)],
+                        [torch.sin(phi_node), torch.cos(phi_node)],
+                    ],
+                    device=sequence.device,
+                    dtype=sequence.dtype,
+                )
+
+                node_dir = torch.matmul(rotation_matrix_node, f_hat)
+                delta_pos = r * node_dir
+                current_pos = current_pos + delta_pos
+                pos_abs = current_pos
+
+                def _dir_from_polar_out(
+                    length: torch.Tensor, angle: torch.Tensor
+                ) -> torch.Tensor:
+                    return length * (
+                        torch.cos(angle) * f_hat + torch.sin(angle) * r_hat
+                    )
+
+                out_handle_vec = _dir_from_polar_out(out_len, out_phi)
+                out_handle_abs = pos_abs + out_handle_vec
+                in_abs = pos_abs
+                out_abs = out_handle_abs
+
+                norm_out = torch.linalg.norm(out_handle_vec)
+                if norm_out > 1e-6:
+                    next_f_hat = out_handle_vec / norm_out
+                else:
+                    norm_delta = torch.linalg.norm(delta_pos)
+                    if norm_delta > 1e-6:
+                        next_f_hat = delta_pos / norm_delta
+                    else:
+                        next_f_hat = f_hat
+
+            elif idx == cls.encode_command("N_SMOOTH"):
+                # co = [r, phi_node, out_phi, in_len, out_len]
+                r, phi_node, out_phi, in_len, out_len = co[0:5]
+
+                rotation_matrix_node = torch.tensor(
+                    [
+                        [torch.cos(phi_node), -torch.sin(phi_node)],
+                        [torch.sin(phi_node), torch.cos(phi_node)],
+                    ],
+                    device=sequence.device,
+                    dtype=sequence.dtype,
+                )
+                node_dir = torch.matmul(rotation_matrix_node, f_hat)
+                delta_pos = r * node_dir
+                current_pos = current_pos + delta_pos
+                pos_abs = current_pos
+
+                # Smooth: out handle angle is given; in handle is pi opposite
+                out_dir = torch.cos(out_phi) * f_hat + torch.sin(out_phi) * r_hat
+                in_dir = -out_dir
+
+                out_handle_abs = pos_abs + out_len * out_dir
+                in_handle_abs = pos_abs + in_len * in_dir
+
+                in_abs = in_handle_abs
+                out_abs = out_handle_abs
+
+                norm_out = torch.linalg.norm(out_dir)
+                if norm_out > 1e-6:
+                    next_f_hat = out_dir / norm_out
+                else:
+                    norm_delta = torch.linalg.norm(delta_pos)
+                    if norm_delta > 1e-6:
+                        next_f_hat = delta_pos / norm_delta
+                    else:
+                        next_f_hat = f_hat
             # SOS and EOS do not change position or f_hat
 
             def _zero_small(t: torch.Tensor) -> torch.Tensor:
@@ -1229,6 +1458,7 @@ class RelativePolarCommand(CommandRepresentation):
             abs_coords[i, 0:2] = _zero_small(pos_abs)
             abs_coords[i, 2:4] = _zero_small(in_abs)
             abs_coords[i, 4:6] = _zero_small(out_abs)
+            f_hat = next_f_hat  # Update f_hat for the next iteration
 
         return torch.cat([commands, abs_coords], dim=1)
 
