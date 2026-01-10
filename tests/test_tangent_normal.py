@@ -62,6 +62,85 @@ def test_relative_polar_line_roundtrip():
     print("\n--- RelativePolarCommand line roundtrip test passed! ---")
 
 
+def test_relative_polar_z_shape_roundtrip():
+    """
+    Tests that a Z-shaped contour can be encoded and decoded correctly,
+    including diagonal lines with non-zero phi.
+    """
+    nodes = [
+        Node(np.array([0, 100]), contour=None),
+        Node(np.array([100, 100]), contour=None),
+        Node(np.array([0, 0]), contour=None),
+        Node(np.array([100, 0]), contour=None),
+    ]
+    original_contour = NodeContour(nodes)
+    for node in nodes:
+        node._contour = original_contour
+
+    commands = RelativePolarCommand.emit(original_contour.nodes)
+
+    # Expected commands: SOS, M, L_POLAR (0,100 to 100,100), L_POLAR (100,100 to 0,0), L_POLAR (0,0 to 100,0), L_POLAR (100,0 to 0,100), EOS
+    assert commands[0].command == "SOS"
+    assert commands[1].command == "M"
+    assert np.allclose(commands[1].coordinates, [0, 100])
+
+    # Segment 1: (0,100) -> (100,100) (straight right)
+    assert commands[2].command == "L_POLAR"
+    r, phi = commands[2].coordinates
+    assert np.isclose(r, 100)
+    assert np.isclose(phi, 0.0)
+
+    # Segment 2: (100,100) -> (0,0) (diagonal down-left)
+    assert commands[3].command == "L_POLAR"
+    r, phi = commands[3].coordinates
+    assert np.isclose(r, np.sqrt(100**2 + 100**2))
+    assert np.isclose(phi, -np.pi * 3 / 4) # Relative to f_hat=[1,0]
+
+    # Segment 3: (0,0) -> (100,0) (straight right)
+    assert commands[4].command == "L_POLAR"
+    r, phi = commands[4].coordinates
+    assert np.isclose(r, 100)
+    assert np.isclose(phi, np.pi * 3 / 4) # Relative to f_hat=[cos(-3pi/4), sin(-3pi/4)]
+
+    # Segment 4: (100,0) -> (0,100) (diagonal up-left, closing)
+    assert commands[5].command == "L_POLAR"
+    r, phi = commands[5].coordinates
+    assert np.isclose(r, np.sqrt(100**2 + 100**2))
+    assert np.isclose(phi, np.pi * 3 / 4) # Relative to f_hat=[1,0]
+
+    assert commands[6].command == "EOS"
+
+    # Decode and compare
+    decoded_contour = RelativePolarCommand.contour_from_commands(commands)
+    assert len(original_contour.nodes) == len(decoded_contour.nodes)
+    for i, original_node in enumerate(original_contour.nodes):
+        decoded_node = decoded_contour.nodes[i]
+        assert np.allclose(
+            original_node.coordinates, decoded_node.coordinates, atol=1e-4
+        ), f"Node {i} mismatch: Original {original_node.coordinates}, Decoded {decoded_node.coordinates}"
+
+    # Unroll and verify absolute coordinates
+    command_tensors = []
+    coord_tensors = []
+    max_coords = RelativePolarCommand.coordinate_width
+    for cmd in commands:
+        command_tensors.append(RelativePolarCommand.encode_command_one_hot(cmd.command))
+        padded_coords = cmd.coordinates + [0] * (max_coords - len(cmd.coordinates))
+        coord_tensors.append(torch.tensor(padded_coords, dtype=torch.float32))
+    
+    sequence_tensor = torch.cat([torch.stack(command_tensors), torch.stack(coord_tensors)], dim=1)
+    unrolled_sequence = RelativePolarCommand.unroll_relative_coordinates(sequence_tensor)
+    _, abs_coords = RelativePolarCommand.split_tensor(unrolled_sequence)
+
+    assert np.allclose(abs_coords[1, 0:2], [0, 100]) # M
+    assert np.allclose(abs_coords[2, 0:2], [100, 100]) # L_POLAR (0,100) -> (100,100)
+    assert np.allclose(abs_coords[3, 0:2], [0, 0]) # L_POLAR (100,100) -> (0,0)
+    assert np.allclose(abs_coords[4, 0:2], [100, 0]) # L_POLAR (0,0) -> (100,0)
+    assert np.allclose(abs_coords[5, 0:2], [0, 100]) # L_POLAR (100,0) -> (0,100)
+
+    print("\n--- RelativePolarCommand Z-shape roundtrip test passed! ---")
+
+
 # def test_relative_polar_curve_roundtrip():
 #     """
 #     Tests that a 'D'-shaped contour with a curve can be encoded and decoded.

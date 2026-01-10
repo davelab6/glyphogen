@@ -1048,7 +1048,8 @@ class RelativePolarCommand(CommandRepresentation):
         commands.append(cls("SOS", []))
         # Emit move to for the first node
         first_node = nodes[0]
-        pos = cls.coordinate_representation.emit_node_position(first_node)
+        # Use AbsoluteCoordinateRepresentation for the M command
+        pos = AbsoluteCoordinateRepresentation.emit_node_position(first_node)
         commands.append(cls("M", pos.tolist()))
 
         f_hat = np.array([1.0, 0.0], dtype=np.float32)
