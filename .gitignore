@@ -1,4 +1,5 @@
 *.pyc
+data
 imgcache
 *.tfds
 logs
@@ -6,3 +7,4 @@ logs
 debug_gradients
 .pytest_cache
 __pycache__
+COMMIT_EDITMSG
