@@ -10,7 +10,7 @@ from torch import nn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor, MaskRCNN
 
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 from glyphogen.typing import (
     CollatedGlyphData,
     GroundTruthContour,
@@ -243,8 +243,8 @@ class VectorizationGenerator(nn.Module):
         # --- NEW STANDARDIZATION LOGIC ---
         commands_norm, coords_norm = NodeCommand.split_tensor(decoder_input_batch)
         command_indices = torch.argmax(commands_norm, dim=-1)
-        means, stds = self.decoder.get_stats_for_sequence(command_indices)
-        coords_std = self.decoder.standardize(coords_norm, means, stds)
+        means, stds = NodeCommand.get_stats_for_sequence(command_indices)
+        coords_std = NodeCommand.standardize(coords_norm, means, stds)
         decoder_input_std = torch.cat([commands_norm, coords_std], dim=-1)
         # --- END NEW LOGIC ---
 
@@ -272,13 +272,13 @@ class VectorizationGenerator(nn.Module):
 
             # --- De-standardize for metrics and logging ---
             pred_command_indices = torch.argmax(pred_commands, dim=-1)
-            pred_means, pred_stds = self.decoder.get_stats_for_sequence(
+            pred_means, pred_stds = NodeCommand.get_stats_for_sequence(
                 pred_command_indices
             )
             glyph_pred_means.append(pred_means)
             glyph_pred_stds.append(pred_stds)
 
-            pred_coords_norm = self.decoder.de_standardize(
+            pred_coords_norm = NodeCommand.de_standardize(
                 pred_coords_std, pred_means, pred_stds
             )
             glyph_pred_coords_norm.append(pred_coords_norm)
@@ -330,8 +330,8 @@ class VectorizationGenerator(nn.Module):
             batch_size, 1, NodeCommand.coordinate_width, device=device
         )
         command_indices = torch.argmax(command_part, dim=-1)
-        means, stds = self.decoder.get_stats_for_sequence(command_indices)
-        coords_part_std = self.decoder.standardize(coords_part_norm, means, stds)
+        means, stds = NodeCommand.get_stats_for_sequence(command_indices)
+        coords_part_std = NodeCommand.standardize(coords_part_norm, means, stds)
         current_input_std = torch.cat([command_part, coords_part_std], dim=-1)
         # ---
 
@@ -404,13 +404,13 @@ class VectorizationGenerator(nn.Module):
             glyph_pred_coords_std.append(pred_coords_std)
 
             pred_command_indices = torch.argmax(pred_commands, dim=-1)
-            pred_means, pred_stds = self.decoder.get_stats_for_sequence(
+            pred_means, pred_stds = NodeCommand.get_stats_for_sequence(
                 pred_command_indices
             )
             glyph_pred_means.append(pred_means)
             glyph_pred_stds.append(pred_stds)
 
-            pred_coords_norm = self.decoder.de_standardize(
+            pred_coords_norm = NodeCommand.de_standardize(
                 pred_coords_std, pred_means, pred_stds
             )
             glyph_pred_coords_norm.append(pred_coords_norm)

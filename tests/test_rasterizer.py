@@ -1,5 +1,5 @@
 from glyphogen.svgglyph import SVGGlyph
-from glyphogen.command_defs import SVGCommand
+from glyphogen.representations.svgcommand import SVGCommand
 from glyphogen.rasterizer import rasterize_batch
 import torch
 

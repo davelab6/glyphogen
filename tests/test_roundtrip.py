@@ -2,7 +2,7 @@ from glyphogen.nodeglyph import NodeGlyph
 import torch
 import numpy as np
 from glyphogen.glyph import SVGGlyph
-from glyphogen.command_defs import (
+from glyphogen.representations.nodecommand import (
     NodeCommand,
 )
 
@@ -150,7 +150,6 @@ def test_real_glyph_roundtrip(char_to_test):
             ), f"Node {j} in contour {i} of glyph '{char_to_test}' has mismatched coordinates after encode/decode"
 
 
-
 def test_nodeglyph_decoding():
     # This test ensures that the decoding process (tensor -> NodeGlyph) works correctly.
     # The command sequence is defined semantically, and tensors are generated from it,
@@ -191,8 +190,7 @@ def test_nodeglyph_decoding():
     ]
     # Ensure coordinates are padded to the correct width
     padded_coords_list = [
-        row + [0.0] * (NodeCommand.coordinate_width - len(row))
-        for row in coords_list
+        row + [0.0] * (NodeCommand.coordinate_width - len(row)) for row in coords_list
     ]
     coords_tensor = torch.tensor(padded_coords_list, dtype=torch.float32)
 

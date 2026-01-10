@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 import sys
 
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 from glyphogen.hyperparameters import (
     ALIGNMENT_LOSS_WEIGHT,
     HUBER_DELTA,
@@ -228,10 +228,9 @@ def alignment_loss(
     total_y_variance = torch.tensor(0.0, device=device)
 
     on_curve_points = pred_coords[:, 0:2]
-    valid_nodes_mask = (
-        torch.argmax(gt_command_for_loss, dim=-1)
-        != NodeCommand.encode_command("EOS")
-    )
+    valid_nodes_mask = torch.argmax(
+        gt_command_for_loss, dim=-1
+    ) != NodeCommand.encode_command("EOS")
     num_valid_nodes = valid_nodes_mask.sum().item()
 
     for alignment_set in x_alignment_sets:
@@ -257,9 +256,9 @@ def coordinate_width_mask(commands: torch.Tensor, coords: torch.Tensor):
     arg_counts_list = [NodeCommand.grammar[cmd] for cmd in NodeCommand.grammar]
     arg_counts = torch.tensor(arg_counts_list, device=device)
     num_relevant_coords = arg_counts[command_indices]
-    coord_mask = (
-        torch.arange(coords.shape[1], device=device) < num_relevant_coords.unsqueeze(1)
-    )
+    coord_mask = torch.arange(
+        coords.shape[1], device=device
+    ) < num_relevant_coords.unsqueeze(1)
     return coord_mask
 
 
@@ -313,9 +312,7 @@ def masked_coordinate_mae_metric(
     This version expects absolute, bbox-normalized coordinates.
     """
     coord_mask = coordinate_width_mask(gt_command_for_loss, abs_gt_coords)
-    elementwise_coord_error = torch.abs(
-        abs_pred_coords * 256.0 - abs_gt_coords * 256.0
-    )
+    elementwise_coord_error = torch.abs(abs_pred_coords * 256.0 - abs_gt_coords * 256.0)
     masked_coord_error = elementwise_coord_error * coord_mask
     num_coords_in_metric = coord_mask.sum()
     if num_coords_in_metric > 0:

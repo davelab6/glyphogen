@@ -4,7 +4,7 @@ import numpy as np
 from kurbopy import BezPath, Point
 from PIL import Image, ImageDraw
 
-from glyphogen.command_defs import SVGCommand
+from glyphogen.representations.svgcommand import SVGCommand
 from glyphogen.coordinate import get_bounds
 from glyphogen.hyperparameters import GEN_IMAGE_SIZE
 from glyphogen.nodeglyph import NodeGlyph

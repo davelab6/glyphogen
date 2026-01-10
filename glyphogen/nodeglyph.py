@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, List, Optional, Sequence
 
 if TYPE_CHECKING:
-    from .command_defs import CommandRepresentation
+    from .representations import CommandRepresentation
 
 import numpy as np
 import numpy.typing as npt

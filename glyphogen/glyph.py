@@ -17,7 +17,7 @@ from PIL import Image
 from glyphogen.coordinate import to_image_space
 from glyphogen.svgglyph import SVGGlyph
 
-from .command_defs import SVGCommand
+from .representations.svgcommand import SVGCommand
 from .hyperparameters import BASE_DIR, RASTER_IMG_SIZE
 from .rasterizer import rasterize_batch
 

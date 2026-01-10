@@ -5,7 +5,7 @@ import torchvision.transforms.v2 as T
 from fontTools.ttLib import TTFont
 from torchvision.datasets import CocoDetection
 
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 from glyphogen.hyperparameters import BASE_DIR
 from glyphogen.typing import CollatedGlyphData, GroundTruthContour, Target
 from typing import List

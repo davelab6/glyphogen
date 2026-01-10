@@ -4,7 +4,7 @@ import pytest
 from torch.utils.data import DataLoader
 
 from glyphogen.nodeglyph import NodeGlyph
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 from glyphogen.dataset import get_hierarchical_data, collate_fn, font_files
 from glyphogen.hyperparameters import ALPHABET
 from glyphogen.svgglyph import SVGGlyph
@@ -51,4 +51,3 @@ def test_svg_generation(dataset):
     # The test just asserts that an SVG was produced without errors
     assert isinstance(svg_string, str)
     assert len(svg_string) > 0
-

@@ -1,6 +1,6 @@
 import torch
 from glyphogen.dataset import GlyphCocoDataset
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 import os
 
 # This test is designed to be run from the root of the project.

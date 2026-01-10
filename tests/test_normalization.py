@@ -1,5 +1,6 @@
 import torch
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
+
 
 def test_relative_coordinate_normalization():
     """
@@ -7,12 +8,18 @@ def test_relative_coordinate_normalization():
     during normalization.
     """
     # Bbox is offset from the origin to make translation effects obvious
-    box = torch.tensor([100, 100, 300, 300], dtype=torch.float32) # 200x200 box
+    box = torch.tensor([100, 100, 300, 300], dtype=torch.float32)  # 200x200 box
 
     # M command is absolute, L command is relative
-    m_cmd = torch.nn.functional.one_hot(torch.tensor(NodeCommand.encode_command("M")), num_classes=NodeCommand.command_width)
-    l_cmd = torch.nn.functional.one_hot(torch.tensor(NodeCommand.encode_command("L")), num_classes=NodeCommand.command_width)
-    
+    m_cmd = torch.nn.functional.one_hot(
+        torch.tensor(NodeCommand.encode_command("M")),
+        num_classes=NodeCommand.command_width,
+    )
+    l_cmd = torch.nn.functional.one_hot(
+        torch.tensor(NodeCommand.encode_command("L")),
+        num_classes=NodeCommand.command_width,
+    )
+
     # M to (150, 150) in image space. L is a (0,0) relative move.
     coords = torch.zeros(2, NodeCommand.coordinate_width)
     coords[0, 0:2] = torch.tensor([150.0, 150.0])
@@ -40,9 +47,10 @@ def test_relative_coordinate_normalization():
     # --- Asserts for mask_space_to_image_space (round trip) ---
 
     # Denormalize back to image space
-    sequence_img_space_roundtrip = NodeCommand.mask_space_to_image_space(sequence_mask_space, box)
+    sequence_img_space_roundtrip = NodeCommand.mask_space_to_image_space(
+        sequence_mask_space, box
+    )
     _, coords_roundtrip = NodeCommand.split_tensor(sequence_img_space_roundtrip)
 
     # Check if the round-tripped coordinates match the original
     assert torch.allclose(coords_roundtrip, coords, atol=1e-6)
-

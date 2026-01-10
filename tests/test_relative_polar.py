@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from glyphogen.command_defs import RelativePolarCommand
+from glyphogen.representations.relativepolar import RelativePolarCommand
 from glyphogen.glyph import SVGGlyph, Glyph
 from glyphogen.nodeglyph import Node, NodeContour, NodeGlyph
 from glyphogen.hyperparameters import ALPHABET
@@ -488,54 +488,54 @@ def test_relative_polar_smooth_roundtrip():
     print("\n--- RelativePolarCommand smooth roundtrip test passed! ---")
 
 
-# def test_relative_polar_space_conversion_roundtrip():
-#     """
-#     Tests that the coordinate space conversion methods can roundtrip from
-#     image space to mask space and back.
-#     """
-#     # 1. Create a sequence of commands in image space
-#     commands = [
-#         RelativePolarCommand("SOS", []),
-#         RelativePolarCommand("M", [100, 200]),
-#         RelativePolarCommand("N_POLAR", [50, 0.2, 10, -0.3, 12, 0.4]),
-#         RelativePolarCommand("L_POLAR", [30, 0.1]),
-#         RelativePolarCommand("EOS", []),
-#     ]
+def test_relative_polar_space_conversion_roundtrip():
+    """
+    Tests that the coordinate space conversion methods can roundtrip from
+    image space to mask space and back.
+    """
+    # 1. Create a sequence of commands in image space
+    commands = [
+        RelativePolarCommand("SOS", []),
+        RelativePolarCommand("M", [100, 200]),
+        RelativePolarCommand("N_POLAR", [50, 0.2, 10, -0.3, 12, 0.4]),
+        RelativePolarCommand("L_POLAR", [30, 0.1]),
+        RelativePolarCommand("EOS", []),
+    ]
 
-#     # 2. Convert to a tensor
-#     command_tensors = []
-#     coord_tensors = []
-#     max_coords = RelativePolarCommand.coordinate_width
-#     for cmd in commands:
-#         command_tensors.append(RelativePolarCommand.encode_command_one_hot(cmd.command))
+    # 2. Convert to a tensor
+    command_tensors = []
+    coord_tensors = []
+    max_coords = RelativePolarCommand.coordinate_width
+    for cmd in commands:
+        command_tensors.append(RelativePolarCommand.encode_command_one_hot(cmd.command))
 
-#         # Pad coordinates to max_coords
-#         padded_coords = cmd.coordinates + [0] * (max_coords - len(cmd.coordinates))
-#         coord_tensors.append(torch.tensor(padded_coords, dtype=torch.float32))
+        # Pad coordinates to max_coords
+        padded_coords = cmd.coordinates + [0] * (max_coords - len(cmd.coordinates))
+        coord_tensors.append(torch.tensor(padded_coords, dtype=torch.float32))
 
-#     command_tensor = torch.stack(command_tensors)
-#     coord_tensor = torch.stack(coord_tensors)
-#     sequence_tensor = torch.cat([command_tensor, coord_tensor], dim=1)
+    command_tensor = torch.stack(command_tensors)
+    coord_tensor = torch.stack(coord_tensors)
+    sequence_tensor = torch.cat([command_tensor, coord_tensor], dim=1)
 
-#     # 3. Define a bounding box
-#     box = torch.tensor([50, 50, 250, 350], dtype=torch.float32)  # x1, y1, x2, y2
+    # 3. Define a bounding box
+    box = torch.tensor([50, 50, 250, 350], dtype=torch.float32)  # x1, y1, x2, y2
 
-#     # 4. Normalize to mask space
-#     normalized_sequence = RelativePolarCommand.image_space_to_mask_space(
-#         sequence_tensor, box
-#     )
+    # 4. Normalize to mask space
+    normalized_sequence = RelativePolarCommand.image_space_to_mask_space(
+        sequence_tensor, box
+    )
 
-#     # 5. Denormalize back to image space
-#     denormalized_sequence = RelativePolarCommand.mask_space_to_image_space(
-#         normalized_sequence, box
-#     )
+    # 5. Denormalize back to image space
+    denormalized_sequence = RelativePolarCommand.mask_space_to_image_space(
+        normalized_sequence, box
+    )
 
-#     # 6. Compare
-#     assert torch.allclose(
-#         sequence_tensor, denormalized_sequence, atol=1e-4
-#     ), "Roundtrip failed: tensors do not match"
+    # 6. Compare
+    assert torch.allclose(
+        sequence_tensor, denormalized_sequence, atol=1e-4
+    ), "Roundtrip failed: tensors do not match"
 
-#     print("\n--- RelativePolarCommand space conversion roundtrip test passed! ---")
+    print("\n--- RelativePolarCommand space conversion roundtrip test passed! ---")
 
 
 @pytest.mark.parametrize("char_to_test", list(ALPHABET))

@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 
 
 def test_unroll_relative_coordinates():
@@ -75,4 +75,3 @@ def test_unroll_relative_coordinates():
     # Test differentiability
     absolute_coords.sum().backward()
     assert coords.grad is not None
-

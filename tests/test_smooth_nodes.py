@@ -1,7 +1,7 @@
 from pathlib import Path
 import numpy as np
 import pytest
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 from glyphogen.glyph import Glyph
 from glyphogen.nodeglyph import NodeContour
 

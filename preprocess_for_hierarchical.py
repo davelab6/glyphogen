@@ -10,7 +10,7 @@ from pycocotools import mask as mask_util
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from glyphogen.command_defs import MAX_COORDINATE, NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 from glyphogen.dataset import font_files
 from glyphogen.glyph import Glyph
 from glyphogen.hyperparameters import ALPHABET, GEN_IMAGE_SIZE
@@ -135,7 +135,7 @@ def process_glyph_data(glyph_list, image_dir, start_img_id=0, start_ann_id=0):
                 w = x2 - x
                 h = y2 - y
                 rle = mask_util.encode(np.asfortranarray(seg_item["mask"]))
-                rle["counts"] = rle["counts"].decode("utf-8")
+                rle["counts"] = rle["counts"].decode("utf-8")  # type: ignore
 
                 annotations_json.append(
                     {

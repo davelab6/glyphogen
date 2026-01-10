@@ -1,13 +1,8 @@
 import pydiffvg
 import torch
 
-from .command_defs import NodeCommand
+from .representations.nodecommand import NodeCommand
 from .hyperparameters import GEN_IMAGE_SIZE
-
-command_keys = list(NodeCommand.grammar.keys())
-cmd_n_val = command_keys.index("N")
-cmd_sos_val = command_keys.index("SOS")
-cmd_eos_val = command_keys.index("EOS")
 
 
 @torch.compiler.disable(recursive=False)

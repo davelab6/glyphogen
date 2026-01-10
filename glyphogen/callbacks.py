@@ -6,7 +6,7 @@ from torchvision.utils import draw_bounding_boxes
 from glyphogen.losses import align_sequences
 from glyphogen.rasterizer import rasterize_batch
 
-from .command_defs import NodeCommand
+from .representations.nodecommand import NodeCommand
 from .nodeglyph import NodeGlyph
 from .svgglyph import SVGGlyph
 

@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from glyphogen.losses import losses
-from glyphogen.command_defs import NodeCommand
+from glyphogen.representations.nodecommand import NodeCommand
 from glyphogen.nodeglyph import NodeGlyph, NodeContour, Node
 from glyphogen.typing import ModelResults, CollatedGlyphData
 

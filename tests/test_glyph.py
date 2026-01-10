@@ -10,13 +10,12 @@ from glyphogen.nodeglyph import (
     NodeContour,
     Node,
 )
-from glyphogen.command_defs import (
+from glyphogen.representations.nodecommand import (
     NodeCommand,
 )
 from glyphogen.hyperparameters import GEN_IMAGE_SIZE
 import numpy as np
 import torch
-from glyphogen.command_defs import MAX_COORDINATE
 
 
 def test_glyph_extraction():
