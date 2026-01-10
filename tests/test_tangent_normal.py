@@ -3,8 +3,7 @@ import numpy as np
 import pytest
 import torch
 from glyphogen.command_defs import RelativePolarCommand
-from glyphogen.glyph import Glyph
-from glyphogen.hyperparameters import ALPHABET
+from glyphogen.glyph import SVGGlyph
 from glyphogen.nodeglyph import Node, NodeContour, NodeGlyph
 
 
@@ -139,6 +138,88 @@ def test_relative_polar_z_shape_roundtrip():
     assert np.allclose(abs_coords[5, 0:2], [0, 100]) # L_POLAR (100,0) -> (0,100)
 
     print("\n--- RelativePolarCommand Z-shape roundtrip test passed! ---")
+
+
+def test_relative_polar_real_z_glyph_roundtrip():
+    """
+    Tests the full round-trip process for a real Z-shaped glyph using
+    RelativePolarCommand.
+    """
+    svg_string = "M 34 0 L 584 0 L 584 96 L 192 96 L 572 638 L 572 690 L 49 690 L 49 594 L 414 594 L 34 52 L 34 0 Z"
+    svg_glyph = SVGGlyph.from_svg_string(svg_string)
+    nodeglyph_orig = svg_glyph.to_node_glyph()
+
+    # 2a. NodeGlyph -> List[List[RelativePolarCommand]]
+    contours_commands = nodeglyph_orig.command_lists(RelativePolarCommand)
+    assert len(contours_commands) == 1
+    commands = contours_commands[0]
+
+    # Manually trace expected commands and coordinates
+    # Initial f_hat = [1,0]
+    # M 34 0
+    assert commands[0].command == "SOS"
+    assert commands[1].command == "M"
+    assert np.allclose(commands[1].coordinates, [34, 0])
+
+    # Segment 1: (34,0) -> (584,0) (L 550 0)
+    # delta_pos = [550, 0], r = 550, phi = 0 (relative to f_hat=[1,0])
+    assert commands[2].command == "L_POLAR"
+    assert np.isclose(commands[2].coordinates[0], 550)
+    assert np.isclose(commands[2].coordinates[1], 0)
+
+    # Segment 2: (584,0) -> (584,96) (L 0 96)
+    # f_hat is still [1,0]
+    # delta_pos = [0, 96], r = 96, phi = pi/2 (relative to f_hat=[1,0])
+    assert commands[3].command == "L_LEFT_90"
+    assert np.isclose(commands[3].coordinates[0], 96)
+
+    # Segment 3: (584,96) -> (192,96) (L -392 0)
+    # f_hat is now [0,1]
+    # delta_pos = [-392, 0], r = 392, phi = pi/2 (relative to f_hat=[0,1])
+    assert commands[4].command == "L_LEFT_90"
+    assert np.isclose(commands[4].coordinates[0], 392)
+
+    # Segment 4: (192,96) -> (572,638) (L 380 542)
+    # f_hat is now [-1,0]
+    # delta_pos = [380, 542], r = sqrt(380^2 + 542^2) = 661.09
+    # r_hat = [0,-1]
+    # phi = arctan2(dot([380,542], [0,-1]), dot([380,542], [-1,0])) = arctan2(-542, -380) = -2.19 rad
+    assert commands[5].command == "L_POLAR"
+    assert np.isclose(commands[5].coordinates[0], np.sqrt(380**2 + 542**2))
+    assert np.isclose(commands[5].coordinates[1], np.arctan2(-542, -380))
+
+    # Segment 5: (572,638) -> (572,690) (L 0 52)
+    # f_hat is now direction of [380,542]
+    # delta_pos = [0, 52], r = 52
+    # r_hat = [-f_hat[1], f_hat[0]]
+    # phi = arctan2(dot([0,52], r_hat), dot([0,52], f_hat))
+    # This is getting too complex to manually calculate.
+    # Let's just check the roundtrip.
+
+    # 3a. NodeGlyph -> encoded sequence
+    encoded_sequences = nodeglyph_orig.encode(RelativePolarCommand)
+
+    # This can happen for blank glyphs like 'space'
+    if encoded_sequences is None:
+        assert svg_glyph.to_svg_string() == ""
+        return
+
+    # 3b. Encoded sequence -> NodeGlyph
+    nodeglyph_roundtrip = NodeGlyph.decode(encoded_sequences, RelativePolarCommand)
+
+    # 4. Compare original and round-tripped NodeGlyph objects
+    assert len(nodeglyph_orig.contours) == len(nodeglyph_roundtrip.contours)
+    for i, orig_contour in enumerate(nodeglyph_orig.contours):
+        reconstructed_contour = nodeglyph_roundtrip.contours[i]
+        assert len(orig_contour.nodes) == len(reconstructed_contour.nodes)
+        for j, orig_node in enumerate(orig_contour.nodes):
+            reconstructed_node = reconstructed_contour.nodes[j]
+            assert np.allclose(
+                orig_node.coordinates, reconstructed_node.coordinates, atol=1e-5
+            ), f"Node {j} in contour {i} of glyph has mismatched coordinates"
+            # For now, we don't have handles, so we don't check them.
+
+    print("\n--- RelativePolarCommand real Z-glyph roundtrip test passed! ---")
 
 
 # def test_relative_polar_curve_roundtrip():
