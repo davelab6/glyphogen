@@ -114,6 +114,8 @@ class NodeCommand(CommandRepresentation):
     def contour_from_commands(
         cls, commands: Sequence[CommandRepresentation], tolerant=True
     ) -> "NodeContour":
+        from glyphogen.nodeglyph import NodeContour
+
         contour = NodeContour([])
         commands = list(commands)
         # Pop SOS

@@ -1,8 +1,8 @@
 # Hyperparameters
 LATENT_DIM = 32
-D_MODEL = 512
+D_MODEL = 1024
 PROJ_SIZE = D_MODEL // 4
-RATE = 0.2  # Specifically, the dropout rate
+RATE = 0  # Specifically, the dropout rate
 EPOCHS = 2000
 BATCH_SIZE = 32
 RASTER_LOSS_WEIGHT = 15000.0
@@ -11,9 +11,12 @@ RASTER_LOSS_WEIGHT = 15000.0
 VECTOR_LOSS_WEIGHT_COMMAND = 1.0  # Keep this at 1, normalize others against it
 # VECTOR_RASTERIZATION_LOSS_WEIGHT = 0.01
 VECTOR_LOSS_WEIGHT_COORD = 3.0
-VECTOR_LOSS_WEIGHT_COORD_ABSOLUTE = 1.0
-SIGNED_AREA_WEIGHT = 0.5
-ALIGNMENT_LOSS_WEIGHT = 0.05
+VECTOR_LOSS_WEIGHT_COORD_ABSOLUTE = (
+    0.05  # Ratio of absolute coord loss to relative coord loss
+)
+
+SIGNED_AREA_WEIGHT = 0.0
+ALIGNMENT_LOSS_WEIGHT = 0.00
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = (
@@ -22,7 +25,7 @@ HUBER_DELTA = (
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
 LEARNING_RATE = 1e-4
-FINAL_LEARNING_RATE = 1e-8
+FINAL_LEARNING_RATE = 1e-4
 WARMUP_STEPS = 6000
 
 GEN_IMAGE_SIZE = (512, 512)

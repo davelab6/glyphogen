@@ -149,6 +149,7 @@ class VectorizationGenerator(nn.Module):
         normalized_masks_batch = collated_batch["normalized_masks"]
         target_sequences = collated_batch["target_sequences"]
         valid_boxes = collated_batch["contour_boxes"]
+        labels = collated_batch["labels"]
 
         # Send the normalized masks through the latent vector encoder
         z_batch = self.encode(normalized_masks_batch).unsqueeze(1)
@@ -156,12 +157,16 @@ class VectorizationGenerator(nn.Module):
         # and then decode a sequence for each contour
         if self.training:
             return self.teacher_forcing(
-                target_sequences, valid_boxes, z_batch, teacher_forcing_ratio
+                target_sequences, valid_boxes, labels, z_batch, teacher_forcing_ratio
             )
         else:  # Validation
             # Always use teacher forcing during validation for a stable loss metric and speed.
             return self.teacher_forcing(
-                target_sequences, valid_boxes, z_batch, teacher_forcing_ratio=1.0
+                target_sequences,
+                valid_boxes,
+                labels,
+                z_batch,
+                teacher_forcing_ratio=1.0,
             )
 
     def generate(self, raster_image: torch.Tensor) -> ModelResults:
@@ -185,18 +190,22 @@ class VectorizationGenerator(nn.Module):
         sorted_indices = torch.argsort(areas, descending=True)
         contour_boxes = segmenter_output["boxes"][sorted_indices]
         contour_masks = segmenter_output["masks"][sorted_indices].squeeze(1)
+        pred_labels = segmenter_output["labels"][sorted_indices]
 
         # Step 2: Normalize the predicted masks
         normalized_masks = []
         valid_boxes = []
+        pred_categories = []
         for i in range(len(contour_boxes)):
             box = contour_boxes[i].clamp(min=0, max=raster_image.shape[-1] - 1)
             mask = contour_masks[i]
+            label = pred_labels[i].item()
             x1, y1, x2, y2 = box.long()
             if x1 >= x2 or y1 >= y2:
                 continue
 
             valid_boxes.append(box)
+            pred_categories.append(label)
             cropped_mask = mask[y1:y2, x1:x2].unsqueeze(0).unsqueeze(0)
             normalized_mask = F.interpolate(
                 cropped_mask.to(torch.float32),
@@ -213,10 +222,10 @@ class VectorizationGenerator(nn.Module):
         normalized_masks_batch = torch.cat(normalized_masks, dim=0)
         z_batch = self.encode(normalized_masks_batch).unsqueeze(1)
 
-        return self.autoregression(z_batch, valid_boxes)
+        return self.autoregression(z_batch, valid_boxes, pred_categories)
 
     def teacher_forcing(
-        self, target_sequences, valid_boxes, z_batch, teacher_forcing_ratio
+        self, target_sequences, valid_boxes, labels, z_batch, teacher_forcing_ratio
     ) -> ModelResults:
         glyph_pred_commands = []
         glyph_pred_coords_norm = []
@@ -253,7 +262,6 @@ class VectorizationGenerator(nn.Module):
         pred_commands_batch, pred_coords_std_batch = self.decoder(
             decoder_input_std,  # Pass standardized input
             context=z_batch,
-            teacher_forcing_ratio=teacher_forcing_ratio,
         )
 
         # Unpad and handle results
@@ -307,10 +315,14 @@ class VectorizationGenerator(nn.Module):
             pred_coords_img_space=glyph_pred_coords_img_space,
             used_teacher_forcing=True,
             contour_boxes=valid_boxes,
+            pred_categories=labels,
         )
 
     def autoregression(
-        self, z_batch, valid_boxes: List[Float[torch.Tensor, "4"]]
+        self,
+        z_batch,
+        valid_boxes: List[Float[torch.Tensor, "4"]],
+        pred_categories: List[int],
     ) -> ModelResults:
         glyph_pred_commands = []
         glyph_pred_coords_norm = []
@@ -350,7 +362,7 @@ class VectorizationGenerator(nn.Module):
 
             active_z = z_batch[active_indices]
 
-            command_logits, coord_output_std, hidden_state = self.decoder._forward_step(
+            command_logits, coord_output_std, hidden_state = self.decoder._forward_step(  # type: ignore
                 current_input_std, active_z, hidden_state
             )
 
@@ -452,6 +464,7 @@ class VectorizationGenerator(nn.Module):
             pred_coords_img_space=glyph_pred_coords_img_space,
             used_teacher_forcing=False,
             contour_boxes=valid_boxes,
+            pred_categories=pred_categories,
         )
 
 

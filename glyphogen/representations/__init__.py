@@ -186,3 +186,6 @@ class CommandRepresentation(ABC):
             )
         self.command = command
         self.coordinates = coordinates
+
+    def debug_string(self) -> str:
+        return f"{self.command} {' '.join([f"{c:.2f}" for c in self.coordinates])}"

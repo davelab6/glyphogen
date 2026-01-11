@@ -1,4 +1,4 @@
-from typing import List, Sequence, TYPE_CHECKING
+from typing import Dict, List, Sequence, TYPE_CHECKING
 import numpy as np
 from glyphogen.nodeglyph import Node
 from glyphogen.representations import (
@@ -163,9 +163,10 @@ class RelativePolarCommand(CommandRepresentation):
 
         contour = NodeContour([])
         all_commands = list(commands)
-        if not all_commands or all_commands[0].command != "SOS":
-            return contour
-        if len(all_commands) < 2 or all_commands[1].command != "M":
+        # Pop SOS
+        if all_commands[0].command == "SOS":
+            all_commands.pop(0)
+        if len(all_commands) < 1:
             return contour
 
         command_tensors = []
@@ -187,18 +188,36 @@ class RelativePolarCommand(CommandRepresentation):
         nodes_list: List[Node] = []
 
         # Iterate from the first actual node command (after SOS and M)
-        for idx, command in enumerate(all_commands[2:], start=2):
+        for idx, command in enumerate(all_commands[1:], start=1):
             if command.command == "EOS":
                 break
 
             pos_abs = abs_coords_np[idx, 0:2]
-            in_abs = abs_coords_np[idx, 2:4]
-            out_abs = abs_coords_np[idx, 4:6]
+            in_abs = (
+                abs_coords_np[idx, 2:4].copy()
+                if command.command
+                in [
+                    "N_POLAR",
+                    "N_POLAR_IN",
+                    "N_SMOOTH",
+                ]
+                else None
+            )
+            out_abs = (
+                abs_coords_np[idx, 4:6].copy()
+                if command.command
+                in [
+                    "N_POLAR",
+                    "N_POLAR_OUT",
+                    "N_SMOOTH",
+                ]
+                else None
+            )
 
             new_node = Node(
                 coordinates=pos_abs.copy(),
-                in_handle=in_abs.copy(),
-                out_handle=out_abs.copy(),
+                in_handle=in_abs,
+                out_handle=out_abs,
                 contour=None,  # Will be set by NodeContour constructor
             )
             nodes_list.append(new_node)
@@ -219,9 +238,7 @@ class RelativePolarCommand(CommandRepresentation):
         for i in range(sequence.shape[0]):
             idx = int(torch.argmax(commands[i]).item())
             co = rel[i]
-            r_hat = torch.tensor(
-                [-f_hat[1], f_hat[0]], device=sequence.device, dtype=sequence.dtype
-            )
+            r_hat = torch.stack([-f_hat[1], f_hat[0]])
 
             pos_abs = current_pos
             in_abs = current_pos
@@ -233,13 +250,12 @@ class RelativePolarCommand(CommandRepresentation):
                 pos_abs = current_pos
             elif idx == cls.encode_command("L_POLAR"):
                 r, phi = co[0], co[1]
-                rotation_matrix = torch.tensor(
+                cos_phi, sin_phi = torch.cos(phi), torch.sin(phi)
+                rotation_matrix = torch.stack(
                     [
-                        [torch.cos(phi), -torch.sin(phi)],
-                        [torch.sin(phi), torch.cos(phi)],
-                    ],
-                    device=sequence.device,
-                    dtype=sequence.dtype,
+                        torch.stack([cos_phi, -sin_phi]),
+                        torch.stack([sin_phi, cos_phi]),
+                    ]
                 )
                 move_dir = torch.matmul(rotation_matrix, f_hat)
 
@@ -251,14 +267,9 @@ class RelativePolarCommand(CommandRepresentation):
                 )
             elif idx == cls.encode_command("L_LEFT_90"):
                 r = co[0]
-                phi_turn = torch.tensor(
-                    np.pi / 2, device=sequence.device, dtype=sequence.dtype
-                )
+                # 90 degree left turn: cos=0, sin=1
                 rotation_matrix = torch.tensor(
-                    [
-                        [torch.cos(phi_turn), -torch.sin(phi_turn)],
-                        [torch.sin(phi_turn), torch.cos(phi_turn)],
-                    ],
+                    [[0.0, -1.0], [1.0, 0.0]],
                     device=sequence.device,
                     dtype=sequence.dtype,
                 )
@@ -272,14 +283,9 @@ class RelativePolarCommand(CommandRepresentation):
                 )
             elif idx == cls.encode_command("L_RIGHT_90"):
                 r = co[0]
-                phi_turn = torch.tensor(
-                    -np.pi / 2, device=sequence.device, dtype=sequence.dtype
-                )
+                # 90 degree right turn: cos=0, sin=-1
                 rotation_matrix = torch.tensor(
-                    [
-                        [torch.cos(phi_turn), -torch.sin(phi_turn)],
-                        [torch.sin(phi_turn), torch.cos(phi_turn)],
-                    ],
+                    [[0.0, 1.0], [-1.0, 0.0]],
                     device=sequence.device,
                     dtype=sequence.dtype,
                 )
@@ -294,13 +300,12 @@ class RelativePolarCommand(CommandRepresentation):
 
             elif idx == cls.encode_command("N_POLAR"):
                 r, phi_node, in_len, in_phi, out_len, out_phi = co
-                rotation_matrix_node = torch.tensor(
+                cos_phi, sin_phi = torch.cos(phi_node), torch.sin(phi_node)
+                rotation_matrix_node = torch.stack(
                     [
-                        [torch.cos(phi_node), -torch.sin(phi_node)],
-                        [torch.sin(phi_node), torch.cos(phi_node)],
-                    ],
-                    device=sequence.device,
-                    dtype=sequence.dtype,
+                        torch.stack([cos_phi, -sin_phi]),
+                        torch.stack([sin_phi, cos_phi]),
+                    ]
                 )
 
                 # Position update
@@ -340,13 +345,12 @@ class RelativePolarCommand(CommandRepresentation):
 
             elif idx == cls.encode_command("N_POLAR_IN"):
                 r, phi_node, in_len, in_phi = co[0:4]
-                rotation_matrix_node = torch.tensor(
+                cos_phi, sin_phi = torch.cos(phi_node), torch.sin(phi_node)
+                rotation_matrix_node = torch.stack(
                     [
-                        [torch.cos(phi_node), -torch.sin(phi_node)],
-                        [torch.sin(phi_node), torch.cos(phi_node)],
-                    ],
-                    device=sequence.device,
-                    dtype=sequence.dtype,
+                        torch.stack([cos_phi, -sin_phi]),
+                        torch.stack([sin_phi, cos_phi]),
+                    ]
                 )
 
                 node_dir = torch.matmul(rotation_matrix_node, f_hat)
@@ -374,13 +378,12 @@ class RelativePolarCommand(CommandRepresentation):
 
             elif idx == cls.encode_command("N_POLAR_OUT"):
                 r, phi_node, out_len, out_phi = co[0:4]
-                rotation_matrix_node = torch.tensor(
+                cos_phi, sin_phi = torch.cos(phi_node), torch.sin(phi_node)
+                rotation_matrix_node = torch.stack(
                     [
-                        [torch.cos(phi_node), -torch.sin(phi_node)],
-                        [torch.sin(phi_node), torch.cos(phi_node)],
-                    ],
-                    device=sequence.device,
-                    dtype=sequence.dtype,
+                        torch.stack([cos_phi, -sin_phi]),
+                        torch.stack([sin_phi, cos_phi]),
+                    ]
                 )
 
                 node_dir = torch.matmul(rotation_matrix_node, f_hat)
@@ -414,13 +417,12 @@ class RelativePolarCommand(CommandRepresentation):
                 # co = [r, phi_node, out_phi, in_len, out_len]
                 r, phi_node, out_phi, in_len, out_len = co[0:5]
 
-                rotation_matrix_node = torch.tensor(
+                cos_phi, sin_phi = torch.cos(phi_node), torch.sin(phi_node)
+                rotation_matrix_node = torch.stack(
                     [
-                        [torch.cos(phi_node), -torch.sin(phi_node)],
-                        [torch.sin(phi_node), torch.cos(phi_node)],
-                    ],
-                    device=sequence.device,
-                    dtype=sequence.dtype,
+                        torch.stack([cos_phi, -sin_phi]),
+                        torch.stack([sin_phi, cos_phi]),
+                    ]
                 )
                 node_dir = torch.matmul(rotation_matrix_node, f_hat)
                 delta_pos = r * node_dir
@@ -651,3 +653,153 @@ class RelativePolarCommand(CommandRepresentation):
         raise NotImplementedError(
             "We don't need this; use SVGCommand to render for visualization."
         )
+
+    # Class-level storage for normalization statistics
+    _stats_initialized = False
+    _mean_tensor = None
+    _std_tensor = None
+
+    @classmethod
+    def initialize_stats(cls, stats_path: str = "data/coord_stats.pt"):
+        """Load stats and create broadcastable tensors for standardization."""
+        from collections import defaultdict
+
+        try:
+            stats = torch.load(stats_path)
+        except FileNotFoundError:
+            print(
+                f"Warning: {stats_path} not found. Using default (0,1) stats. "
+                "Run analyze_dataset_stats.py to generate it."
+            )
+            stats = defaultdict(lambda: {"mean": 0.0, "std": 1.0})
+
+        mean_tensor = torch.zeros(cls.command_width, cls.coordinate_width)
+        std_tensor = torch.ones(cls.command_width, cls.coordinate_width)
+        cmd_indices = {cmd: cls.encode_command(cmd) for cmd in cls.grammar.keys()}
+
+        for cmd_name, cmd_idx in cmd_indices.items():
+            if cmd_name == "M":
+                mean_tensor[cmd_idx, 0] = stats["M_abs_x"]["mean"]
+                std_tensor[cmd_idx, 0] = stats["M_abs_x"]["std"]
+                mean_tensor[cmd_idx, 1] = stats["M_abs_y"]["mean"]
+                std_tensor[cmd_idx, 1] = stats["M_abs_y"]["std"]
+            elif cmd_name in [
+                "L_POLAR",
+                "L_LEFT_90",
+                "L_RIGHT_90",
+                "N_POLAR",
+                "N_POLAR_IN",
+                "N_POLAR_OUT",
+                "N_SMOOTH",
+            ]:
+                # All these commands have an on-curve relative move (r, phi)
+                mean_tensor[cmd_idx, 0] = stats["ON_CURVE_R"]["mean"]
+                std_tensor[cmd_idx, 0] = stats["ON_CURVE_R"]["std"]
+                if cmd_name == "L_POLAR" or cmd_name.startswith("N_"):
+                    mean_tensor[cmd_idx, 1] = stats["ON_CURVE_PHI"]["mean"]
+                    std_tensor[cmd_idx, 1] = stats["ON_CURVE_PHI"]["std"]
+
+            if cmd_name == "N_POLAR":
+                mean_tensor[cmd_idx, 2] = stats["IN_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 2] = stats["IN_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 3] = stats["IN_HANDLE_PHI"]["mean"]
+                std_tensor[cmd_idx, 3] = stats["IN_HANDLE_PHI"]["std"]
+                mean_tensor[cmd_idx, 4] = stats["OUT_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 4] = stats["OUT_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 5] = stats["OUT_HANDLE_PHI"]["mean"]
+                std_tensor[cmd_idx, 5] = stats["OUT_HANDLE_PHI"]["std"]
+            elif cmd_name == "N_POLAR_IN":
+                mean_tensor[cmd_idx, 2] = stats["IN_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 2] = stats["IN_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 3] = stats["IN_HANDLE_PHI"]["mean"]
+                std_tensor[cmd_idx, 3] = stats["IN_HANDLE_PHI"]["std"]
+            elif cmd_name == "N_POLAR_OUT":
+                mean_tensor[cmd_idx, 2] = stats["OUT_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 2] = stats["OUT_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 3] = stats["OUT_HANDLE_PHI"]["mean"]
+                std_tensor[cmd_idx, 3] = stats["OUT_HANDLE_PHI"]["std"]
+            elif cmd_name == "N_SMOOTH":
+                mean_tensor[cmd_idx, 2] = stats["OUT_HANDLE_PHI"]["mean"]  # out_phi
+                std_tensor[cmd_idx, 2] = stats["OUT_HANDLE_PHI"]["std"]
+                mean_tensor[cmd_idx, 3] = stats["IN_HANDLE_LEN"]["mean"]  # len_in
+                std_tensor[cmd_idx, 3] = stats["IN_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 4] = stats["OUT_HANDLE_LEN"]["mean"]  # len_out
+                std_tensor[cmd_idx, 4] = stats["OUT_HANDLE_LEN"]["std"]
+
+        cls._mean_tensor = mean_tensor
+        cls._std_tensor = std_tensor
+        cls._stats_initialized = True
+
+    @classmethod
+    def get_initial_stats_dict(cls) -> Dict[str, List[float]]:
+        """Get an initial stats dictionary with empty lists for each relevant field."""
+        return {
+            "M_abs_x": [],
+            "M_abs_y": [],
+            "ON_CURVE_R": [],
+            "ON_CURVE_PHI": [],
+            "IN_HANDLE_LEN": [],
+            "IN_HANDLE_PHI": [],
+            "OUT_HANDLE_LEN": [],
+            "OUT_HANDLE_PHI": [],
+        }
+
+    @classmethod
+    def update_stats_dict_with_command(cls, STAT_GROUPS, command, coord_vec):
+        if command == "M":
+            STAT_GROUPS["M_abs_x"].append(coord_vec[0].item())
+            STAT_GROUPS["M_abs_y"].append(coord_vec[1].item())
+        elif command in [
+            "L_POLAR",
+            "L_LEFT_90",
+            "L_RIGHT_90",
+            "N_POLAR",
+            "N_POLAR_IN",
+            "N_POLAR_OUT",
+            "N_SMOOTH",
+        ]:
+            # All these commands have an on-curve relative move (r, phi)
+            STAT_GROUPS["ON_CURVE_R"].append(coord_vec[0].item())
+            if command == "L_POLAR" or command.startswith("N_"):
+                STAT_GROUPS["ON_CURVE_PHI"].append(coord_vec[1].item())
+
+            if command == "N_POLAR":
+                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[2].item())
+                STAT_GROUPS["IN_HANDLE_PHI"].append(coord_vec[3].item())
+                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[4].item())
+                STAT_GROUPS["OUT_HANDLE_PHI"].append(coord_vec[5].item())
+            elif command == "N_POLAR_IN":
+                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[2].item())
+                STAT_GROUPS["IN_HANDLE_PHI"].append(coord_vec[3].item())
+            elif command == "N_POLAR_OUT":
+                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[2].item())
+                STAT_GROUPS["OUT_HANDLE_PHI"].append(coord_vec[3].item())
+            elif command == "N_SMOOTH":
+                STAT_GROUPS["OUT_HANDLE_PHI"].append(coord_vec[2].item())  # out_phi
+                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[3].item())  # len_in
+                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[4].item())  # len_out
+
+    @classmethod
+    def get_stats_for_sequence(cls, command_indices: torch.Tensor):
+        """Get mean and std tensors for a sequence of command indices."""
+        if not cls._stats_initialized:
+            cls.initialize_stats()
+        assert cls._mean_tensor is not None and cls._std_tensor is not None
+        # Move stats to same device as input
+        mean_tensor = cls._mean_tensor.to(command_indices.device)
+        std_tensor = cls._std_tensor.to(command_indices.device)
+        means = mean_tensor[command_indices]
+        stds = std_tensor[command_indices]
+        return means, stds
+
+    @classmethod
+    def standardize(cls, coords: torch.Tensor, means: torch.Tensor, stds: torch.Tensor):
+        """Standardize coordinates using provided means and stds."""
+        return (coords - means) / stds
+
+    @classmethod
+    def de_standardize(
+        cls, coords_std: torch.Tensor, means: torch.Tensor, stds: torch.Tensor
+    ):
+        """De-standardize coordinates using provided means and stds."""
+        return coords_std * stds + means

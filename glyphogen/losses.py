@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, TYPE_CHECKING
 from glyphogen.nodeglyph import NodeGlyph
 from glyphogen.svgglyph import SVGGlyph
 import torch
@@ -20,6 +20,9 @@ from glyphogen.typing import (
     LossDictionary,
     ModelResults,
 )
+
+if TYPE_CHECKING:
+    from glyphogen.model import VectorizationGenerator
 
 
 @torch.compile
@@ -47,7 +50,7 @@ def losses(
     x_aligned_point_indices = collated_batch["x_aligned_point_indices"]
     y_aligned_point_indices = collated_batch["y_aligned_point_indices"]
 
-    num_contours_to_compare = len(pred_commands_list)
+    num_contours_to_compare = len(gt_target_sequences)
     total_command_loss = torch.tensor(0.0, device=device)
     total_coord_loss = torch.tensor(0.0, device=device)
     total_signed_area_loss = torch.tensor(0.0, device=device)
@@ -96,7 +99,7 @@ def losses(
         )
 
         # --- De-standardize and Unroll for other losses and metrics ---
-        pred_coords_norm = model.decoder.de_standardize(
+        pred_coords_norm = MODEL_REPRESENTATION.de_standardize(  # type: ignore
             pred_coords_std, pred_means, pred_stds
         )
         (
@@ -118,7 +121,7 @@ def losses(
         coord_loss_absolute = masked_absolute_coordinate_loss(
             device, abs_gt_command, abs_gt_coords, abs_pred_coords
         )
-        coord_loss = coord_loss_relative + (
+        coord_loss = (1 - VECTOR_LOSS_WEIGHT_COORD_ABSOLUTE) * coord_loss_relative + (
             VECTOR_LOSS_WEIGHT_COORD_ABSOLUTE * coord_loss_absolute
         )
 
@@ -253,7 +256,9 @@ def alignment_loss(
 def coordinate_width_mask(commands: torch.Tensor, coords: torch.Tensor):
     device = commands.device
     command_indices = torch.argmax(commands, dim=-1)
-    arg_counts_list = [MODEL_REPRESENTATION.grammar[cmd] for cmd in MODEL_REPRESENTATION.grammar]
+    arg_counts_list = [
+        MODEL_REPRESENTATION.grammar[cmd] for cmd in MODEL_REPRESENTATION.grammar
+    ]
     arg_counts = torch.tensor(arg_counts_list, device=device)
     num_relevant_coords = arg_counts[command_indices]
     coord_mask = torch.arange(
@@ -387,10 +392,33 @@ def dump_debug_sequences(
     pred_commands_and_coords_img_space = predictions_to_image_space(
         outputs, gt_contours
     )
-    pred_glyph = NodeGlyph.decode(pred_commands_and_coords_img_space, MODEL_REPRESENTATION)
+    pred_command_lists = NodeGlyph.decode(
+        pred_commands_and_coords_img_space,
+        MODEL_REPRESENTATION,
+        return_raw_command_lists=True,
+    )
+    pred_glyph = NodeGlyph.from_command_lists(pred_command_lists)
+    pred_debug_command_lists = [
+        " ".join([cmd.debug_string() for cmd in cmd_list])
+        for cmd_list in pred_command_lists
+    ]
+    pred_nodes = ", ".join(pred_debug_command_lists)
+
     debug_string = SVGGlyph.from_node_glyph(pred_glyph).to_svg_string()
-    gt_glyph = NodeGlyph.decode([x["sequence"].cpu() for x in gt_contours], MODEL_REPRESENTATION)
-    gt_nodes = gt_glyph.to_debug_string()
+    import IPython
+
+    IPython.embed()
+    gt_command_lists = NodeGlyph.decode(
+        [x["sequence"].cpu() for x in gt_contours],
+        MODEL_REPRESENTATION,
+        return_raw_command_lists=True,
+    )
+    gt_debug_command_lists = [
+        " ".join([cmd.debug_string() for cmd in cmd_list])
+        for cmd_list in gt_command_lists
+    ]
+    gt_glyph = NodeGlyph.from_command_lists(gt_command_lists)
+    gt_nodes = ", ".join(gt_debug_command_lists)
     gt_debug_string = SVGGlyph.from_node_glyph(gt_glyph).to_svg_string()
 
     writer.add_text(
@@ -398,10 +426,11 @@ def dump_debug_sequences(
         f"""
 GT: {gt_debug_string}
 Pred: {debug_string}
-GT Nodes: {gt_nodes}
-Pred Nodes: {pred_glyph.to_debug_string()}
+GT Commands: {gt_nodes}
+Pred Commands: {pred_nodes}
 Command loss: {loss_values['command_loss'].item():.4f}
 Coord loss: {loss_values['coord_loss'].item():.4f}
 """,
         global_step,
     )
+    writer.flush()

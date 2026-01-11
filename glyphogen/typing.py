@@ -17,6 +17,7 @@ class ModelResults(NamedTuple):
     contour_boxes: List[
         Float[torch.Tensor, "4"]
     ]  # Added field for contour bounding boxes
+    pred_categories: List[int]
 
     @classmethod
     def empty(cls) -> "ModelResults":
@@ -31,6 +32,7 @@ class ModelResults(NamedTuple):
             pred_stds=[],
             used_teacher_forcing=False,
             contour_boxes=[],
+            pred_categories=[],
         )
 
 
@@ -39,6 +41,7 @@ class SegmenterOutput(TypedDict):
 
     boxes: Float[torch.Tensor, "num_boxes 4"]
     masks: Float[torch.Tensor, "num_boxes height width"]
+    labels: UInt2[torch.Tensor, "num_boxes"]
 
 
 class LossDictionary(TypedDict):
@@ -85,3 +88,4 @@ class CollatedGlyphData(TypedDict):
     contour_image_idx: torch.Tensor  # Maps each contour to its image index in the batch
     x_aligned_point_indices: List[List[List[int]]]
     y_aligned_point_indices: List[List[List[int]]]
+    labels: Float[torch.Tensor, "total_contours"]

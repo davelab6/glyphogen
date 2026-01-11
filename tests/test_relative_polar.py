@@ -573,6 +573,9 @@ def test_real_glyph_roundtrip(char_to_test):
     # Now convert to NodeGlyph
     nodeglyph_orig = svg_glyph_orig.to_node_glyph()
 
+    nodeglyph_orig.normalize()
+    normalized_svg = SVGGlyph.from_node_glyph(nodeglyph_orig).to_svg_string()
+
     # 2a. NodeGlyph -> List[List[NodeCommand]]
     contours_commands = nodeglyph_orig.command_lists(RelativePolarCommand)
 

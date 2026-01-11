@@ -32,7 +32,7 @@ class AbsoluteSVGPathPen(SVGPathPen):
         if x == self._lastX and y == self._lastY:
             return
         # write the string
-        t = "L" + " " + pointToString(pt, self._ntos)
+        t = "L" + " " + pointToString(pt, self._ntos)  # type: ignore
         self._lastCommand = "L"
         self._commands.append(t)
         # store for future reference
@@ -157,10 +157,10 @@ class Glyph:
         return np.expand_dims(numpy_image, axis=-1).astype(np.float64)
 
     def vectorize(self, remove_overlaps: bool = True) -> SVGGlyph:
-        scale = 1000 / TTFont(self.font_file)["head"].unitsPerEm
-        blob = hb.Blob.from_file_path(self.font_file)
-        face = hb.Face(blob)
-        font = hb.Font(face)
+        scale = 1000 / TTFont(self.font_file)["head"].unitsPerEm  # type: ignore
+        blob = hb.Blob.from_file_path(self.font_file)  # type: ignore
+        face = hb.Face(blob)  # type: ignore
+        font = hb.Font(face)  # type: ignore
         svgpen = AbsoluteSVGPathPen({}, ntos=lambda f: str(int(f * scale)))
         pen = AddExtremaPen(svgpen)
         pen = Qu2CuPen(pen, max_err=5, all_cubic=True)

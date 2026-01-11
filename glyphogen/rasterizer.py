@@ -123,14 +123,14 @@ def rasterize_batch(
     return torch.stack(images)
 
 
-def rasterize_and_save(contour_sequences, filename="produced.png"):
-    """Render a single glyph and save it to a file.
+# def rasterize_and_save(contour_sequences, filename="produced.png"):
+#     """Render a single glyph and save it to a file.
 
-    Args:
-        contour_sequences: List of (cmd_tensor, coord_tensor) tuples for one glyph
-        filename: Output filename
-    """
-    # Wrap in a batch of size 1
-    images = rasterize_batch([contour_sequences])
-    # imwrite expects H, W, C
-    pydiffvg.imwrite(images[0].permute(1, 2, 0).cpu(), filename, gamma=1.0)
+#     Args:
+#         contour_sequences: List of (cmd_tensor, coord_tensor) tuples for one glyph
+#         filename: Output filename
+#     """
+#     # Wrap in a batch of size 1
+#     images = rasterize_batch([contour_sequences])
+#     # imwrite expects H, W, C
+#     pydiffvg.imwrite(images[0].permute(1, 2, 0).cpu(), filename, gamma=1.0)

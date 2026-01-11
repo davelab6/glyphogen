@@ -1,3 +1,4 @@
+from glyphogen.representations.svgcommand import SVGCommand
 from glyphogen.typing import CollatedGlyphData, ModelResults
 import numpy as np
 import torch
@@ -46,6 +47,7 @@ def log_vectorizer_outputs(
             outputs: ModelResults = model.generate(img)
 
             # --- Log Raster Visualization ---
+            predicted_raster = torch.ones_like(img[0:1])
             if outputs.pred_commands:
                 # The rasterizer expects a list of contours for a single glyph,
                 # and each contour is a tuple of (commands, coords)
@@ -56,13 +58,22 @@ def log_vectorizer_outputs(
                     )
                     for idx in range(len(outputs.pred_commands))
                 ]
+                # De-encode the glyph from our model representation
+                ng = NodeGlyph.decode(
+                    [
+                        torch.cat([cmds, coords], dim=-1).cpu()
+                        for cmds, coords in contour_sequences
+                    ],
+                    MODEL_REPRESENTATION,
+                )
+                # Now re-encode as SVG
+                svg_contours = ng.encode(SVGCommand)
 
-                predicted_raster = rasterize_batch(
-                    [contour_sequences], MODEL_REPRESENTATION, device=device
-                )[0]
-            else:
-                # If model predicts no contours, show a blank image
-                predicted_raster = torch.ones_like(img[0:1])
+                # Fix this at some point
+
+                # predicted_raster = rasterize_batch(
+                #     [svg_contours], SVGCommand, device=device
+                # )[0]
 
             # Create a 3-channel overlay for visualization
             # We want predicted in red, ground truth in green, blue channel empty

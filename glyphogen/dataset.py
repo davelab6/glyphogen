@@ -138,6 +138,7 @@ def collate_fn(batch):
     all_contour_image_idx = []
     all_x_alignments = []
     all_y_alignments = []
+    all_labels = []
 
     for i, target in enumerate(gt_targets):
         img_height, img_width = images[i].shape[1], images[i].shape[2]
@@ -146,6 +147,7 @@ def collate_fn(batch):
         for contour in gt_contours:
             box = contour["box"].clamp(min=0, max=max(img_height, img_width) - 1)
             mask = contour["mask"]
+            label = contour["label"]
             sequence = contour["sequence"]
 
             x1, y1, x2, y2 = box.long()
@@ -165,6 +167,7 @@ def collate_fn(batch):
             all_contour_boxes.append(box)
             all_target_sequences.append(sequence)
             all_contour_image_idx.append(i)
+            all_labels.append(label)
             all_x_alignments.append(contour["x_aligned_point_indices"])
             all_y_alignments.append(contour["y_aligned_point_indices"])
 
@@ -177,6 +180,7 @@ def collate_fn(batch):
         "gt_targets": list(gt_targets),
         "normalized_masks": torch.cat(all_normalized_masks, dim=0),
         "contour_boxes": torch.stack(all_contour_boxes, dim=0),
+        "labels": torch.stack(all_labels, dim=0),
         "target_sequences": all_target_sequences,
         "contour_image_idx": torch.tensor(all_contour_image_idx, dtype=torch.long),
         "x_aligned_point_indices": all_x_alignments,

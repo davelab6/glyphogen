@@ -1,3 +1,5 @@
+from glyphogen.representations.relativepolar import RelativePolarCommand
+
 from glyphogen.representations.nodecommand import NodeCommand
 
-MODEL_REPRESENTATION = NodeCommand
+MODEL_REPRESENTATION = RelativePolarCommand

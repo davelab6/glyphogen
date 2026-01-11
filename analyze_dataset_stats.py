@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
-from collections import defaultdict
+from collections import Counter, defaultdict
 import numpy as np
 from tqdm import tqdm
 
@@ -23,6 +23,7 @@ def analyze_dataset_stats():
     dataloader = DataLoader(
         train_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn, num_workers=4
     )
+    command_histogram = Counter()
 
     # Get command indices for faster lookup
     cmd_indices = {
@@ -52,9 +53,11 @@ def analyze_dataset_stats():
 
             for j in range(len(command_idxs)):
                 cmd_idx = int(command_idxs[j].item())
+                command = MODEL_REPRESENTATION.decode_command(cmd_idx)
+                command_histogram[command] += 1
                 coord_vec = coords[j]
                 MODEL_REPRESENTATION.update_stats_dict_with_command(
-                    STAT_GROUPS, MODEL_REPRESENTATION.decode_command(cmd_idx), coord_vec
+                    STAT_GROUPS, command, coord_vec
                 )
 
     # --- Calculate and save stats ---
@@ -77,7 +80,11 @@ def analyze_dataset_stats():
             f"{name}: \tMean: {mean.item():.4f}, \tStd: {std.item():.4f}, \tSamples: {len(values)}"
         )
 
-    output_file = "coord_stats.pt"
+    print("\n--- Command Histogram ---")
+    for cmd, count in sorted(command_histogram.items(), key=lambda x: x[0]):
+        print(f"{cmd}: {count}")
+
+    output_file = "data/coord_stats.pt"
     torch.save(final_stats, output_file)
     print(f"\nStatistics saved to {output_file}")
 

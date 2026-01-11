@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import random
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -31,9 +32,8 @@ class LSTMDecoder(nn.Module):
             self.proj_size + MODEL_REPRESENTATION.command_width,
             MODEL_REPRESENTATION.coordinate_width,
         )
-        nn.init.zeros_(self.output_coords.bias)
-        self.coord_output_scale = nn.Parameter(torch.tensor(0.1))
         self.tanh = nn.Tanh()
+        nn.init.zeros_(self.output_coords.bias)
 
     def _forward_step(self, input_token, context, hidden_state=None):
         """
@@ -69,86 +69,48 @@ class LSTMDecoder(nn.Module):
         command_logits = self.output_command(x)
         coord_head_input = torch.cat([x, command_logits], dim=-1)
         coord_output = self.output_coords(coord_head_input)
-        coord_output = self.tanh(coord_output * self.coord_output_scale)
+        # Remove this once standardization works
+        coord_output = self.tanh(coord_output)
 
         return command_logits, coord_output, hidden_state
 
-    def forward(self, x, context=None):
+    def forward(self, x_std, context=None, teacher_forcing_ratio=1.0):
         """
-        Teacher-forcing training. Unrolls the sequence step by step.
-        Args:
-            x (Tensor): Ground truth sequence, shape (batch_size, seq_len, feature_size)
-            context (Tensor): Context tensor, shape (batch_size, 1, latent_dim)
+        Training forward pass with scheduled sampling.
+        Operates entirely in STANDARDIZED coordinate space.
+        `x_std` is the ground truth sequence, already standardized.
+        The returned `coord_output_std` is also in STANDARDIZED space.
         """
-        batch_size, seq_len, _ = x.shape
-        all_command_logits = []
-        all_coord_outputs = []
+        batch_size, seq_len, _ = x_std.shape
+        current_input_std = x_std[:, 0:1, :]
         hidden_state = None
+        all_command_logits = []
+        all_coord_outputs_std = []
 
         for i in range(seq_len):
-            input_token = x[:, i : i + 1, :]
-            command_logits, coord_output, hidden_state = self._forward_step(
-                input_token, context, hidden_state
+            command_logits, coord_output_std, hidden_state = self._forward_step(
+                current_input_std, context, hidden_state
             )
             all_command_logits.append(command_logits)
-            all_coord_outputs.append(coord_output)
+            all_coord_outputs_std.append(coord_output_std)
+
+            use_teacher_forcing = random.random() < teacher_forcing_ratio
+            if i + 1 < seq_len:
+                if use_teacher_forcing:
+                    current_input_std = x_std[:, i + 1 : i + 2, :]
+                else:
+                    command_probs = F.softmax(command_logits.squeeze(1), dim=-1)
+                    predicted_command_idx = torch.argmax(
+                        command_probs, dim=1, keepdim=True
+                    )
+                    next_command_onehot = F.one_hot(
+                        predicted_command_idx,
+                        num_classes=MODEL_REPRESENTATION.command_width,
+                    ).float()
+                    current_input_std = torch.cat(
+                        [next_command_onehot, coord_output_std], dim=-1
+                    )
 
         command_output = torch.cat(all_command_logits, dim=1)
-        coord_output = torch.cat(all_coord_outputs, dim=1)
-        return command_output, coord_output
-
-    def generate_sequence(self, context, max_length=200, temperature=1.0):
-        """
-        Autoregressively generate a sequence of commands and coordinates.
-        """
-        device = context.device
-        batch_size = context.shape[0]
-        eos_index = MODEL_REPRESENTATION.encode_command("EOS")
-        sos_index = MODEL_REPRESENTATION.encode_command("SOS")
-
-        # Start with SOS token
-        current_token_full = torch.zeros(
-            batch_size,
-            1,
-            MODEL_REPRESENTATION.command_width + MODEL_REPRESENTATION.coordinate_width,
-            device=device,
-        )
-        current_token_full[:, 0, sos_index] = 1.0
-
-        # Don't include SOS in outputs - only include predictions
-        all_commands = []
-        all_coords = []
-
-        hidden_state = None
-
-        for _ in range(max_length):
-            command_logits, coord_pred, hidden_state = self._forward_step(
-                current_token_full, context, hidden_state
-            )
-
-            # Get command prediction from logits
-            command_probs = F.softmax(command_logits.squeeze(1) / temperature, dim=-1)
-            predicted_command_idx = torch.argmax(command_probs, dim=1, keepdim=True)
-
-            # Append predicted command and coords to lists
-            next_command_onehot = F.one_hot(
-                predicted_command_idx, num_classes=MODEL_REPRESENTATION.command_width
-            ).float()
-            all_commands.append(next_command_onehot)
-            all_coords.append(coord_pred)
-
-            # Check for EOS token
-            if (predicted_command_idx.squeeze(1) == eos_index).all():
-                break
-
-            # Prepare next input token
-            coord_padded = torch.zeros(
-                batch_size, 1, MODEL_REPRESENTATION.coordinate_width, device=device
-            )
-            coord_padded[:, :, : MODEL_REPRESENTATION.coordinate_width] = coord_pred
-            current_token_full = torch.cat([next_command_onehot, coord_padded], dim=-1)
-
-        command_output = torch.cat(all_commands, dim=1)
-        coord_output = torch.cat(all_coords, dim=1)
-
-        return command_output, coord_output
+        coord_output_std = torch.cat(all_coord_outputs_std, dim=1)
+        return command_output, coord_output_std

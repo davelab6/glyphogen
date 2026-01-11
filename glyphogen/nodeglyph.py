@@ -1,4 +1,5 @@
 from typing import TYPE_CHECKING, List, Optional, Sequence
+import torch
 
 if TYPE_CHECKING:
     from .representations import CommandRepresentation
@@ -141,10 +142,18 @@ class NodeContour:
 
     def __init__(self, nodes: List["Node"]):
         self.nodes = nodes
+        # Adopt all the nodes in this list
+        for node in self.nodes:
+            node._contour = self
 
     def normalize(self) -> None:
         if not self.nodes:
             return
+
+        # Ensure the contour is clockwise
+        if not self.is_clockwise():
+            self.reverse_direction()
+
         index_of_bottom_left = min(
             range(len(self.nodes)),
             key=lambda i: (self.nodes[i].coordinates[1], self.nodes[i].coordinates[0]),
@@ -160,6 +169,35 @@ class NodeContour:
             n1 == n2 for n1, n2 in zip(self.nodes, other.nodes)
         )
         return result
+
+    def is_clockwise(self) -> bool:
+        """
+        Determines if the contour is clockwise using the shoelace formula.
+        A positive area indicates counter-clockwise, negative indicates clockwise.
+        """
+        if not self.nodes or len(self.nodes) < 3:
+            return True  # Or handle as an error/special case
+
+        area = 0.0
+        for i in range(len(self.nodes)):
+            p1 = self.nodes[i].coordinates
+            p2 = self.nodes[(i + 1) % len(self.nodes)].coordinates
+            area += (p1[0] * p2[1]) - (p2[0] * p1[1])
+        return area < 0
+
+    def reverse_direction(self) -> None:
+        """
+        Reverses the order of nodes in the contour and swaps in/out handles.
+        """
+        if not self.nodes:
+            return
+
+        # Reverse the order of nodes
+        self.nodes.reverse()
+
+        # Swap in_handle and out_handle for each node
+        for node in self.nodes:
+            node.in_handle, node.out_handle = node.out_handle, node.in_handle
 
     def commands(
         self, vocabulary: type["CommandRepresentation"]
@@ -253,7 +291,10 @@ class NodeGlyph:
 
     @classmethod
     def decode(
-        cls, contour_sequences: List, representation_cls: type["CommandRepresentation"]
+        cls,
+        contour_sequences: List,
+        representation_cls: type["CommandRepresentation"],
+        return_raw_command_lists: bool = False,
     ):
         """
         Decodes a list of ndarray sequences into a list of NodeCommand sequences.
@@ -263,14 +304,16 @@ class NodeGlyph:
         glyph_commands: List[List["CommandRepresentation"]] = []
 
         for ndarrays in contour_sequences:
+            # This must work for tensors and ndarrays, so we don't use
+            # split_tensor here
             command_ndarray = ndarrays[:, : representation_cls.command_width]
             coord_ndarray = ndarrays[:, representation_cls.command_width :]
 
             contour_commands = []
             for i in range(command_ndarray.shape[0]):
-                command_index = np.argmax(command_ndarray[i]).item()
-                command_str = command_keys[command_index]
-
+                command_str = representation_cls.decode_command_one_hot(
+                    command_ndarray[i]
+                )
                 num_coords = representation_cls.grammar[command_str]
                 coords_slice = coord_ndarray[i, :num_coords]
                 contour_commands.append(
@@ -280,6 +323,9 @@ class NodeGlyph:
                     break
 
             glyph_commands.append(contour_commands)
+
+        if return_raw_command_lists:
+            return glyph_commands
 
         return cls.from_command_lists(glyph_commands)
 
