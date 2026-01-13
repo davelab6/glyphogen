@@ -128,95 +128,57 @@ class NodeCommand(CommandRepresentation):
             raise ValueError(
                 f"NodeCommand second command must be 'M' command, found {commands[0].command}."
             )
-        cur_coord = np.array(commands[0].coordinates[0:2], dtype=np.float32)
-        if cur_coord.shape != (2,) and tolerant:
-            cur_coord = np.pad(cur_coord, (0, 2 - cur_coord.shape[0]), "constant")
-        command = "M"
-        for step in commands[1:]:
-            assert cur_coord.shape == (
-                2,
-            ), f"Messed up after command {command}, shape is {cur_coord.shape}"
+        # Use .unroll_relative_coordinates to get absolute positions
+        # Make them into tensors
+        command_tensors = []
+        coord_tensors = []
+        max_coords = cls.coordinate_width
+        for cmd in commands:
+            command_tensors.append(cls.encode_command_one_hot(cmd.command))
+            padded = cmd.coordinates + [0] * (max_coords - len(cmd.coordinates))
+            coord_tensors.append(torch.tensor(padded, dtype=torch.float32))
+        sequence_tensor = torch.cat(
+            [torch.stack(command_tensors), torch.stack(coord_tensors)], dim=1
+        )
+        _, abs_coords = cls.split_tensor(
+            cls.unroll_relative_coordinates(sequence_tensor)
+        )
+        abs_coords_np = abs_coords.cpu().numpy()
+        # Reconstruct contour
+        # Iterate from the first actual node command (after SOS and M)
+        for idx, step in enumerate(commands[1:]):
             command = step.command
-            coords = step.coordinates
-            if command == "L":
-                cur_coord += np.array(coords[0:2], dtype=np.float32)
-                contour.push(
-                    coordinates=cur_coord.copy(), in_handle=None, out_handle=None
-                )
-            elif command == "LH":
-                cur_coord[0] += coords[0]
-                contour.push(
-                    coordinates=cur_coord.copy(), in_handle=None, out_handle=None
-                )
-            elif command == "LV":
-                cur_coord[1] += coords[0]
+            absolute_coords = abs_coords_np[idx + 1]  # +1 to skip M
+            cur_coord = absolute_coords[0:2]
+            if command in ["L", "LH", "LV"]:
                 contour.push(
                     coordinates=cur_coord.copy(), in_handle=None, out_handle=None
                 )
             elif command == "N":
-                cur_coord += np.array(coords[0:2], dtype=np.float32)
-                in_handle = cur_coord + np.array(coords[2:4], dtype=np.float32)
-                out_handle = cur_coord + np.array(coords[4:6], dtype=np.float32)
+                in_handle = np.array(absolute_coords[2:4], dtype=np.float32)
+                out_handle = np.array(absolute_coords[4:6], dtype=np.float32)
                 contour.push(
                     coordinates=cur_coord.copy(),
                     in_handle=in_handle,
                     out_handle=out_handle,
                 )
-            elif command == "NS":
-                cur_coord += np.array(coords[0:2], dtype=np.float32)
-                angle = coords[2]
-                length_in = coords[3]
-                length_out = coords[4]
-                # Reconstruct handles based on the convention:
-                # angle is for the outgoing handle, incoming is opposite.
-                out_handle = np.array(
-                    [
-                        cur_coord[0] + length_out * np.cos(angle),
-                        cur_coord[1] + length_out * np.sin(angle),
-                    ],
-                    dtype=np.float32,
-                )
-                in_handle = np.array(
-                    [
-                        cur_coord[0] - length_in * np.cos(angle),
-                        cur_coord[1] - length_in * np.sin(angle),
-                    ],
-                    dtype=np.float32,
-                )
-                contour.push(
-                    coordinates=cur_coord.copy(),
-                    in_handle=in_handle,
-                    out_handle=out_handle,
-                )
-            elif command == "NH":
-                cur_coord += np.array(coords[0:2], dtype=np.float32)
-                in_handle = cur_coord + np.array([coords[2], 0.0], dtype=np.float32)
-                out_handle = cur_coord + np.array([coords[3], 0.0], dtype=np.float32)
-                contour.push(
-                    coordinates=cur_coord.copy(),
-                    in_handle=in_handle,
-                    out_handle=out_handle,
-                )
-            elif command == "NV":
-                cur_coord += np.array(coords[0:2], dtype=np.float32)
-                in_handle = cur_coord + np.array([0.0, coords[2]], dtype=np.float32)
-                out_handle = cur_coord + np.array([0.0, coords[3]], dtype=np.float32)
+            elif command == "NH" or command == "NV" or command == "NS":
+                in_handle = np.array(absolute_coords[2:4], dtype=np.float32)
+                out_handle = np.array(absolute_coords[4:6], dtype=np.float32)
                 contour.push(
                     coordinates=cur_coord.copy(),
                     in_handle=in_handle,
                     out_handle=out_handle,
                 )
             elif command == "NCI":
-                cur_coord += np.array(coords[0:2], dtype=np.float32)
-                in_handle = cur_coord + np.array(coords[2:4], dtype=np.float32)
+                in_handle = np.array(absolute_coords[2:4], dtype=np.float32)
                 contour.push(
                     coordinates=cur_coord.copy(),
                     in_handle=in_handle,
                     out_handle=None,
                 )
             elif command == "NCO":
-                cur_coord += np.array(coords[0:2], dtype=np.float32)
-                out_handle = cur_coord + np.array(coords[2:4], dtype=np.float32)
+                out_handle = np.array(absolute_coords[4:6], dtype=np.float32)
                 contour.push(
                     coordinates=cur_coord.copy(),
                     in_handle=None,

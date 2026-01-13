@@ -29,6 +29,23 @@ if not font_files:
     raise ValueError(f"No suitable font files found in {BASE_DIR}")
 
 
+def filter_out(targets):
+    # CURVE_COMMANDS = [
+    #     x for x in MODEL_REPRESENTATION.grammar.keys() if x.startswith("N")
+    # ]
+    # filtered_indices = [
+    #     MODEL_REPRESENTATION.encode_command_one_hot(cmd) for cmd in CURVE_COMMANDS
+    # ]
+    # # Sum and convert to bool
+    # curve_mask = torch.sum(torch.stack(filtered_indices, dim=0), dim=0).bool()
+    # for sequences in targets:
+    #     (commands, _) = MODEL_REPRESENTATION.split_tensor(sequences["sequence"])
+    #     for command in commands:
+    #         if torch.any(command.bool() & curve_mask):
+    #             return False
+    return True
+
+
 class GlyphCocoDataset(CocoDetection):
     """
     A map-style dataset for the hierarchical vectorization model.
@@ -85,31 +102,9 @@ class GlyphCocoDataset(CocoDetection):
             # Note: transforms will need to handle a list of targets
             img, targets = self.transforms(img, targets)
 
-        # XXX This is NOT representation-independent
-
-        # # Debugging: filter out any sequences with curves
-        # n_index = MODEL_REPRESENTATION.encode_command_one_hot("N")
-        # ns_index = MODEL_REPRESENTATION.encode_command_one_hot("NS")
-        # nh_index = MODEL_REPRESENTATION.encode_command_one_hot("NH")
-        # nv_index = MODEL_REPRESENTATION.encode_command_one_hot("NV")
-        # nci_index = MODEL_REPRESENTATION.encode_command_one_hot("NCI")
-        # nco_index = MODEL_REPRESENTATION.encode_command_one_hot("NCO")
-        # # Debugging: filter out any sequences with lines
-        # l_index = MODEL_REPRESENTATION.encode_command_one_hot("L")
-        # lh_index = MODEL_REPRESENTATION.encode_command_one_hot("LH")
-        # lv_index = MODEL_REPRESENTATION.encode_command_one_hot("LV")
-        # curve_mask = (
-        #     n_index + ns_index + nh_index + nv_index + nci_index + nco_index
-        # ).bool()
-        # line_mask = (l_index + lh_index + lv_index + nci_index + nco_index).bool()
-
-        # for sequences in targets:
-        #     (commands, _) = MODEL_REPRESENTATION.split_tensor(sequences["sequence"])
-        #     for command in commands:
-        #         if torch.any(command.bool() & curve_mask):
-        #             return None
-
-        # The training loop's `step` function expects a tuple of (image, target_dict)
+        keep = filter_out(targets)
+        if not keep:
+            return None
         return img, {"image_id": img_id, "gt_contours": targets}
 
 

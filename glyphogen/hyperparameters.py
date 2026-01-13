@@ -10,13 +10,13 @@ RASTER_LOSS_WEIGHT = 15000.0
 # Vectorization sub-model weights
 VECTOR_LOSS_WEIGHT_COMMAND = 1.0  # Keep this at 1, normalize others against it
 # VECTOR_RASTERIZATION_LOSS_WEIGHT = 0.01
-VECTOR_LOSS_WEIGHT_COORD = 3.0
+VECTOR_LOSS_WEIGHT_COORD = 1.0
 VECTOR_LOSS_WEIGHT_COORD_ABSOLUTE = (
-    0.05  # Ratio of absolute coord loss to relative coord loss
+    0.5  # Ratio of absolute coord loss to relative coord loss
 )
 
-SIGNED_AREA_WEIGHT = 0.0
-ALIGNMENT_LOSS_WEIGHT = 0.00
+SIGNED_AREA_WEIGHT = 0.001
+ALIGNMENT_LOSS_WEIGHT = 0.001
 
 EOS_SOFTMAX_TEMPERATURE = 0.1
 HUBER_DELTA = (
@@ -24,8 +24,8 @@ HUBER_DELTA = (
 )  # Loss computations are in normalized -1 to 1 space across a 512 pixel image.
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
-LEARNING_RATE = 1e-4
-FINAL_LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-6
+FINAL_LEARNING_RATE = 1e-6
 WARMUP_STEPS = 6000
 
 GEN_IMAGE_SIZE = (512, 512)

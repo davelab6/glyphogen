@@ -36,15 +36,17 @@ def test_relative_polar_line_roundtrip():
 
     # Node 0: (0,0) - relative to itself
     assert commands[2].command == "L_POLAR"
-    r_node0, phi_node0 = commands[2].coordinates
+    r_node0, cos_phi0, sin_phi0 = commands[2].coordinates
     assert np.isclose(r_node0, 0.0)
-    assert np.isclose(phi_node0, 0.0)
+    assert np.isclose(cos_phi0, 1.0)
+    assert np.isclose(sin_phi0, 0.0)
 
     # Node 1: (100,0) - straight line from (0,0)
     assert commands[3].command == "L_POLAR"
-    r_node1, phi_node1 = commands[3].coordinates
+    r_node1, cos_phi1, sin_phi1 = commands[3].coordinates
     assert np.isclose(r_node1, 100)
-    assert np.isclose(phi_node1, 0.0)
+    assert np.isclose(cos_phi1, 1.0)
+    assert np.isclose(sin_phi1, 0.0)
 
     # Node 2: (100,100) - left turn from (100,0)
     assert commands[4].command == "L_LEFT_90"
@@ -100,27 +102,33 @@ def test_relative_polar_z_shape_roundtrip():
 
     # Node 0: (0,100) - relative to itself
     assert commands[2].command == "L_POLAR"
-    r, phi = commands[2].coordinates
+    r, cos_phi, sin_phi = commands[2].coordinates
     assert np.isclose(r, 0.0)
-    assert np.isclose(phi, 0.0)
+    assert np.isclose(cos_phi, 1.0)
+    assert np.isclose(sin_phi, 0.0)
 
     # Node 1: (100,100) - straight right from (0,100)
     assert commands[3].command == "L_POLAR"
-    r, phi = commands[3].coordinates
+    r, cos_phi, sin_phi = commands[3].coordinates
     assert np.isclose(r, 100)
-    assert np.isclose(phi, 0.0)
+    assert np.isclose(cos_phi, 1.0)
+    assert np.isclose(sin_phi, 0.0)
 
     # Node 2: (0,0) - diagonal down-left from (100,100)
     assert commands[4].command == "L_POLAR"
-    r, phi = commands[4].coordinates
+    r, cos_phi, sin_phi = commands[4].coordinates
+    phi = -np.pi * 3 / 4
     assert np.isclose(r, np.sqrt(100**2 + 100**2))
-    assert np.isclose(phi, -np.pi * 3 / 4)  # Relative to f_hat=[1,0]
+    assert np.isclose(cos_phi, np.cos(phi))
+    assert np.isclose(sin_phi, np.sin(phi))
 
     # Node 3: (100,0) - straight right from (0,0)
     assert commands[5].command == "L_POLAR"
-    r, phi = commands[5].coordinates
+    r, cos_phi, sin_phi = commands[5].coordinates
+    phi = np.pi * 3 / 4
     assert np.isclose(r, 100)
-    assert np.isclose(phi, np.pi * 3 / 4)  # Relative to f_hat=[-1/sqrt(2), -1/sqrt(2)]
+    assert np.isclose(cos_phi, np.cos(phi))
+    assert np.isclose(sin_phi, np.sin(phi))
 
     assert commands[6].command == "EOS"
 
@@ -189,13 +197,15 @@ def test_relative_polar_real_z_glyph_roundtrip():
     # Node 0: (34,0) - relative to itself
     assert commands[2].command == "L_POLAR"
     assert np.isclose(commands[2].coordinates[0], 0)
-    assert np.isclose(commands[2].coordinates[1], 0)
+    assert np.isclose(commands[2].coordinates[1], 1.0)
+    assert np.isclose(commands[2].coordinates[2], 0.0)
 
     # Node 1: (584,0) (L 550 0) - across the baseline
     # delta_pos = [550, 0], r = 550, phi = 0 (relative to f_hat=[1,0])
     assert commands[3].command == "L_POLAR"
     assert np.isclose(commands[3].coordinates[0], 550)
-    assert np.isclose(commands[3].coordinates[1], 0)
+    assert np.isclose(commands[3].coordinates[1], 1.0)
+    assert np.isclose(commands[3].coordinates[2], 0.0)
 
     # Node 2: (584,96) (L 0 96) - turn left and head upwards
     # f_hat is still [1,0]
@@ -215,8 +225,10 @@ def test_relative_polar_real_z_glyph_roundtrip():
     # r_hat = [0,-1]
     # phi = arctan2(dot([380,542], [0,-1]), dot([380,542], [-1,0])) = arctan2(-542, -380) = -2.19 rad
     assert commands[6].command == "L_POLAR"
+    phi = np.arctan2(-542, -380)
     assert np.isclose(commands[6].coordinates[0], np.sqrt(380**2 + 542**2))
-    assert np.isclose(commands[6].coordinates[1], np.arctan2(-542, -380))
+    assert np.isclose(commands[6].coordinates[1], np.cos(phi))
+    assert np.isclose(commands[6].coordinates[2], np.sin(phi))
 
     # Node 5: (572,690) (L 0 52) - straight up to the top
     assert commands[7].command == "L_POLAR"
@@ -235,6 +247,31 @@ def test_relative_polar_real_z_glyph_roundtrip():
 
     # We're done, automatically close the path
     assert commands[12].command == "EOS"
+
+    # 3a. NodeGlyph -> encoded sequence
+    encoded_sequences = nodeglyph_orig.encode(RelativePolarCommand)
+
+    # This can happen for blank glyphs like 'space'
+    if encoded_sequences is None:
+        assert svg_glyph.to_svg_string() == ""
+        return
+
+    # 3b. Encoded sequence -> NodeGlyph
+    nodeglyph_roundtrip = NodeGlyph.decode(encoded_sequences, RelativePolarCommand)
+
+    # 4. Compare original and round-tripped NodeGlyph objects
+    assert len(nodeglyph_orig.contours) == len(nodeglyph_roundtrip.contours)
+    for i, orig_contour in enumerate(nodeglyph_orig.contours):
+        reconstructed_contour = nodeglyph_roundtrip.contours[i]
+        assert len(orig_contour.nodes) == len(reconstructed_contour.nodes)
+        for j, orig_node in enumerate(orig_contour.nodes):
+            reconstructed_node = reconstructed_contour.nodes[j]
+            assert np.allclose(
+                orig_node.coordinates, reconstructed_node.coordinates, atol=1e-5
+            ), f"Node {j} in contour {i} of glyph has mismatched coordinates"
+            # For now, we don't have handles, so we don't check them.
+
+    print("\n--- RelativePolarCommand real Z-glyph roundtrip test passed! ---")
 
     # 3a. NodeGlyph -> encoded sequence
     encoded_sequences = nodeglyph_orig.encode(RelativePolarCommand)
@@ -300,23 +337,35 @@ def test_relative_polar_curve_roundtrip():
 
     # Node 0: (0,100) - relative to itself
     assert commands[2].command == "N_POLAR_OUT"
-    r_node0, phi_node0, out_len0, out_phi0 = commands[2].coordinates
+    (
+        r_node0,
+        cos_phi0,
+        sin_phi0,
+        out_len0,
+        out_cos_phi0,
+        out_sin_phi0,
+    ) = commands[2].coordinates
     assert np.isclose(r_node0, 0.0)
-    assert np.isclose(phi_node0, 0.0)
+    assert np.isclose(cos_phi0, 1.0)
+    assert np.isclose(sin_phi0, 0.0)
     assert np.isclose(out_len0, h_len)
-    assert np.isclose(out_phi0, 0.0)
+    assert np.isclose(out_cos_phi0, 1.0)
+    assert np.isclose(out_sin_phi0, 0.0)
 
     # Node 1: (0,0) - curve from (0,100)
     assert commands[3].command == "N_POLAR_IN"
-    r_node1, phi_node1, in_len1, in_phi1 = commands[3].coordinates
+    r_node1, cos_phi1, sin_phi1, in_len1, in_cos_phi1, in_sin_phi1 = commands[
+        3
+    ].coordinates
+    phi1 = -np.pi / 2
     assert np.isclose(r_node1, 100)  # distance from (0,100) to (0,0)
-    assert np.isclose(phi_node1, -np.pi / 2)  # angle from f_hat=[1,0] to [0,-1]
+    assert np.isclose(cos_phi1, np.cos(phi1))
+    assert np.isclose(sin_phi1, np.sin(phi1))
     assert np.isclose(in_len1, h_len)
-    assert np.isclose(in_phi1, 0.0)
-    assert np.isclose(in_len1, h_len)
-    assert np.isclose(
-        in_phi1, 0.0
-    )  # in_handle is [h_len, 0] - [0,0] = [h_len, 0], which is along f_hat
+    # in_handle is [h_len, 0] - [0,0] = [h_len, 0]. f_hat is [0,-1]. r_hat is [1,0].
+    # in_phi is arctan2(dot([h,0],[1,0]), dot([h,0],[0,-1])) = arctan2(h,0) = 0
+    assert np.isclose(in_cos_phi1, 1.0)
+    assert np.isclose(in_sin_phi1, 0.0)
 
     assert commands[4].command == "EOS"
 
@@ -444,28 +493,53 @@ def test_relative_polar_smooth_roundtrip():
 
     # Node 0: (0,0) - relative to itself
     assert commands[2].command == "N_POLAR_OUT"
-    r_node0, phi_node0, out_len, out_angle = commands[2].coordinates
+    (
+        r_node0,
+        cos_phi0,
+        sin_phi0,
+        out_len0,
+        out_cos_phi0,
+        out_sin_phi0,
+    ) = commands[2].coordinates
     assert np.isclose(r_node0, 0.0)
-    assert np.isclose(phi_node0, 0.0)
-    assert np.isclose(out_len, 50)
-    assert np.isclose(out_angle, 0.0)
+    assert np.isclose(cos_phi0, 1.0)
+    assert np.isclose(sin_phi0, 0.0)
+    assert np.isclose(out_len0, 50)
+    assert np.isclose(out_cos_phi0, 1.0)
+    assert np.isclose(out_sin_phi0, 0.0)
 
     # Node 1: (100,0) - smooth curve from (0,0)
     assert commands[3].command == "N_SMOOTH"
-    r_node1, phi_node1, out_phi1, in_len1, out_len1 = commands[3].coordinates
+    (
+        r_node1,
+        cos_phi1,
+        sin_phi1,
+        out_cos_phi1,
+        out_sin_phi1,
+        in_len1,
+        out_len1,
+    ) = commands[3].coordinates
     assert np.isclose(r_node1, 100)
-    assert np.isclose(phi_node1, 0.0)
-    assert np.isclose(out_phi1, 0.0)
+    assert np.isclose(cos_phi1, 1.0)
+    assert np.isclose(sin_phi1, 0.0)
+    assert np.isclose(out_cos_phi1, 1.0)
+    assert np.isclose(out_sin_phi1, 0.0)
     assert np.isclose(in_len1, 50)
     assert np.isclose(out_len1, 50)
 
     # Node 2: (200,0) - smooth curve from (100,0)
     assert commands[4].command == "N_POLAR_IN"
-    r_node2, phi_node2, in_len2, in_angle2 = commands[4].coordinates
+    r_node2, cos_phi2, sin_phi2, in_len2, in_cos_phi2, in_sin_phi2 = commands[
+        4
+    ].coordinates
     assert np.isclose(r_node2, 100)
-    assert np.isclose(phi_node2, 0.0)
+    assert np.isclose(cos_phi2, 1.0)
+    assert np.isclose(sin_phi2, 0.0)
     assert np.isclose(in_len2, 50)
-    assert np.isclose(in_angle2, math.pi)
+    # f_hat is [1,0], r_hat is [0,1]. in_handle is [150,0]-[200,0] = [-50,0]
+    # in_phi = arctan2(dot([-50,0],[0,1]), dot([-50,0],[1,0])) = arctan2(0,-50) = pi
+    assert np.isclose(in_cos_phi2, -1.0)
+    assert np.isclose(in_sin_phi2, 0.0)
 
     assert commands[5].command == "EOS"
 
@@ -503,8 +577,21 @@ def test_relative_polar_space_conversion_roundtrip():
     commands = [
         RelativePolarCommand("SOS", []),
         RelativePolarCommand("M", [100, 200]),
-        RelativePolarCommand("N_POLAR", [50, 0.2, 10, -0.3, 12, 0.4]),
-        RelativePolarCommand("L_POLAR", [30, 0.1]),
+        RelativePolarCommand(
+            "N_POLAR",
+            [
+                50,
+                np.cos(0.2),
+                np.sin(0.2),
+                10,
+                np.cos(-0.3),
+                np.sin(-0.3),
+                12,
+                np.cos(0.4),
+                np.sin(0.4),
+            ],
+        ),
+        RelativePolarCommand("L_POLAR", [30, np.cos(0.1), np.sin(0.1)]),
         RelativePolarCommand("EOS", []),
     ]
 
@@ -628,3 +715,28 @@ def test_real_glyph_roundtrip(char_to_test):
             assert np.allclose(
                 orig_node.coordinates, reconstructed_node.coordinates, atol=1e-5
             ), f"Node {j} in contour {i} of glyph '{char_to_test}' has mismatched coordinates after encode/decode"
+
+
+def test_check_left90s():
+    svg_string = "M 51 101 L 51 121 L 51 156 Z"
+    svg_glyph = SVGGlyph.from_svg_string(svg_string)
+    nodeglyph_orig = svg_glyph.to_node_glyph()
+    contours_commands = nodeglyph_orig.command_lists(RelativePolarCommand)
+    commands = [x.command for x in contours_commands[0]]
+    assert commands == ["SOS", "M", "L_POLAR", "L_LEFT_90", "L_POLAR", "EOS"]
+
+    # Forward, left turn, left turn, curve
+    svg_string = "M 275 245 L 275 101 L 201 101 L 201 228 C 201 263 196 281 275 245"
+    svg_glyph = SVGGlyph.from_svg_string(svg_string)
+    nodeglyph_orig = svg_glyph.to_node_glyph()
+    contours_commands = nodeglyph_orig.command_lists(RelativePolarCommand)
+    commands = [x.command for x in contours_commands[0]]
+    assert commands == [
+        "SOS",
+        "M",
+        "N_POLAR_IN",  # Because of the curve at the end
+        "L_RIGHT_90",
+        "L_RIGHT_90",
+        "N_POLAR_OUT",
+        "EOS",
+    ]

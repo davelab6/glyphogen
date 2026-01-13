@@ -21,13 +21,13 @@ class RelativePolarCommand(CommandRepresentation):
     grammar = {
         "SOS": 0,
         "M": 2,
-        "L_POLAR": 2,  # r, phi
+        "L_POLAR": 3,  # r, cos_phi, sin_phi
         "L_LEFT_90": 1,  # distance
         "L_RIGHT_90": 1,  # distance
-        "N_POLAR": 6,  # r, phi, in_len, in_phi, out_len, out_phi
-        "N_POLAR_IN": 4,  # r, phi, in_len, in_phi (out handle absent)
-        "N_POLAR_OUT": 4,  # r, phi, out_len, out_phi (in handle absent)
-        "N_SMOOTH": 5,  # r, phi, out_phi, len_in, len_out
+        "N_POLAR": 9,  # r, cos, sin, in_len, in_cos, in_sin, out_len, out_cos, out_sin
+        "N_POLAR_IN": 6,  # r, cos, sin, in_len, in_cos, in_sin
+        "N_POLAR_OUT": 6,  # r, cos, sin, out_len, out_cos, out_sin
+        "N_SMOOTH": 7,  # r, cos, sin, out_cos, out_sin, in_len, out_len
         "EOS": 0,
     }
     coordinate_representation = RelativePolarCoordinateRepresentation
@@ -70,13 +70,12 @@ class RelativePolarCommand(CommandRepresentation):
             r = float(np.linalg.norm(delta_pos))
             r_hat = np.array([-f_hat[1], f_hat[0]], dtype=np.float32)
 
-            # Calculate phi for the node position relative to current f_hat
+            # Calculate polar components for the node position
             if r > 1e-6:
-                phi = float(
-                    np.arctan2(np.dot(delta_pos, r_hat), np.dot(delta_pos, f_hat))
-                )
+                cos_phi = float(np.dot(delta_pos, f_hat) / r)
+                sin_phi = float(np.dot(delta_pos, r_hat) / r)
             else:
-                phi = 0.0
+                cos_phi, sin_phi = 1.0, 0.0
 
             # Calculate handle polar coordinates relative to current f_hat
             out_handle_world_rel = (
@@ -91,50 +90,73 @@ class RelativePolarCommand(CommandRepresentation):
             )
 
             out_len = float(np.linalg.norm(out_handle_world_rel))
-            out_phi = (
-                float(
-                    np.arctan2(
-                        np.dot(out_handle_world_rel, r_hat),
-                        np.dot(out_handle_world_rel, f_hat),
-                    )
-                )
-                if out_len > 1e-6
-                else 0.0
-            )
+            if out_len > 1e-6:
+                out_cos_phi = float(np.dot(out_handle_world_rel, f_hat) / out_len)
+                out_sin_phi = float(np.dot(out_handle_world_rel, r_hat) / out_len)
+            else:
+                out_cos_phi, out_sin_phi = 1.0, 0.0
 
             in_len = float(np.linalg.norm(in_handle_world_rel))
-            in_phi = (
-                float(
-                    np.arctan2(
-                        np.dot(in_handle_world_rel, r_hat),
-                        np.dot(in_handle_world_rel, f_hat),
-                    )
-                )
-                if in_len > 1e-6
-                else 0.0
-            )
+            if in_len > 1e-6:
+                in_cos_phi = float(np.dot(in_handle_world_rel, f_hat) / in_len)
+                in_sin_phi = float(np.dot(in_handle_world_rel, r_hat) / in_len)
+            else:
+                in_cos_phi, in_sin_phi = 1.0, 0.0
 
             # Determine command type
             if p_curr.is_line:  # No handles
-                if np.isclose(phi, np.pi / 2):
+                if np.isclose(cos_phi, 0.0) and np.isclose(sin_phi, 1.0):
                     commands.append(cls("L_LEFT_90", [r]))
-                elif np.isclose(phi, -np.pi / 2):
+                elif np.isclose(cos_phi, 0.0) and np.isclose(sin_phi, -1.0):
                     commands.append(cls("L_RIGHT_90", [r]))
                 else:
-                    commands.append(cls("L_POLAR", [r, phi]))
+                    commands.append(cls("L_POLAR", [r, cos_phi, sin_phi]))
             else:  # Has at least one handle
                 has_in = p_curr.in_handle is not None and in_len > 1e-6
                 has_out = p_curr.out_handle is not None and out_len > 1e-6
 
                 if has_in and not has_out:
-                    commands.append(cls("N_POLAR_IN", [r, phi, in_len, in_phi]))
+                    commands.append(
+                        cls("N_POLAR_IN", [r, cos_phi, sin_phi, in_len, in_cos_phi, in_sin_phi])
+                    )
                 elif has_out and not has_in:
-                    commands.append(cls("N_POLAR_OUT", [r, phi, out_len, out_phi]))
+                    commands.append(
+                        cls(
+                            "N_POLAR_OUT",
+                            [r, cos_phi, sin_phi, out_len, out_cos_phi, out_sin_phi],
+                        )
+                    )
                 elif p_curr.is_smooth:
-                    commands.append(cls("N_SMOOTH", [r, phi, out_phi, in_len, out_len]))
+                    commands.append(
+                        cls(
+                            "N_SMOOTH",
+                            [
+                                r,
+                                cos_phi,
+                                sin_phi,
+                                out_cos_phi,
+                                out_sin_phi,
+                                in_len,
+                                out_len,
+                            ],
+                        )
+                    )
                 else:
                     commands.append(
-                        cls("N_POLAR", [r, phi, in_len, in_phi, out_len, out_phi])
+                        cls(
+                            "N_POLAR",
+                            [
+                                r,
+                                cos_phi,
+                                sin_phi,
+                                in_len,
+                                in_cos_phi,
+                                in_sin_phi,
+                                out_len,
+                                out_cos_phi,
+                                out_sin_phi,
+                            ],
+                        )
                     )
 
             # Update f_hat for the next segment based on the outgoing handle of the current node
@@ -249,15 +271,8 @@ class RelativePolarCommand(CommandRepresentation):
                 current_pos = co[0:2]
                 pos_abs = current_pos
             elif idx == cls.encode_command("L_POLAR"):
-                r, phi = co[0], co[1]
-                cos_phi, sin_phi = torch.cos(phi), torch.sin(phi)
-                rotation_matrix = torch.stack(
-                    [
-                        torch.stack([cos_phi, -sin_phi]),
-                        torch.stack([sin_phi, cos_phi]),
-                    ]
-                )
-                move_dir = torch.matmul(rotation_matrix, f_hat)
+                r, cos_phi, sin_phi = co[0], co[1], co[2]
+                move_dir = f_hat * cos_phi + r_hat * sin_phi
 
                 delta = r * move_dir
                 current_pos = current_pos + delta
@@ -268,12 +283,7 @@ class RelativePolarCommand(CommandRepresentation):
             elif idx == cls.encode_command("L_LEFT_90"):
                 r = co[0]
                 # 90 degree left turn: cos=0, sin=1
-                rotation_matrix = torch.tensor(
-                    [[0.0, -1.0], [1.0, 0.0]],
-                    device=sequence.device,
-                    dtype=sequence.dtype,
-                )
-                move_dir = torch.matmul(rotation_matrix, f_hat)
+                move_dir = f_hat * 0.0 + r_hat * 1.0
 
                 delta = r * move_dir
                 current_pos = current_pos + delta
@@ -284,12 +294,7 @@ class RelativePolarCommand(CommandRepresentation):
             elif idx == cls.encode_command("L_RIGHT_90"):
                 r = co[0]
                 # 90 degree right turn: cos=0, sin=-1
-                rotation_matrix = torch.tensor(
-                    [[0.0, 1.0], [-1.0, 0.0]],
-                    device=sequence.device,
-                    dtype=sequence.dtype,
-                )
-                move_dir = torch.matmul(rotation_matrix, f_hat)
+                move_dir = f_hat * 0.0 + r_hat * -1.0
 
                 delta = r * move_dir
                 current_pos = current_pos + delta
@@ -299,32 +304,32 @@ class RelativePolarCommand(CommandRepresentation):
                 )
 
             elif idx == cls.encode_command("N_POLAR"):
-                r, phi_node, in_len, in_phi, out_len, out_phi = co
-                cos_phi, sin_phi = torch.cos(phi_node), torch.sin(phi_node)
-                rotation_matrix_node = torch.stack(
-                    [
-                        torch.stack([cos_phi, -sin_phi]),
-                        torch.stack([sin_phi, cos_phi]),
-                    ]
-                )
+                (
+                    r,
+                    cos_phi,
+                    sin_phi,
+                    in_len,
+                    in_cos_phi,
+                    in_sin_phi,
+                    out_len,
+                    out_cos_phi,
+                    out_sin_phi,
+                ) = co[0:9]
 
                 # Position update
-                node_dir = torch.matmul(rotation_matrix_node, f_hat)
+                node_dir = f_hat * cos_phi + r_hat * sin_phi
                 delta_pos = r * node_dir
                 current_pos = current_pos + delta_pos
                 pos_abs = current_pos
 
                 # Handle directions expressed in the local (f_hat, r_hat) frame
-                def _dir_from_polar(
-                    length: torch.Tensor, angle: torch.Tensor
+                def _dir_from_cos_sin(
+                    length: torch.Tensor, cos_angle: torch.Tensor, sin_angle: torch.Tensor
                 ) -> torch.Tensor:
-                    # cos component along f_hat, sin component along r_hat
-                    return length * (
-                        torch.cos(angle) * f_hat + torch.sin(angle) * r_hat
-                    )
+                    return length * (cos_angle * f_hat + sin_angle * r_hat)
 
-                out_handle_vec = _dir_from_polar(out_len, out_phi)
-                in_handle_vec = _dir_from_polar(in_len, in_phi)
+                out_handle_vec = _dir_from_cos_sin(out_len, out_cos_phi, out_sin_phi)
+                in_handle_vec = _dir_from_cos_sin(in_len, in_cos_phi, in_sin_phi)
 
                 out_handle_abs = pos_abs + out_handle_vec
                 in_handle_abs = pos_abs + in_handle_vec
@@ -344,28 +349,19 @@ class RelativePolarCommand(CommandRepresentation):
                         next_f_hat = f_hat
 
             elif idx == cls.encode_command("N_POLAR_IN"):
-                r, phi_node, in_len, in_phi = co[0:4]
-                cos_phi, sin_phi = torch.cos(phi_node), torch.sin(phi_node)
-                rotation_matrix_node = torch.stack(
-                    [
-                        torch.stack([cos_phi, -sin_phi]),
-                        torch.stack([sin_phi, cos_phi]),
-                    ]
-                )
+                r, cos_phi, sin_phi, in_len, in_cos_phi, in_sin_phi = co[0:6]
 
-                node_dir = torch.matmul(rotation_matrix_node, f_hat)
+                node_dir = f_hat * cos_phi + r_hat * sin_phi
                 delta_pos = r * node_dir
                 current_pos = current_pos + delta_pos
                 pos_abs = current_pos
 
-                def _dir_from_polar_in(
-                    length: torch.Tensor, angle: torch.Tensor
+                def _dir_from_cos_sin_in(
+                    length: torch.Tensor, cos_angle: torch.Tensor, sin_angle: torch.Tensor
                 ) -> torch.Tensor:
-                    return length * (
-                        torch.cos(angle) * f_hat + torch.sin(angle) * r_hat
-                    )
+                    return length * (cos_angle * f_hat + sin_angle * r_hat)
 
-                in_handle_vec = _dir_from_polar_in(in_len, in_phi)
+                in_handle_vec = _dir_from_cos_sin_in(in_len, in_cos_phi, in_sin_phi)
                 in_handle_abs = pos_abs + in_handle_vec
                 in_abs = in_handle_abs
                 out_abs = pos_abs
@@ -377,28 +373,21 @@ class RelativePolarCommand(CommandRepresentation):
                     next_f_hat = f_hat
 
             elif idx == cls.encode_command("N_POLAR_OUT"):
-                r, phi_node, out_len, out_phi = co[0:4]
-                cos_phi, sin_phi = torch.cos(phi_node), torch.sin(phi_node)
-                rotation_matrix_node = torch.stack(
-                    [
-                        torch.stack([cos_phi, -sin_phi]),
-                        torch.stack([sin_phi, cos_phi]),
-                    ]
-                )
+                r, cos_phi, sin_phi, out_len, out_cos_phi, out_sin_phi = co[0:6]
 
-                node_dir = torch.matmul(rotation_matrix_node, f_hat)
+                node_dir = f_hat * cos_phi + r_hat * sin_phi
                 delta_pos = r * node_dir
                 current_pos = current_pos + delta_pos
                 pos_abs = current_pos
 
-                def _dir_from_polar_out(
-                    length: torch.Tensor, angle: torch.Tensor
+                def _dir_from_cos_sin_out(
+                    length: torch.Tensor, cos_angle: torch.Tensor, sin_angle: torch.Tensor
                 ) -> torch.Tensor:
-                    return length * (
-                        torch.cos(angle) * f_hat + torch.sin(angle) * r_hat
-                    )
+                    return length * (cos_angle * f_hat + sin_angle * r_hat)
 
-                out_handle_vec = _dir_from_polar_out(out_len, out_phi)
+                out_handle_vec = _dir_from_cos_sin_out(
+                    out_len, out_cos_phi, out_sin_phi
+                )
                 out_handle_abs = pos_abs + out_handle_vec
                 in_abs = pos_abs
                 out_abs = out_handle_abs
@@ -414,23 +403,16 @@ class RelativePolarCommand(CommandRepresentation):
                         next_f_hat = f_hat
 
             elif idx == cls.encode_command("N_SMOOTH"):
-                # co = [r, phi_node, out_phi, in_len, out_len]
-                r, phi_node, out_phi, in_len, out_len = co[0:5]
+                # co = [r, cos, sin, out_cos, out_sin, in_len, out_len]
+                r, cos_phi, sin_phi, out_cos_phi, out_sin_phi, in_len, out_len = co[0:7]
 
-                cos_phi, sin_phi = torch.cos(phi_node), torch.sin(phi_node)
-                rotation_matrix_node = torch.stack(
-                    [
-                        torch.stack([cos_phi, -sin_phi]),
-                        torch.stack([sin_phi, cos_phi]),
-                    ]
-                )
-                node_dir = torch.matmul(rotation_matrix_node, f_hat)
+                node_dir = f_hat * cos_phi + r_hat * sin_phi
                 delta_pos = r * node_dir
                 current_pos = current_pos + delta_pos
                 pos_abs = current_pos
 
                 # Smooth: out handle angle is given; in handle is pi opposite
-                out_dir = torch.cos(out_phi) * f_hat + torch.sin(out_phi) * r_hat
+                out_dir = out_cos_phi * f_hat + out_sin_phi * r_hat
                 in_dir = -out_dir
 
                 out_handle_abs = pos_abs + out_len * out_dir
@@ -469,7 +451,7 @@ class RelativePolarCommand(CommandRepresentation):
         For polar coordinates:
         - M: absolute (x, y) -> translate and scale to [-1, 1]
         - Distances (r, lengths): scale by 2/avg_dim
-        - Angles (phi): divide by π to get [-1, 1]
+        - Angles (cos_phi, sin_phi): already in [-1, 1], no scaling needed.
         """
         commands, coords_img = cls.split_tensor(sequence)
         x1, y1, x2, y2 = box
@@ -500,11 +482,9 @@ class RelativePolarCommand(CommandRepresentation):
         m_norm[:, 1] = ((coords_img[:, 1] - y1) / height) * 2 - 1
         coords_norm = torch.where(m_mask.unsqueeze(1), m_norm, coords_norm)
 
-        # --- L_POLAR: [r, phi] ---
-        # r -> scale, phi -> /π
+        # --- L_POLAR: [r, cos_phi, sin_phi] ---
         l_polar_norm = coords_img.clone()
         l_polar_norm[:, 0] = coords_img[:, 0] * (2.0 / avg_dim)  # r
-        l_polar_norm[:, 1] = coords_img[:, 1] / np.pi  # phi
         coords_norm = torch.where(l_polar_mask.unsqueeze(1), l_polar_norm, coords_norm)
 
         # --- L_LEFT_90, L_RIGHT_90: [r] ---
@@ -513,43 +493,34 @@ class RelativePolarCommand(CommandRepresentation):
         coords_norm = torch.where(l_left_mask.unsqueeze(1), l_turn_norm, coords_norm)
         coords_norm = torch.where(l_right_mask.unsqueeze(1), l_turn_norm, coords_norm)
 
-        # --- N_POLAR: [r, phi, in_len, in_phi, out_len, out_phi] ---
+        # --- N_POLAR: [r, cos, sin, in_len, in_cos, in_sin, out_len, out_cos, out_sin] ---
         n_polar_norm = coords_img.clone()
         n_polar_norm[:, 0] = coords_img[:, 0] * (2.0 / avg_dim)  # r
-        n_polar_norm[:, 1] = coords_img[:, 1] / np.pi  # phi
-        n_polar_norm[:, 2] = coords_img[:, 2] * (2.0 / avg_dim)  # in_len
-        n_polar_norm[:, 3] = coords_img[:, 3] / np.pi  # in_phi
-        n_polar_norm[:, 4] = coords_img[:, 4] * (2.0 / avg_dim)  # out_len
-        n_polar_norm[:, 5] = coords_img[:, 5] / np.pi  # out_phi
+        n_polar_norm[:, 3] = coords_img[:, 3] * (2.0 / avg_dim)  # in_len
+        n_polar_norm[:, 6] = coords_img[:, 6] * (2.0 / avg_dim)  # out_len
         coords_norm = torch.where(n_polar_mask.unsqueeze(1), n_polar_norm, coords_norm)
 
-        # --- N_POLAR_IN: [r, phi, in_len, in_phi] ---
+        # --- N_POLAR_IN: [r, cos, sin, in_len, in_cos, in_sin] ---
         n_polar_in_norm = coords_img.clone()
         n_polar_in_norm[:, 0] = coords_img[:, 0] * (2.0 / avg_dim)  # r
-        n_polar_in_norm[:, 1] = coords_img[:, 1] / np.pi  # phi
-        n_polar_in_norm[:, 2] = coords_img[:, 2] * (2.0 / avg_dim)  # in_len
-        n_polar_in_norm[:, 3] = coords_img[:, 3] / np.pi  # in_phi
+        n_polar_in_norm[:, 3] = coords_img[:, 3] * (2.0 / avg_dim)  # in_len
         coords_norm = torch.where(
             n_polar_in_mask.unsqueeze(1), n_polar_in_norm, coords_norm
         )
 
-        # --- N_POLAR_OUT: [r, phi, out_len, out_phi] ---
+        # --- N_POLAR_OUT: [r, cos, sin, out_len, out_cos, out_sin] ---
         n_polar_out_norm = coords_img.clone()
         n_polar_out_norm[:, 0] = coords_img[:, 0] * (2.0 / avg_dim)  # r
-        n_polar_out_norm[:, 1] = coords_img[:, 1] / np.pi  # phi
-        n_polar_out_norm[:, 2] = coords_img[:, 2] * (2.0 / avg_dim)  # out_len
-        n_polar_out_norm[:, 3] = coords_img[:, 3] / np.pi  # out_phi
+        n_polar_out_norm[:, 3] = coords_img[:, 3] * (2.0 / avg_dim)  # out_len
         coords_norm = torch.where(
             n_polar_out_mask.unsqueeze(1), n_polar_out_norm, coords_norm
         )
 
-        # --- N_SMOOTH: [r, phi, out_phi, len_in, len_out] ---
+        # --- N_SMOOTH: [r, cos, sin, out_cos, out_sin, in_len, out_len] ---
         n_smooth_norm = coords_img.clone()
         n_smooth_norm[:, 0] = coords_img[:, 0] * (2.0 / avg_dim)  # r
-        n_smooth_norm[:, 1] = coords_img[:, 1] / np.pi  # phi
-        n_smooth_norm[:, 2] = coords_img[:, 2] / np.pi  # out_phi
-        n_smooth_norm[:, 3] = coords_img[:, 3] * (2.0 / avg_dim)  # len_in
-        n_smooth_norm[:, 4] = coords_img[:, 4] * (2.0 / avg_dim)  # len_out
+        n_smooth_norm[:, 5] = coords_img[:, 5] * (2.0 / avg_dim)  # len_in
+        n_smooth_norm[:, 6] = coords_img[:, 6] * (2.0 / avg_dim)  # len_out
         coords_norm = torch.where(
             n_smooth_mask.unsqueeze(1), n_smooth_norm, coords_norm
         )
@@ -564,7 +535,7 @@ class RelativePolarCommand(CommandRepresentation):
         For polar coordinates:
         - M: scale and translate from [-1, 1] to absolute (x, y)
         - Distances (r, lengths): multiply by avg_dim/2
-        - Angles (phi): multiply by π
+        - Angles (cos_phi, sin_phi): no scaling needed.
         """
         commands, coords_norm = cls.split_tensor(sequence)
         x1, y1, x2, y2 = box
@@ -593,10 +564,9 @@ class RelativePolarCommand(CommandRepresentation):
         m_denorm[:, 1] = (coords_norm[:, 1] + 1) / 2 * height + y1
         coords_img = torch.where(m_mask.unsqueeze(1), m_denorm, coords_img)
 
-        # --- L_POLAR: [r, phi] ---
+        # --- L_POLAR: [r, cos_phi, sin_phi] ---
         l_polar_denorm = coords_norm.clone()
         l_polar_denorm[:, 0] = coords_norm[:, 0] * (avg_dim / 2.0)  # r
-        l_polar_denorm[:, 1] = coords_norm[:, 1] * np.pi  # phi
         coords_img = torch.where(l_polar_mask.unsqueeze(1), l_polar_denorm, coords_img)
 
         # --- L_LEFT_90, L_RIGHT_90: [r] ---
@@ -605,43 +575,34 @@ class RelativePolarCommand(CommandRepresentation):
         coords_img = torch.where(l_left_mask.unsqueeze(1), l_turn_denorm, coords_img)
         coords_img = torch.where(l_right_mask.unsqueeze(1), l_turn_denorm, coords_img)
 
-        # --- N_POLAR: [r, phi, in_len, in_phi, out_len, out_phi] ---
+        # --- N_POLAR: [r, cos, sin, in_len, in_cos, in_sin, out_len, out_cos, out_sin] ---
         n_polar_denorm = coords_norm.clone()
         n_polar_denorm[:, 0] = coords_norm[:, 0] * (avg_dim / 2.0)  # r
-        n_polar_denorm[:, 1] = coords_norm[:, 1] * np.pi  # phi
-        n_polar_denorm[:, 2] = coords_norm[:, 2] * (avg_dim / 2.0)  # in_len
-        n_polar_denorm[:, 3] = coords_norm[:, 3] * np.pi  # in_phi
-        n_polar_denorm[:, 4] = coords_norm[:, 4] * (avg_dim / 2.0)  # out_len
-        n_polar_denorm[:, 5] = coords_norm[:, 5] * np.pi  # out_phi
+        n_polar_denorm[:, 3] = coords_norm[:, 3] * (avg_dim / 2.0)  # in_len
+        n_polar_denorm[:, 6] = coords_norm[:, 6] * (avg_dim / 2.0)  # out_len
         coords_img = torch.where(n_polar_mask.unsqueeze(1), n_polar_denorm, coords_img)
 
-        # --- N_POLAR_IN: [r, phi, in_len, in_phi] ---
+        # --- N_POLAR_IN: [r, cos, sin, in_len, in_cos, in_sin] ---
         n_polar_in_denorm = coords_norm.clone()
         n_polar_in_denorm[:, 0] = coords_norm[:, 0] * (avg_dim / 2.0)  # r
-        n_polar_in_denorm[:, 1] = coords_norm[:, 1] * np.pi  # phi
-        n_polar_in_denorm[:, 2] = coords_norm[:, 2] * (avg_dim / 2.0)  # in_len
-        n_polar_in_denorm[:, 3] = coords_norm[:, 3] * np.pi  # in_phi
+        n_polar_in_denorm[:, 3] = coords_norm[:, 3] * (avg_dim / 2.0)  # in_len
         coords_img = torch.where(
             n_polar_in_mask.unsqueeze(1), n_polar_in_denorm, coords_img
         )
 
-        # --- N_POLAR_OUT: [r, phi, out_len, out_phi] ---
+        # --- N_POLAR_OUT: [r, cos, sin, out_len, out_cos, out_sin] ---
         n_polar_out_denorm = coords_norm.clone()
         n_polar_out_denorm[:, 0] = coords_norm[:, 0] * (avg_dim / 2.0)  # r
-        n_polar_out_denorm[:, 1] = coords_norm[:, 1] * np.pi  # phi
-        n_polar_out_denorm[:, 2] = coords_norm[:, 2] * (avg_dim / 2.0)  # out_len
-        n_polar_out_denorm[:, 3] = coords_norm[:, 3] * np.pi  # out_phi
+        n_polar_out_denorm[:, 3] = coords_norm[:, 3] * (avg_dim / 2.0)  # out_len
         coords_img = torch.where(
             n_polar_out_mask.unsqueeze(1), n_polar_out_denorm, coords_img
         )
 
-        # --- N_SMOOTH: [r, phi, out_phi, len_in, len_out] ---
+        # --- N_SMOOTH: [r, cos, sin, out_cos, out_sin, in_len, out_len] ---
         n_smooth_denorm = coords_norm.clone()
         n_smooth_denorm[:, 0] = coords_norm[:, 0] * (avg_dim / 2.0)  # r
-        n_smooth_denorm[:, 1] = coords_norm[:, 1] * np.pi  # phi
-        n_smooth_denorm[:, 2] = coords_norm[:, 2] * np.pi  # out_phi
-        n_smooth_denorm[:, 3] = coords_norm[:, 3] * (avg_dim / 2.0)  # len_in
-        n_smooth_denorm[:, 4] = coords_norm[:, 4] * (avg_dim / 2.0)  # len_out
+        n_smooth_denorm[:, 5] = coords_norm[:, 5] * (avg_dim / 2.0)  # len_in
+        n_smooth_denorm[:, 6] = coords_norm[:, 6] * (avg_dim / 2.0)  # len_out
         coords_img = torch.where(
             n_smooth_mask.unsqueeze(1), n_smooth_denorm, coords_img
         )
@@ -692,39 +653,55 @@ class RelativePolarCommand(CommandRepresentation):
                 "N_POLAR_OUT",
                 "N_SMOOTH",
             ]:
-                # All these commands have an on-curve relative move (r, phi)
+                # All these commands have an on-curve relative move
                 mean_tensor[cmd_idx, 0] = stats["ON_CURVE_R"]["mean"]
                 std_tensor[cmd_idx, 0] = stats["ON_CURVE_R"]["std"]
                 if cmd_name == "L_POLAR" or cmd_name.startswith("N_"):
-                    mean_tensor[cmd_idx, 1] = stats["ON_CURVE_PHI"]["mean"]
-                    std_tensor[cmd_idx, 1] = stats["ON_CURVE_PHI"]["std"]
+                    mean_tensor[cmd_idx, 1] = stats["ON_CURVE_COS_PHI"]["mean"]
+                    std_tensor[cmd_idx, 1] = stats["ON_CURVE_COS_PHI"]["std"]
+                    mean_tensor[cmd_idx, 2] = stats["ON_CURVE_SIN_PHI"]["mean"]
+                    std_tensor[cmd_idx, 2] = stats["ON_CURVE_SIN_PHI"]["std"]
 
             if cmd_name == "N_POLAR":
-                mean_tensor[cmd_idx, 2] = stats["IN_HANDLE_LEN"]["mean"]
-                std_tensor[cmd_idx, 2] = stats["IN_HANDLE_LEN"]["std"]
-                mean_tensor[cmd_idx, 3] = stats["IN_HANDLE_PHI"]["mean"]
-                std_tensor[cmd_idx, 3] = stats["IN_HANDLE_PHI"]["std"]
-                mean_tensor[cmd_idx, 4] = stats["OUT_HANDLE_LEN"]["mean"]
-                std_tensor[cmd_idx, 4] = stats["OUT_HANDLE_LEN"]["std"]
-                mean_tensor[cmd_idx, 5] = stats["OUT_HANDLE_PHI"]["mean"]
-                std_tensor[cmd_idx, 5] = stats["OUT_HANDLE_PHI"]["std"]
-            elif cmd_name == "N_POLAR_IN":
-                mean_tensor[cmd_idx, 2] = stats["IN_HANDLE_LEN"]["mean"]
-                std_tensor[cmd_idx, 2] = stats["IN_HANDLE_LEN"]["std"]
-                mean_tensor[cmd_idx, 3] = stats["IN_HANDLE_PHI"]["mean"]
-                std_tensor[cmd_idx, 3] = stats["IN_HANDLE_PHI"]["std"]
-            elif cmd_name == "N_POLAR_OUT":
-                mean_tensor[cmd_idx, 2] = stats["OUT_HANDLE_LEN"]["mean"]
-                std_tensor[cmd_idx, 2] = stats["OUT_HANDLE_LEN"]["std"]
-                mean_tensor[cmd_idx, 3] = stats["OUT_HANDLE_PHI"]["mean"]
-                std_tensor[cmd_idx, 3] = stats["OUT_HANDLE_PHI"]["std"]
-            elif cmd_name == "N_SMOOTH":
-                mean_tensor[cmd_idx, 2] = stats["OUT_HANDLE_PHI"]["mean"]  # out_phi
-                std_tensor[cmd_idx, 2] = stats["OUT_HANDLE_PHI"]["std"]
-                mean_tensor[cmd_idx, 3] = stats["IN_HANDLE_LEN"]["mean"]  # len_in
+                # r, cos, sin, in_len, in_cos, in_sin, out_len, out_cos, out_sin
+                mean_tensor[cmd_idx, 3] = stats["IN_HANDLE_LEN"]["mean"]
                 std_tensor[cmd_idx, 3] = stats["IN_HANDLE_LEN"]["std"]
-                mean_tensor[cmd_idx, 4] = stats["OUT_HANDLE_LEN"]["mean"]  # len_out
-                std_tensor[cmd_idx, 4] = stats["OUT_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 4] = stats["IN_HANDLE_COS_PHI"]["mean"]
+                std_tensor[cmd_idx, 4] = stats["IN_HANDLE_COS_PHI"]["std"]
+                mean_tensor[cmd_idx, 5] = stats["IN_HANDLE_SIN_PHI"]["mean"]
+                std_tensor[cmd_idx, 5] = stats["IN_HANDLE_SIN_PHI"]["std"]
+                mean_tensor[cmd_idx, 6] = stats["OUT_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 6] = stats["OUT_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 7] = stats["OUT_HANDLE_COS_PHI"]["mean"]
+                std_tensor[cmd_idx, 7] = stats["OUT_HANDLE_COS_PHI"]["std"]
+                mean_tensor[cmd_idx, 8] = stats["OUT_HANDLE_SIN_PHI"]["mean"]
+                std_tensor[cmd_idx, 8] = stats["OUT_HANDLE_SIN_PHI"]["std"]
+            elif cmd_name == "N_POLAR_IN":
+                # r, cos, sin, in_len, in_cos, in_sin
+                mean_tensor[cmd_idx, 3] = stats["IN_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 3] = stats["IN_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 4] = stats["IN_HANDLE_COS_PHI"]["mean"]
+                std_tensor[cmd_idx, 4] = stats["IN_HANDLE_COS_PHI"]["std"]
+                mean_tensor[cmd_idx, 5] = stats["IN_HANDLE_SIN_PHI"]["mean"]
+                std_tensor[cmd_idx, 5] = stats["IN_HANDLE_SIN_PHI"]["std"]
+            elif cmd_name == "N_POLAR_OUT":
+                # r, cos, sin, out_len, out_cos, out_sin
+                mean_tensor[cmd_idx, 3] = stats["OUT_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 3] = stats["OUT_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 4] = stats["OUT_HANDLE_COS_PHI"]["mean"]
+                std_tensor[cmd_idx, 4] = stats["OUT_HANDLE_COS_PHI"]["std"]
+                mean_tensor[cmd_idx, 5] = stats["OUT_HANDLE_SIN_PHI"]["mean"]
+                std_tensor[cmd_idx, 5] = stats["OUT_HANDLE_SIN_PHI"]["std"]
+            elif cmd_name == "N_SMOOTH":
+                # r, cos, sin, out_cos, out_sin, in_len, out_len
+                mean_tensor[cmd_idx, 3] = stats["OUT_HANDLE_COS_PHI"]["mean"]
+                std_tensor[cmd_idx, 3] = stats["OUT_HANDLE_COS_PHI"]["std"]
+                mean_tensor[cmd_idx, 4] = stats["OUT_HANDLE_SIN_PHI"]["mean"]
+                std_tensor[cmd_idx, 4] = stats["OUT_HANDLE_SIN_PHI"]["std"]
+                mean_tensor[cmd_idx, 5] = stats["IN_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 5] = stats["IN_HANDLE_LEN"]["std"]
+                mean_tensor[cmd_idx, 6] = stats["OUT_HANDLE_LEN"]["mean"]
+                std_tensor[cmd_idx, 6] = stats["OUT_HANDLE_LEN"]["std"]
 
         cls._mean_tensor = mean_tensor
         cls._std_tensor = std_tensor
@@ -737,11 +714,14 @@ class RelativePolarCommand(CommandRepresentation):
             "M_abs_x": [],
             "M_abs_y": [],
             "ON_CURVE_R": [],
-            "ON_CURVE_PHI": [],
+            "ON_CURVE_COS_PHI": [],
+            "ON_CURVE_SIN_PHI": [],
             "IN_HANDLE_LEN": [],
-            "IN_HANDLE_PHI": [],
+            "IN_HANDLE_COS_PHI": [],
+            "IN_HANDLE_SIN_PHI": [],
             "OUT_HANDLE_LEN": [],
-            "OUT_HANDLE_PHI": [],
+            "OUT_HANDLE_COS_PHI": [],
+            "OUT_HANDLE_SIN_PHI": [],
         }
 
     @classmethod
@@ -758,26 +738,36 @@ class RelativePolarCommand(CommandRepresentation):
             "N_POLAR_OUT",
             "N_SMOOTH",
         ]:
-            # All these commands have an on-curve relative move (r, phi)
+            # All these commands have an on-curve relative move
             STAT_GROUPS["ON_CURVE_R"].append(coord_vec[0].item())
             if command == "L_POLAR" or command.startswith("N_"):
-                STAT_GROUPS["ON_CURVE_PHI"].append(coord_vec[1].item())
+                STAT_GROUPS["ON_CURVE_COS_PHI"].append(coord_vec[1].item())
+                STAT_GROUPS["ON_CURVE_SIN_PHI"].append(coord_vec[2].item())
 
             if command == "N_POLAR":
-                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[2].item())
-                STAT_GROUPS["IN_HANDLE_PHI"].append(coord_vec[3].item())
-                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[4].item())
-                STAT_GROUPS["OUT_HANDLE_PHI"].append(coord_vec[5].item())
+                # r, cos, sin, in_len, in_cos, in_sin, out_len, out_cos, out_sin
+                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[3].item())
+                STAT_GROUPS["IN_HANDLE_COS_PHI"].append(coord_vec[4].item())
+                STAT_GROUPS["IN_HANDLE_SIN_PHI"].append(coord_vec[5].item())
+                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[6].item())
+                STAT_GROUPS["OUT_HANDLE_COS_PHI"].append(coord_vec[7].item())
+                STAT_GROUPS["OUT_HANDLE_SIN_PHI"].append(coord_vec[8].item())
             elif command == "N_POLAR_IN":
-                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[2].item())
-                STAT_GROUPS["IN_HANDLE_PHI"].append(coord_vec[3].item())
+                # r, cos, sin, in_len, in_cos, in_sin
+                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[3].item())
+                STAT_GROUPS["IN_HANDLE_COS_PHI"].append(coord_vec[4].item())
+                STAT_GROUPS["IN_HANDLE_SIN_PHI"].append(coord_vec[5].item())
             elif command == "N_POLAR_OUT":
-                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[2].item())
-                STAT_GROUPS["OUT_HANDLE_PHI"].append(coord_vec[3].item())
+                # r, cos, sin, out_len, out_cos, out_sin
+                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[3].item())
+                STAT_GROUPS["OUT_HANDLE_COS_PHI"].append(coord_vec[4].item())
+                STAT_GROUPS["OUT_HANDLE_SIN_PHI"].append(coord_vec[5].item())
             elif command == "N_SMOOTH":
-                STAT_GROUPS["OUT_HANDLE_PHI"].append(coord_vec[2].item())  # out_phi
-                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[3].item())  # len_in
-                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[4].item())  # len_out
+                # r, cos, sin, out_cos, out_sin, in_len, out_len
+                STAT_GROUPS["OUT_HANDLE_COS_PHI"].append(coord_vec[3].item())
+                STAT_GROUPS["OUT_HANDLE_SIN_PHI"].append(coord_vec[4].item())
+                STAT_GROUPS["IN_HANDLE_LEN"].append(coord_vec[5].item())
+                STAT_GROUPS["OUT_HANDLE_LEN"].append(coord_vec[6].item())
 
     @classmethod
     def get_stats_for_sequence(cls, command_indices: torch.Tensor):

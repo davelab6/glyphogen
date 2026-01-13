@@ -70,7 +70,7 @@ class LSTMDecoder(nn.Module):
         coord_head_input = torch.cat([x, command_logits], dim=-1)
         coord_output = self.output_coords(coord_head_input)
         # Remove this once standardization works
-        coord_output = self.tanh(coord_output)
+        # coord_output = self.tanh(coord_output)
 
         return command_logits, coord_output, hidden_state
 

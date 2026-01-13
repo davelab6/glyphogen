@@ -516,28 +516,27 @@ def step(
         gt_targets = collated_batch["gt_targets"]
         if gt_targets:
             contour_image_idx = collated_batch["contour_image_idx"]
-            first_image_contour_mask = contour_image_idx == 0
+            for i in range(len(gt_targets)):
+                image_contour_mask = contour_image_idx == i
+                # Create a sliced version of outputs for the image
+                debug_outputs = ModelResults(
+                    **{
+                        field: [
+                            getattr(outputs, field)[i]
+                            for i, mask in enumerate(image_contour_mask)
+                            if mask
+                        ]
+                        for field in ModelResults._fields
+                        if field != "used_teacher_forcing"
+                    },
+                    used_teacher_forcing=outputs.used_teacher_forcing,
+                )
 
-            # Create a sliced version of outputs for the first image
-            debug_outputs = ModelResults(
-                **{
-                    field: [
-                        getattr(outputs, field)[i]
-                        for i, mask in enumerate(first_image_contour_mask)
-                        if mask
-                    ]
-                    for field in ModelResults._fields
-                    if field != "used_teacher_forcing"
-                },
-                used_teacher_forcing=outputs.used_teacher_forcing,
-            )
-
-            if debug_outputs.pred_commands:
                 dump_debug_sequences(
                     writer,
                     global_step,
-                    0,
-                    gt_targets[0]["gt_contours"],
+                    i,
+                    gt_targets[i]["gt_contours"],
                     debug_outputs,
                     loss_values,
                 )

@@ -157,8 +157,11 @@ class CommandRepresentation(ABC):
         return list(cls.grammar.keys())[index]
 
     @classmethod
-    def decode_command_one_hot(cls, one_hot: torch.Tensor) -> str:
-        index = int(torch.argmax(one_hot).item())
+    def decode_command_one_hot(cls, one_hot: Union[torch.Tensor, npt.NDArray]) -> str:
+        if isinstance(one_hot, np.ndarray):
+            index = int(np.argmax(one_hot))
+        else:
+            index = int(torch.argmax(one_hot).item())
         return cls.decode_command(index)
 
     @classmethod

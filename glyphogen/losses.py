@@ -85,6 +85,19 @@ def losses(
         gt_commands_norm, _ = MODEL_REPRESENTATION.split_tensor(gt_sequence_norm)
         gt_command_for_loss = gt_commands_norm[1 : pred_command.shape[0] + 1]
 
+        # Slice gt_coords_std to remove the SOS token and match the length of pred_coords_std
+        # gt_coords_std comes from outputs.gt_coords_std, which includes the SOS token.
+        gt_coords_std_sliced = gt_coords_std[1 : pred_command.shape[0] + 1]
+        # But now the pred coordinates have a different length, so pad the gt coords to match
+        if pred_coords_std.shape[0] > gt_coords_std_sliced.shape[0]:
+            padding_size = pred_coords_std.shape[0] - gt_coords_std_sliced.shape[0]
+            padding = torch.zeros(
+                (padding_size, gt_coords_std_sliced.shape[1]),
+                device=device,
+                dtype=gt_coords_std_sliced.dtype,
+            )
+            gt_coords_std_sliced = torch.cat([gt_coords_std_sliced, padding], dim=0)
+
         # 1. Command Loss (Cross-Entropy)
         command_loss = F.cross_entropy(
             pred_command.unsqueeze(0).permute(0, 2, 1),
@@ -95,7 +108,7 @@ def losses(
         # 2. Coordinate Loss (Hybrid)
         # 2a. Stable loss on standardized, relative coordinates
         coord_loss_relative = masked_relative_std_coordinate_loss(
-            device, gt_command_for_loss, gt_coords_std, pred_coords_std
+            device, gt_command_for_loss, gt_coords_std_sliced, pred_coords_std
         )
 
         # --- De-standardize and Unroll for other losses and metrics ---
@@ -237,6 +250,9 @@ def alignment_loss(
     num_valid_nodes = valid_nodes_mask.sum().item()
 
     for alignment_set in x_alignment_sets:
+        # This +1 is suspicious, but it *is* correct. Remember that in the alignment sets,
+        # the first node is index 0, which corresponds to the first on-curve point,
+        # but in our representation this is split over two nodes (the M and the first command).
         row_indices = [idx + 1 for idx in alignment_set]
         valid_set = [idx for idx in row_indices if idx < num_valid_nodes]
         if len(valid_set) > 1:
@@ -405,9 +421,6 @@ def dump_debug_sequences(
     pred_nodes = ", ".join(pred_debug_command_lists)
 
     debug_string = SVGGlyph.from_node_glyph(pred_glyph).to_svg_string()
-    import IPython
-
-    IPython.embed()
     gt_command_lists = NodeGlyph.decode(
         [x["sequence"].cpu() for x in gt_contours],
         MODEL_REPRESENTATION,
