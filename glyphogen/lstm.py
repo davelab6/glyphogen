@@ -19,6 +19,7 @@ class LSTMDecoder(nn.Module):
 
         self.command_embedding = nn.Linear(MODEL_REPRESENTATION.command_width, d_model)
         self.coord_embedding = nn.Linear(MODEL_REPRESENTATION.coordinate_width, d_model)
+        self.heading_embedding = nn.Linear(2, d_model)  # New heading embedding
         self.lstm = nn.LSTM(
             d_model + latent_dim, d_model, batch_first=True, proj_size=self.proj_size
         )
@@ -39,7 +40,7 @@ class LSTMDecoder(nn.Module):
         """
         Performs a single decoding step.
         Args:
-            input_token (Tensor): Shape (batch_size, 1, MODEL_REPRESENTATION.command_width + MODEL_REPRESENTATION.coordinate_width)
+            input_token (Tensor): Shape (batch_size, 1, MODEL_REPRESENTATION.command_width + MODEL_REPRESENTATION.coordinate_width + 2)
             context (Tensor): Shape (batch_size, 1, latent_dim)
             hidden_state (tuple, optional): Previous hidden state of the LSTM.
         Returns:
@@ -54,10 +55,18 @@ class LSTMDecoder(nn.Module):
             MODEL_REPRESENTATION.command_width : MODEL_REPRESENTATION.command_width
             + MODEL_REPRESENTATION.coordinate_width,
         ].float()
+        heading_input = input_token[
+            :,
+            :,
+            MODEL_REPRESENTATION.command_width
+            + MODEL_REPRESENTATION.coordinate_width :,
+        ].float()
 
         command_emb = self.command_embedding(command_input)
         coord_emb = self.coord_embedding(coord_input)
-        x = command_emb + coord_emb
+        heading_emb = self.heading_embedding(heading_input)
+
+        x = command_emb + coord_emb + heading_emb
         x = self.dropout(x)
 
         if context is not None:

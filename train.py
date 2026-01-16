@@ -15,6 +15,7 @@ from glyphogen.scheduler import get_cosine_annealing_with_warmup
 
 # Add the torchvision references to the path
 sys.path.append("vision/references/detection/")
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 from glyphogen.callbacks import (
     log_vectorizer_outputs,
@@ -118,7 +119,7 @@ def main(
         drop_last=True,
         shuffle=True,
         worker_init_fn=seed_worker,
-        num_workers=0,
+        num_workers=16,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -126,11 +127,24 @@ def main(
         collate_fn=collate_fn,
         drop_last=True,
         worker_init_fn=seed_worker,
-        num_workers=0,
+        num_workers=16,
     )
 
     if canary is not None:
         print("Reducing dataset for canary testing")
+        if canary == 1:
+            # Find the first non-null batch and repeat it 32 times
+            for batch in train_loader:
+                if batch is not None:
+                    canary_batch = batch
+                    break
+            train_loader = [canary_batch] * 32
+            for batch in test_loader:
+                if batch is not None:
+                    canary_batch = batch
+                    break
+            test_loader = [canary_batch] * 16
+            canary = 32
 
     train_batch_count = (
         len(train_loader) if canary is None else min(len(train_loader), canary)
@@ -144,17 +158,22 @@ def main(
     # optimizer = torch.optim.AdamW(
     #     model.parameters(), lr=LEARNING_RATE, weight_decay=0.005
     # )
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=torch.tensor(LEARNING_RATE))
+
+    @torch.compile(fullgraph=False)
+    def compiled_opt_step():
+        optimizer.step()
+
     # Work out gamma from number of steps and start/end learning rate
     # final_learning_rate = LEARNING_RATE * (gamma ** epochs)
-    # gamma = (FINAL_LEARNING_RATE / LEARNING_RATE) ** (1 / epochs)
-    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
+    gamma = (FINAL_LEARNING_RATE / LEARNING_RATE) ** (1 / epochs)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     # Note we are stepping the scheduler each batch, not each epoch
-    alpha_f = FINAL_LEARNING_RATE / LEARNING_RATE
-    scheduler = get_cosine_annealing_with_warmup(
-        optimizer, WARMUP_STEPS, train_batch_count, alpha_f
-    )
+    # alpha_f = FINAL_LEARNING_RATE / LEARNING_RATE
+    # scheduler = get_cosine_annealing_with_warmup(
+    #     optimizer, WARMUP_STEPS, train_batch_count, alpha_f
+    # )
 
     # Training Loop
     train_writer = SummaryWriter(
@@ -167,6 +186,7 @@ def main(
         "Hyperparameters", open("glyphogen/hyperparameters.py").read(), 0
     )
     best_val_metric = 0
+    best_val_loss = 12345
     global_step = 0
     torch._dynamo.config.capture_scalar_outputs = True
     if debug_grads:
@@ -216,7 +236,7 @@ def main(
 
             losses["total_loss"].backward()
             # torch.nn.utils.clip_grad_value_(model.parameters(), 1.0)
-            optimizer.step()
+            compiled_opt_step()
             for loss_key, loss_value in losses.items():
                 loss_accumulators[loss_key] += loss_value.item()
 
@@ -229,10 +249,10 @@ def main(
             )
 
             global_step += 1
-            scheduler.step()  # Step the scheduler each batch
-            train_writer.add_scalar(
-                "Learning Rate", scheduler.get_last_lr()[0], global_step
-            )
+        scheduler.step()  # Step the scheduler each epoch
+        train_writer.add_scalar(
+            "Learning Rate", scheduler.get_last_lr()[0], global_step
+        )
 
         dump_accumulators(loss_accumulators, train_writer, epoch, i)
         train_writer.flush()
@@ -285,10 +305,10 @@ def main(
             )
 
             # Checkpoint
-            if avg_val_metric > best_val_metric:
-                best_val_metric = avg_val_metric
-                # torch.save(model.state_dict(), model_name)
-                # print(f"Saved best model to {model_name}")
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(model.state_dict(), model_name)
+                print(f"Saved best model to {model_name}")
 
             # Callbacks
             log_bounding_boxes(model, test_loader, val_writer, epoch)

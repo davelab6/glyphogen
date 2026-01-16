@@ -170,14 +170,15 @@ class CommandRepresentation(ABC):
         or (B, N, command_width + coordinate_width) into a tuple of
         (commands, coordinates) tensors."""
         command_width = cls.command_width
-        if tensor.dim() == 2:
+        dim = tensor.dim() if isinstance(tensor, torch.Tensor) else len(tensor.shape)
+        if dim == 2:
             commands = tensor[:, :command_width]
             coordinates = tensor[:, command_width:]
-        elif tensor.dim() == 3:
+        elif dim == 3:
             commands = tensor[:, :, :command_width]
             coordinates = tensor[:, :, command_width:]
         else:
-            raise ValueError(f"Unsupported tensor dimension: {tensor.dim()}")
+            raise ValueError(f"Unsupported tensor dimension: {dim}")
         return commands, coordinates
 
     def __init__(self, command: str, coordinates: List[Union[int, float]]):

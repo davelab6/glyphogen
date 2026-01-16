@@ -2,9 +2,9 @@
 LATENT_DIM = 32
 D_MODEL = 1024
 PROJ_SIZE = D_MODEL // 4
-RATE = 0  # Specifically, the dropout rate
+RATE = 0.01  # Specifically, the dropout rate
 EPOCHS = 2000
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 RASTER_LOSS_WEIGHT = 15000.0
 
 # Vectorization sub-model weights
@@ -25,7 +25,7 @@ HUBER_DELTA = (
 LOSS_IMAGE_SIZE = 256  # Size to rasterize images to for raster loss calculation
 
 LEARNING_RATE = 1e-6
-FINAL_LEARNING_RATE = 1e-6
+FINAL_LEARNING_RATE = 1e-8
 WARMUP_STEPS = 6000
 
 GEN_IMAGE_SIZE = (512, 512)

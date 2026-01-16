@@ -321,17 +321,15 @@ class NodeCommand(CommandRepresentation):
         return torch.cat([commands, denormalized_coords], dim=-1)
 
     @classmethod
-    def unroll_relative_coordinates(cls, sequence: torch.Tensor) -> torch.Tensor:
+    def compute_deltas(cls, sequence: torch.Tensor) -> torch.Tensor:
         """
-        Converts a sequence with relative coordinates to one with absolute coordinates.
-        This is a differentiable and vectorized operation.
+        Computes the (dx, dy) deltas for each step in the sequence.
+        Handles L, N, NS, NH, NV, NCI, NCO, LH, LV.
+        Returns tensor of shape (..., 2).
         """
         commands, rel_coords = cls.split_tensor(sequence)
-        abs_coords = torch.zeros_like(rel_coords)
-
         command_indices = torch.argmax(commands, dim=-1)
 
-        m_index = cls.encode_command("M")
         l_index = cls.encode_command("L")
         lh_index = cls.encode_command("LH")
         lv_index = cls.encode_command("LV")
@@ -354,28 +352,43 @@ class NodeCommand(CommandRepresentation):
         )
 
         # Create deltas without in-place assignment to keep dynamo happy
-        zeros_like_xy = torch.zeros_like(rel_coords[:, 0:2])
+        zeros_like_xy = torch.zeros_like(rel_coords[..., 0:2])
 
         # Deltas for relative XY commands
         deltas_xy = torch.where(
-            relative_xy_mask.unsqueeze(1), rel_coords[:, 0:2], zeros_like_xy
+            relative_xy_mask.unsqueeze(-1), rel_coords[..., 0:2], zeros_like_xy
         )
 
         # Deltas for LH and LV (single-axis moves)
         lh_mask = command_indices == lh_index
         lv_mask = command_indices == lv_index
-        lh_vec = torch.where(
-            lh_mask, rel_coords[:, 0], torch.zeros_like(rel_coords[:, 0])
-        )
-        lv_vec = torch.where(
-            lv_mask, rel_coords[:, 0], torch.zeros_like(rel_coords[:, 0])
-        )
+        
+        # Helper for scalar zero
+        zeros_scalar = torch.zeros_like(rel_coords[..., 0])
+
+        lh_vec = torch.where(lh_mask, rel_coords[..., 0], zeros_scalar)
+        lv_vec = torch.where(lv_mask, rel_coords[..., 0], zeros_scalar)
 
         # Combine into a single delta tensor
         deltas = torch.stack(
-            (deltas_xy[:, 0] + lh_vec, deltas_xy[:, 1] + lv_vec), dim=1
+            (deltas_xy[..., 0] + lh_vec, deltas_xy[..., 1] + lv_vec), dim=-1
         )
+        return deltas
 
+    @classmethod
+    def unroll_relative_coordinates(cls, sequence: torch.Tensor) -> torch.Tensor:
+        """
+        Converts a sequence with relative coordinates to one with absolute coordinates.
+        This is a differentiable and vectorized operation.
+        """
+        commands, rel_coords = cls.split_tensor(sequence)
+        
+        # Re-use the new helper
+        deltas = cls.compute_deltas(sequence)
+        
+        command_indices = torch.argmax(commands, dim=-1)
+        m_index = cls.encode_command("M")
+        
         # Seed absolute positions with the absolute move from the M command (vectorized)
         m_mask = command_indices == m_index
         base_pos = torch.where(
@@ -386,6 +399,16 @@ class NodeCommand(CommandRepresentation):
         abs_positions = torch.cumsum(deltas + base_pos, dim=0)
 
         # Mask for commands that have position coordinates
+        l_index = cls.encode_command("L")
+        lh_index = cls.encode_command("LH")
+        lv_index = cls.encode_command("LV")
+        n_index = cls.encode_command("N")
+        ns_index = cls.encode_command("NS")
+        nh_index = cls.encode_command("NH")
+        nv_index = cls.encode_command("NV")
+        nci_index = cls.encode_command("NCI")
+        nco_index = cls.encode_command("NCO")
+
         has_pos_coords_mask = (
             m_mask
             | (command_indices == l_index)

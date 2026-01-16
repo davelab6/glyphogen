@@ -68,12 +68,22 @@ def log_vectorizer_outputs(
                 )
                 # Now re-encode as SVG
                 svg_contours = ng.encode(SVGCommand)
+                # Filter out dead
+                svg_contours = [
+                    torch.from_numpy(c) for c in svg_contours if c.shape[0] > 0
+                ]
 
-                # Fix this at some point
-
-                # predicted_raster = rasterize_batch(
-                #     [svg_contours], SVGCommand, device=device
-                # )[0]
+                if svg_contours:
+                    predicted_raster = rasterize_batch(
+                        [
+                            [
+                                SVGCommand.split_tensor(svg_contour)
+                                for svg_contour in svg_contours
+                            ]
+                        ],
+                        SVGCommand,
+                        device=device,
+                    )[0]
 
             # Create a 3-channel overlay for visualization
             # We want predicted in red, ground truth in green, blue channel empty
